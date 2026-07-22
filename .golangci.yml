@@ -1,0 +1,89 @@
+# golangci-lint 設定 — textro99-server
+# 目的: 層アーキの依存ルールを機械的に強制する（docs/architecture.md）。
+#   - コア game は他の internal 部品/スパインを import しない（proto は可）
+#   - 層3部品（targeting/odai/config）は game/proto へ向かうのみ（スパイン参照禁止）
+# 実行: golangci-lint run
+#
+# ※ モジュール名を textro99 から変更したら、下の import パスも一括置換すること。
+
+version: "2"
+
+linters:
+  enable:
+    - depguard
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+
+  settings:
+    depguard:
+      rules:
+        # ── ルール1: コア game は他の internal 部品/スパインを import しない ──
+        # game が import してよいのは 標準ライブラリ・proto・game 自身のみ。
+        # 部品(targeting/odai/config/bot/store)やスパイン(room/matchmaking/transport)への
+        # 依存は「逆流」で設計違反。依存は常に 部品/スパイン → game の一方向。
+        game-core-isolation:
+          files:
+            - "**/internal/game/**"
+          allow:
+            - "$gostd"
+            - "textro99/internal/proto"
+            - "textro99/internal/game"
+          deny:
+            - pkg: "textro99/internal/targeting"
+              desc: "game は作戦の具体実装を知らない。TargetingStrategy を注入して呼ぶ（DIP）。"
+            - pkg: "textro99/internal/odai"
+              desc: "game はお題供給の実装を知らない。WordSource を注入して呼ぶ（DIP）。"
+            - pkg: "textro99/internal/config"
+              desc: "game は設定取得を知らない。ConfigProvider を注入して呼ぶ（DIP）。"
+            - pkg: "textro99/internal/bot"
+              desc: "game は bot を知らない。"
+            - pkg: "textro99/internal/store"
+              desc: "game は永続化を知らない。"
+            - pkg: "textro99/internal/room"
+              desc: "game はスパイン(駆動)を知らない。room が game を駆動する一方向。"
+            - pkg: "textro99/internal/matchmaking"
+              desc: "game はマッチングを知らない。"
+            - pkg: "textro99/internal/transport"
+              desc: "game は通信を知らない（純粋なコアに保つ）。"
+
+        # ── ルール2: コア game は I/O・通信の具象に依存しない ──
+        # 純粋・Tick(dt)駆動に保ち、Goでヘッドレスにシミュレートできる状態を維持する。
+        game-no-io:
+          files:
+            - "**/internal/game/**"
+          deny:
+            - pkg: "net/http"
+              desc: "game はHTTPを扱わない（I/Oは transport/config の責務）。"
+            - pkg: "github.com/coder/websocket"
+              desc: "game はWebSocketを知らない（通信は transport 層）。"
+
+        # ── ルール3: 層3部品は game/proto へ向かうのみ ──
+        # targeting/odai/config は game(ports実装のため)・proto・標準ライブラリだけに依存する。
+        # スパイン(room/matchmaking/transport)への依存は隔離を壊すため禁止。
+        modules-implement-ports:
+          files:
+            - "**/internal/targeting/**"
+            - "**/internal/odai/**"
+            - "**/internal/config/**"
+          allow:
+            - "$gostd"
+            - "textro99/internal/game"
+            - "textro99/internal/proto"
+            - "textro99/internal/targeting"
+            - "textro99/internal/odai"
+            - "textro99/internal/config"
+          deny:
+            - pkg: "textro99/internal/room"
+              desc: "部品はスパイン(駆動)に依存しない。"
+            - pkg: "textro99/internal/matchmaking"
+              desc: "部品はマッチングに依存しない。"
+            - pkg: "textro99/internal/transport"
+              desc: "部品は通信層に依存しない。"
+
+# 補足:
+# - allow に列挙したパッケージ以外の internal 参照は、そのファイル群では原則禁止になる。
+# - 新しい正当な依存を足したい時は、まず依存の向き（内向き＝gameへ向かうか）を確認してから allow に追加する。
+# - game は部品(targeting/odai)を deny 側で切っている。作戦/お題は game/ports.go の interface を
+#   注入して呼ぶ（DIP＝コアが継ぎ目を所有し、部品が実装する）。

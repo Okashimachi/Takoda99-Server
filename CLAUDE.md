@@ -1,0 +1,1 @@
+このプロジェクトでは複数のAIコーディングツール（Claude Code / Codex / Cursor 等）を使う可能性があるため、ツール非依存の AGENTS.md にルール本体を置き、CLAUDE.md は参照専用にしている。ルールを更新する時は AGENTS.md 側を編集する（この CLAUDE.md は編集しない）。

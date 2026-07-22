@@ -1,0 +1,58 @@
+name: textro99-server-ci
+
+# 目的:
+#  1. コア game のテストが常時グリーンであることを保証（コアの安全保証）
+#  2. 依存ルール（game が部品/スパインを import しない等）を depguard で機械強制
+#  3. 全体のビルド・テスト・vet を通す
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  core-safety:
+    name: コア安全保証（game テスト）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+      # コア game のテストが落ちる変更はここで止まる。マージ不可。
+      - name: go test (game core)
+        run: go test -race ./internal/game/...
+
+  build-and-test:
+    name: ビルド & 全体テスト
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+      - name: go build
+        run: go build ./...
+      - name: go test (all)
+        run: go test ./...
+      - name: go vet
+        run: go vet ./...
+
+  arch-rules:
+    name: 依存ルール検査（depguard）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+      # .golangci.yml の depguard で、rules の逆流 import 等を弾く。
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout=5m
