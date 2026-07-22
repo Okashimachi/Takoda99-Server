@@ -52,7 +52,6 @@ jobs:
           cache: true
       # .golangci.yml の depguard で、rules の逆流 import 等を弾く。
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v7
         with:
-          version: latest
-          args: --timeout=5m
+          version: v2.6.2
