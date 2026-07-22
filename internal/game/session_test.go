@@ -152,7 +152,7 @@ func TestSession_ApplyAttack_NoTargetKeepsCombo(t *testing.T) {
 		}
 	}
 	s.ApplyDakenClear("a", proto.DakenClearReport{DakenId: da}) // combo=14
-	s.eliminate("b")
+	s.eliminateWithKO(s.players["b"], nil)
 
 	res := s.ApplyAttack("a", proto.AttackRequest{})
 	if af, _, ok := find[proto.AttackFailed](res); !ok || af.Reason != proto.FailNoTarget {
@@ -169,7 +169,7 @@ func TestSession_TickFinishesWhenOneLeft(t *testing.T) {
 	if res := s.Tick(150); res != nil { // まだ2人
 		t.Fatalf("2人生存中は終了しない: %+v", res)
 	}
-	s.eliminate("b")
+	s.eliminateWithKO(s.players["b"], nil)
 	res := s.Tick(150)
 	if s.State() != Finished {
 		t.Fatalf("生存1人で Finished になるべき: %v", s.State())
