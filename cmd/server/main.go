@@ -28,13 +28,18 @@ func main() {
 	mode := flag.String("mode", "match", "solo | match")
 	addr := flag.String("addr", ":8080", "listen address")
 	bots := flag.Int("bots", 3, "solo=補完Bot数 / match=Bot補完してこの人数まで埋める")
+	configURL := flag.String("config-url", "", "GameParameters を JSON で返す HTTPエンドポイント（空ならデフォルト値で起動）")
 	flag.Parse()
 
 	ctx := context.Background()
 
-	params, err := config.DefaultLoader{}.Load(ctx)
+	var provider game.ConfigProvider = config.DefaultLoader{}
+	if *configURL != "" {
+		provider = config.NewRemoteLoader(*configURL)
+	}
+	params, err := provider.Load(ctx)
 	if err != nil {
-		log.Printf("config: デフォルト値で起動: %v", err)
+		log.Printf("config: 取得失敗のためデフォルト値で起動: %v", err)
 	}
 	deps := app.DefaultDeps()
 	deps.Params = params // config から取得した値で上書き（失敗時はデフォルトのまま）
