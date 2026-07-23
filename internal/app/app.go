@@ -29,11 +29,19 @@ type Deps struct {
 	Clock      room.Clock
 }
 
-// DefaultStrategies は現状実装済みの作戦を登録した集合を返す（残りの作戦は後輩PRで追加される）。
+// DefaultStrategies は作戦0〜9の全実装を登録した集合を返す。
 func DefaultStrategies() map[int]game.TargetingStrategy {
 	return map[int]game.TargetingStrategy{
+		0: targeting.SplitAttackStrategy{},
+		1: targeting.CounterStrategy{},
+		2: targeting.FinisherStrategy{},
 		3: targeting.BadgeHunterStrategy{},
 		4: targeting.RandomStrategy{},
+		5: targeting.RevengeStrategy{},
+		6: targeting.TallPoppyStrategy{},
+		7: targeting.NeighborStrategy{},
+		8: targeting.PileOnStrategy{},
+		9: targeting.PacifistHunterStrategy{},
 	}
 }
 

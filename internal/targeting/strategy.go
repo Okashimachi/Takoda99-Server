@@ -43,3 +43,43 @@ func PickRandomOther(ctx game.TargetingContext) []game.PlayerId {
 
 // single は1名を集合として返す小ヘルパ（各作戦の可読性用）。
 func single(id game.PlayerId) []game.PlayerId { return []game.PlayerId{id} }
+
+// aliveContains は id が現在の生存者に含まれるかを返す（カウンター/リベンジで、
+// 予告主・直近着弾者が既に脱落していないかの確認に使う）。
+func aliveContains(ctx game.TargetingContext, id game.PlayerId) bool {
+	for _, p := range ctx.Alive {
+		if p.PlayerId == id {
+			return true
+		}
+	}
+	return false
+}
+
+// maxBy は Others のうち score が最大の相手を集め、同値はランダムで1名返す。
+// score<=0 の扱いは呼び出し側に委ねる（作戦8の「最大0なら該当なし」等）。
+func maxBy(ctx game.TargetingContext, score func(game.PlayerView) int) (best int, tied []game.PlayerId) {
+	others := ctx.Others()
+	if len(others) == 0 {
+		return 0, nil
+	}
+	best = score(others[0])
+	for _, p := range others[1:] {
+		if s := score(p); s > best {
+			best = s
+		}
+	}
+	for _, p := range others {
+		if score(p) == best {
+			tied = append(tied, p.PlayerId)
+		}
+	}
+	return best, tied
+}
+
+// pickTied はタイ集合からランダムに1名返す（空なら空）。
+func pickTied(ctx game.TargetingContext, tied []game.PlayerId) []game.PlayerId {
+	if len(tied) == 0 {
+		return nil
+	}
+	return single(tied[ctx.Rng.Intn(len(tied))])
+}
