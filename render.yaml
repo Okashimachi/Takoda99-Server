@@ -1,0 +1,17 @@
+# Render Blueprint。Render ダッシュボードで「New > Blueprint」からこのリポジトリを指定すると
+# 下記のサービスが作成される（Dockerfile でビルド）。
+# ※ free プランはスリープあり。本番前に Starter 以上へ（#72）。
+services:
+  - type: web
+    name: textro99-server
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /healthz
+    autoDeploy: true
+    # 起動モードやBot補完数を変えたい場合はここで dockerCommand を上書きする:
+    # dockerCommand: /server --mode match --bots 5
+    # 調整値をリモート取得する場合は config-front の URL を渡す:
+    # envVars:
+    #   - key: CONFIG_URL
+    #     sync: false   # ダッシュボードで値を設定
