@@ -12,6 +12,7 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"sync/atomic"
 
@@ -26,16 +27,20 @@ import (
 
 func main() {
 	mode := flag.String("mode", "match", "solo | match")
-	addr := flag.String("addr", ":8080", "listen address")
+	addr := flag.String("addr", listenAddr(), "listen address（既定は $PORT があればそれ）")
 	bots := flag.Int("bots", 3, "solo=補完Bot数 / match=Bot補完してこの人数まで埋める")
 	configURL := flag.String("config-url", "", "GameParameters を JSON で返す HTTPエンドポイント（空ならデフォルト値で起動）")
 	flag.Parse()
 
 	ctx := context.Background()
 
+	url := *configURL
+	if url == "" {
+		url = os.Getenv("CONFIG_URL") // Render 等では env で渡すのが自然
+	}
 	var provider game.ConfigProvider = config.DefaultLoader{}
-	if *configURL != "" {
-		provider = config.NewRemoteLoader(*configURL)
+	if url != "" {
+		provider = config.NewRemoteLoader(url)
 	}
 	params, err := provider.Load(ctx)
 	if err != nil {
@@ -84,10 +89,24 @@ func main() {
 		})
 	}
 
+	// ヘルスチェック（Render 等の稼働監視・疎通確認用）。
+	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+
 	log.Printf("textro99 server: mode=%s addr=%s", *mode, *addr)
 	if err := http.ListenAndServe(*addr, nil); err != nil {
 		log.Fatalf("listen: %v", err)
 	}
+}
+
+// listenAddr は addr フラグの既定値。Render 等は $PORT を渡すのでそれを優先する。
+func listenAddr() string {
+	if p := os.Getenv("PORT"); p != "" {
+		return ":" + p
+	}
+	return ":8080"
 }
 
 func welcome(conn transport.Connection, id game.PlayerId) {
