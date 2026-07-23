@@ -68,7 +68,8 @@ func RunMatch(ctx context.Context, d Deps, players []matchmaking.Player) {
 		conns[p.Id] = p.Conn
 	}
 	sess := game.NewSession(nextMatchID(), d.Params, d.Strategies, d.Words, newRng(), inits)
-	rm := room.New(sess, conns, d.Params.Session.TickIntervalMs, d.Clock)
+	pub := transport.NewFullPublisher(d.Params.Session.PublishIntervalMs)
+	rm := room.New(sess, conns, d.Params.Session.TickIntervalMs, d.Clock, pub)
 	rm.Run(ctx)
 }
 

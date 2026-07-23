@@ -40,23 +40,26 @@ type inbound struct {
 	env proto.Envelope
 }
 
-// Room は1試合を駆動する。session/conns/tickMs/clock を注入し、Run(ctx) で回す。
+// Room は1試合を駆動する。session/conns/tickMs/clock/publisher を注入し、Run(ctx) で回す。
 type Room struct {
-	session *game.Session
-	conns   map[game.PlayerId]transport.Connection
-	tickMs  int
-	clock   Clock
-	inbox   chan inbound
-	done    chan struct{}
+	session   *game.Session
+	conns     map[game.PlayerId]transport.Connection
+	tickMs    int
+	clock     Clock
+	publisher transport.StatePublisher // nil 可（盤面配信なし）
+	inbox     chan inbound
+	done      chan struct{}
+	elapsedMs int64 // 配信間引き用の単調時計（tick を積算）
 }
 
 // New は Room を作る。conns は playerId→接続。tickMs は tick 周期(ms)。
-func New(session *game.Session, conns map[game.PlayerId]transport.Connection, tickMs int, clock Clock) *Room {
+// publisher は盤面の定期配信（#32）。nil なら配信しない。
+func New(session *game.Session, conns map[game.PlayerId]transport.Connection, tickMs int, clock Clock, publisher transport.StatePublisher) *Room {
 	if tickMs <= 0 {
 		tickMs = 150
 	}
 	return &Room{
-		session: session, conns: conns, tickMs: tickMs, clock: clock,
+		session: session, conns: conns, tickMs: tickMs, clock: clock, publisher: publisher,
 		inbox: make(chan inbound, 256), done: make(chan struct{}),
 	}
 }
@@ -82,9 +85,20 @@ func (r *Room) Run(ctx context.Context) {
 		case in := <-r.inbox:
 			r.dispatch(r.handle(in))
 		case <-ticker.C():
+			r.elapsedMs += int64(r.tickMs)
 			r.dispatch(r.session.Tick(r.tickMs))
+			r.publish()
 		}
 	}
+}
+
+// publish は盤面スナップを（間引き判断は publisher 任せで）配信する。
+func (r *Room) publish() {
+	if r.publisher == nil {
+		return
+	}
+	players, aliveCount := r.session.Snapshot()
+	r.publisher.Publish(r.elapsedMs, players, aliveCount, r.conns)
 }
 
 // readConn は1接続を読み続け、受信を inbox へ流す。接続 close / Room 終了で抜ける。

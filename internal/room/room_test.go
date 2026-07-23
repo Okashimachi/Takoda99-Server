@@ -64,7 +64,7 @@ func TestRoom_CoreLoopThroughConnection(t *testing.T) {
 	sb, _ := transport.Pipe()
 	conns := map[game.PlayerId]transport.Connection{"a": sa, "b": sb}
 
-	rm := New(sess, conns, 150, nopClock{})
+	rm := New(sess, conns, 150, nopClock{}, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go rm.Run(ctx)
