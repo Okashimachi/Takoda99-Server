@@ -43,7 +43,12 @@ func New(conn transport.Connection, cfg Config, rng *rand.Rand) *Bot {
 
 // Run は Bot を駆動する。受信でお題を貯め、一定間隔で1つずつクリア報告し、たまに攻撃する。
 // GameOver 受信・接続切断・ctx キャンセルで終了する。
+//
+// 終了時に接続を Close する。これにより、脱落して読むのをやめた Bot へサーバーが
+// ブロードキャストし続けても、Send が即エラー（ブロックしない）になり、room ループが
+// 死んだ Bot で詰まらない（99人スケールで重要）。
 func (b *Bot) Run(ctx context.Context) {
+	defer func() { _ = b.conn.Close() }()
 	iv := time.Duration(b.cfg.ClearIntervalMs) * time.Millisecond
 	if iv <= 0 {
 		iv = 500 * time.Millisecond
