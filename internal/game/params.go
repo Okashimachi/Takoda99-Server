@@ -65,9 +65,10 @@ type MatchingParams struct {
 	StartCountdownMs int `json:"startCountdownMs"`
 }
 
-// SessionParams: 試合ループの調整値。tick 周期もハードコードせずここで持つ（決定4）。
+// SessionParams: 試合ループの調整値。tick 周期・状態配信間隔もハードコードせずここで持つ（決定4）。
 type SessionParams struct {
-	TickIntervalMs int `json:"tickIntervalMs"`
+	TickIntervalMs    int `json:"tickIntervalMs"`
+	PublishIntervalMs int `json:"publishIntervalMs"` // 99人ミニ盤面の配信間隔（tickより低頻度で帯域を抑える）
 }
 
 // DefaultParameters はリモートコンフィグ取得失敗時のフォールバック内蔵デフォルト。
@@ -109,7 +110,8 @@ func DefaultParameters() GameParameters {
 			StartCountdownMs: 15000,
 		},
 		Session: SessionParams{
-			TickIntervalMs: 150,
+			TickIntervalMs:    150,
+			PublishIntervalMs: 250, // 約4Hz。KO等の即時イベントとは別に、盤面は低頻度スナップ
 		},
 	}
 }

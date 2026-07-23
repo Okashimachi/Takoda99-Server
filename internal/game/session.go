@@ -126,6 +126,11 @@ func NewSession(id proto.MatchId, params GameParameters, strategies map[int]Targ
 // State は現在の状態を返す。
 func (s *Session) State() SessionState { return s.state }
 
+// Snapshot は現在の全プレイヤー要約と生存人数を返す（room/StatePublisher が盤面の定期配信に使う）。
+func (s *Session) Snapshot() ([]proto.PlayerSummary, int) {
+	return s.summaries(), s.aliveCount
+}
+
 // Start は WaitingStart→Running へ遷移し、各プレイヤーへ MatchStart（初期お題つき）を配る。
 func (s *Session) Start() []Outbound {
 	if s.state != WaitingStart {
