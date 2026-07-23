@@ -163,6 +163,75 @@ func TestSession_ApplyAttack_NoTargetKeepsCombo(t *testing.T) {
 	}
 }
 
+// startAndDaken は Start して pid の初期お題IDを返すヘルパ。
+func startAndDaken(t *testing.T, s *Session, pid PlayerId) proto.DakenId {
+	t.Helper()
+	out := s.Start()
+	for _, o := range out {
+		if ms, ok := o.Msg.(proto.MatchStart); ok && o.To.PlayerId == pid {
+			return ms.InitialDaken.DakenId
+		}
+	}
+	t.Fatalf("%s の MatchStart が無い", pid)
+	return ""
+}
+
+// clearOnce は pid の dakenId を missCount 付きでクリアし、次に発行された Normal お題IDを返す。
+func clearOnce(t *testing.T, s *Session, pid PlayerId, dakenId proto.DakenId, missCount int) proto.DakenId {
+	t.Helper()
+	res := s.ApplyDakenClear(pid, proto.DakenClearReport{DakenId: dakenId, MissCount: missCount})
+	di, _, ok := find[proto.DakenIssued](res)
+	if !ok || len(di.Daken) == 0 {
+		t.Fatalf("クリア後に次のお題が発行されていない: %+v", res)
+	}
+	return di.Daken[0].DakenId
+}
+
+// GameOver.TypingStats に クリア回数・ミス数・最大コンボ・経過時間が反映される（#51）。
+// 特に MaxCombo は「終了時点のコンボ」ではなく高水位であること（ミスで減衰しても下がらない）を検証。
+func TestSession_GameOverTypingStats_Winner(t *testing.T) {
+	s := newTestSession(t, "a", "b")
+	d := startAndDaken(t, s, "a")
+	d = clearOnce(t, s, "a", d, 0)  // combo 14, cleared 1, maxCombo 14
+	d = clearOnce(t, s, "a", d, 0)  // combo 28, cleared 2, maxCombo 28
+	_ = clearOnce(t, s, "a", d, 2)  // combo 28-3*2=22, cleared 3, totalMiss 1, maxCombo は 28 のまま
+
+	if s.players["a"].p.Combo() != 22 {
+		t.Fatalf("前提: 減衰後コンボ=22 のはず, got %d", s.players["a"].p.Combo())
+	}
+
+	s.eliminateWithKO(s.players["b"], nil)
+	res := s.Tick(150) // 生存1人で Finished → a へ GameOver
+
+	go1, toPid, ok := find[proto.GameOver](res)
+	if !ok || toPid != "a" || go1.Rank != 1 {
+		t.Fatalf("優勝者へ GameOver(rank1): %+v to=%s ok=%v", go1, toPid, ok)
+	}
+	want := proto.TypingStats{TotalDakenCleared: 3, TotalMiss: 1, MaxCombo: 28, ElapsedMs: 150}
+	if go1.TypingStats != want {
+		t.Fatalf("勝者 TypingStats=%+v, want %+v", go1.TypingStats, want)
+	}
+}
+
+// 脱落プレイヤーの GameOver（eliminateWithKO 経由）にも統計が反映される（#51）。
+func TestSession_GameOverTypingStats_Eliminated(t *testing.T) {
+	s := newTestSession(t, "a", "b")
+	d := startAndDaken(t, s, "b")
+	s.Tick(200)                    // 経過時間を進める（2人生存中は終了しない）
+	d = clearOnce(t, s, "b", d, 0) // cleared 1, combo 14, maxCombo 14
+	_ = clearOnce(t, s, "b", d, 1) // cleared 2, totalMiss 1, combo 14-3=11, maxCombo は 14 のまま
+
+	out := s.eliminateWithKO(s.players["b"], nil)
+	go1, toPid, ok := find[proto.GameOver](out)
+	if !ok || toPid != "b" {
+		t.Fatalf("脱落者 b へ GameOver: %+v to=%s ok=%v", go1, toPid, ok)
+	}
+	want := proto.TypingStats{TotalDakenCleared: 2, TotalMiss: 1, MaxCombo: 14, ElapsedMs: 200}
+	if go1.TypingStats != want {
+		t.Fatalf("脱落者 TypingStats=%+v, want %+v", go1.TypingStats, want)
+	}
+}
+
 func TestSession_TickFinishesWhenOneLeft(t *testing.T) {
 	s := newTestSession(t, "a", "b")
 	s.Start()

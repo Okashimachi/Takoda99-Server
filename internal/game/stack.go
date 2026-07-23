@@ -82,7 +82,7 @@ func (s *Session) eliminateWithKO(ps *playerState, killer *PlayerId) []Outbound 
 		broadcastMsg(proto.KoNotified{AttackerId: attackerId, VictimId: ps.id, BadgesTransferred: transferred}),
 		to(ps.id, proto.GameOver{
 			Rank: rank, KoCount: ps.koCount, FinalBadgeCount: ps.badges,
-			TypingStats: proto.TypingStats{MaxCombo: ps.p.Combo()},
+			TypingStats: s.typingStats(ps),
 		}),
 		broadcastMsg(proto.PlayerListUpdated{Players: s.summaries(), AliveCount: s.aliveCount}),
 	}
