@@ -2,36 +2,55 @@ package odai
 
 import "textro99/internal/game"
 
-// ┌──────────────────────────────────────────────────────────────────┐
-// │ 【後輩の主担当】このファイルのプレースホルダ辞書を用意・拡充するのがタスクの中心。      │
-// │ テーマ（寿司モチーフ）は変更予定なので、確定した単語である必要はない。ダミーでよい。    │
-// │ ただし各語の KeystrokeCount は「その語を正準ローマ字で打つ打鍵数」を入れること（決定C）。│
-// └──────────────────────────────────────────────────────────────────┘
+// data.go は【#11】出題語のプレースホルダ辞書。難易度段階0〜10で段階的に難しくする。
 //
-// 例: "ねこ"→"neko"=4 / "さくら"→"sakura"=6 / "がっこう"→"gakkou"=6。
-// 本物のローマ字テーブルは後日 proto の共有データから来る。それまでは手数え(概算)でよい。
+// テーマ（寿司モチーフ）は変更予定なので中身はダミーの一般語でよい。大事なのは
+//   ①段階が上がるほど難しい（長さ→濁音/半濁音→促音→拗音→カタカナ→数字混じり）
+//   ②KeystrokeCount が正準ローマ字打鍵数（romaji.go の keystrokes で自動算出。手計算しない）
+// 記号は使わない（英数字・カナまで）。本物の単語・テーマはアート/企画確定後に差し替える。
 
-// placeholderWords は難易度段階(0..maxLevel=10) ごとの候補語を返す。
-// 段階が上がるほど長く・濁音/促音/記号を混ぜる方針（02_詳細企画書.md 2章）。後輩が 0〜10 を埋める。
-func placeholderWords() map[int][]game.Word {
-	return map[int][]game.Word{
-		0: {{Text: "ねこ", KeystrokeCount: 4}, {Text: "いぬ", KeystrokeCount: 3}},
-		1: {{Text: "さくら", KeystrokeCount: 6}, {Text: "みかん", KeystrokeCount: 5}},
-		2: {{Text: "がっこう", KeystrokeCount: 6}, {Text: "でんしゃ", KeystrokeCount: 7}},
-		// TODO(後輩): 3〜10 を追加。長文化・濁音/半濁音/促音/拗音、後半は記号/数字混じり。
-	}
+// rawWords は段階(0..maxLevel)ごとの語（text のみ）。打鍵数は keystrokes() で算出する。
+var rawWords = map[int][]string{
+	0:  {"ねこ", "いぬ", "そら", "うみ", "やま"},                 // 2字・清音
+	1:  {"さくら", "ひかり", "みどり", "ことり", "はなび"},         // 3字・清音
+	2:  {"だんご", "ぱんだ", "でんわ", "ばなな", "ぶどう"},         // 濁音・半濁音
+	3:  {"ながぐつ", "だいこん", "みずうみ", "ばくだん", "でんぐり"},   // 4字・濁音多め
+	4:  {"がっこう", "けっか", "さっか", "ばった", "ねっこ"},         // 促音(っ)
+	5:  {"きゃべつ", "しゅくだい", "きょうしつ", "じてんしゃ", "びょういん"}, // 拗音(ゃゅょ)
+	6:  {"テレビ", "ラジオ", "カメラ", "パソコン", "ストーブ"},         // カタカナ導入
+	7:  {"コンピュータ", "ジャングル", "ハンバーグ", "ショッピング", "キャラメル"}, // カナ＋濁促拗
+	8:  {"れべる8", "みっしょん3", "ぽいんと10", "すこあ5", "たいむ2"},   // 数字混じり
+	9:  {"プログラミング", "アプリケーション", "インターネット", "キーボード", "モニター"}, // カタカナ長め
+	10: {"すーぱーこんぼ99", "ファイナルバトル100", "でんせつのけん3", "マキシマムぱわー", "レジェンド2000"}, // 全部盛り
 }
 
-// placeholderTraps はトラップダケン（煽り長文）の候補を返す。後輩が増やす。
-func placeholderTraps() []game.Word {
-	return []game.Word{
-		{Text: "そんなたいぷそくどでかてるとおもってるんですか", KeystrokeCount: 44},
-		// TODO(後輩): 煽り文を数個追加。
+// rawTraps は煽り長文（テーマ非依存）。通常語より打鍵数が多い。
+var rawTraps = []string{
+	"そんなたいぷそくどでかてるとおもってるんですか",
+	"もしかしてまだそこでもたついてるんですか",
+	"そのていどのじつりょくでよくきましたね",
+}
+
+func placeholderWords() map[int][]game.Word {
+	out := make(map[int][]game.Word, len(rawWords))
+	for lvl, words := range rawWords {
+		out[lvl] = toWords(words)
 	}
+	return out
+}
+
+func placeholderTraps() []game.Word { return toWords(rawTraps) }
+
+func toWords(texts []string) []game.Word {
+	out := make([]game.Word, 0, len(texts))
+	for _, t := range texts {
+		out = append(out, game.Word{Text: t, KeystrokeCount: keystrokes(t)})
+	}
+	return out
 }
 
 // fallbackWord / fallbackTrap はデータが空段階でも動くための保険（通常は使われない）。
 var (
-	fallbackWord = game.Word{Text: "ぷれーすほるだー", KeystrokeCount: 16}
-	fallbackTrap = game.Word{Text: "とらっぷぷれーすほるだー", KeystrokeCount: 24}
+	fallbackWord = game.Word{Text: "ぷれーすほるだー", KeystrokeCount: keystrokes("ぷれーすほるだー")}
+	fallbackTrap = game.Word{Text: "とらっぷぷれーすほるだー", KeystrokeCount: keystrokes("とらっぷぷれーすほるだー")}
 )
