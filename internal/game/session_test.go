@@ -194,7 +194,7 @@ func TestSession_GameOverTypingStats_Winner(t *testing.T) {
 	d := startAndDaken(t, s, "a")
 	d = clearOnce(t, s, "a", d, 0)  // combo 14, cleared 1, maxCombo 14
 	d = clearOnce(t, s, "a", d, 0)  // combo 28, cleared 2, maxCombo 28
-	_ = clearOnce(t, s, "a", d, 2)  // combo 28-3*2=22, cleared 3, totalMiss 1, maxCombo は 28 のまま
+	_ = clearOnce(t, s, "a", d, 2)  // combo 28-3*2=22, cleared 3, totalMiss +2, maxCombo は 28 のまま
 
 	if s.players["a"].p.Combo() != 22 {
 		t.Fatalf("前提: 減衰後コンボ=22 のはず, got %d", s.players["a"].p.Combo())
@@ -207,7 +207,7 @@ func TestSession_GameOverTypingStats_Winner(t *testing.T) {
 	if !ok || toPid != "a" || go1.Rank != 1 {
 		t.Fatalf("優勝者へ GameOver(rank1): %+v to=%s ok=%v", go1, toPid, ok)
 	}
-	want := proto.TypingStats{TotalDakenCleared: 3, TotalMiss: 1, MaxCombo: 28, ElapsedMs: 150}
+	want := proto.TypingStats{TotalDakenCleared: 3, TotalMiss: 2, MaxCombo: 28, ElapsedMs: 150}
 	if go1.TypingStats != want {
 		t.Fatalf("勝者 TypingStats=%+v, want %+v", go1.TypingStats, want)
 	}

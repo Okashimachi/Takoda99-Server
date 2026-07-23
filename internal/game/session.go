@@ -71,7 +71,7 @@ type playerState struct {
 	// リザルト用タイプ統計（GameOver.TypingStats へ集計。#51）。
 	maxCombo          int // 到達した最大コンボ（終了時点ではなく高水位）
 	totalDakenCleared int // クリアしたダケン総数
-	totalMiss         int // ミスを含んだクリア回数（missCount>0 のクリア）
+	totalMiss         int // 総ミス打鍵数（各報告の missCount の合計）
 
 	issued           map[proto.DakenId]*issuedDaken
 	pendingAgainstMe []proto.WarningId // 自分宛の予告（カウンター/相殺/巻き添え）
@@ -163,11 +163,9 @@ func (s *Session) ApplyDakenClear(from PlayerId, r proto.DakenClearReport) []Out
 	prevPersonal := s.personalLevel(ps)
 	outcome := ps.p.ApplyDakenClear(r.MissCount, d.keystrokes, s.params)
 
-	// リザルト統計を集計（#51）。1報告=1ダケンクリア。ミス有りは totalMiss、コンボは高水位を維持。
+	// リザルト統計を集計（#51）。1報告=1ダケンクリア。総ミス打鍵数は missCount を積算、コンボは高水位を維持。
 	ps.totalDakenCleared++
-	if r.MissCount > 0 {
-		ps.totalMiss++
-	}
+	ps.totalMiss += r.MissCount
 	if outcome.Value > ps.maxCombo {
 		ps.maxCombo = outcome.Value
 	}
