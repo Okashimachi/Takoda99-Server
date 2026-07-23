@@ -68,6 +68,11 @@ type playerState struct {
 	strategy int // 現在の作戦（既定4）
 	alive    bool
 
+	// リザルト用タイプ統計（GameOver.TypingStats へ集計。#51）。
+	maxCombo          int // 到達した最大コンボ（終了時点ではなく高水位）
+	totalDakenCleared int // クリアしたダケン総数
+	totalMiss         int // 総ミス打鍵数（各報告の missCount の合計）
+
 	issued           map[proto.DakenId]*issuedDaken
 	pendingAgainstMe []proto.WarningId // 自分宛の予告（カウンター/相殺/巻き添え）
 	lastImpactor     *PlayerId         // 直近着弾者（リベンジ／KO帰属）
@@ -157,6 +162,14 @@ func (s *Session) ApplyDakenClear(from PlayerId, r proto.DakenClearReport) []Out
 
 	prevPersonal := s.personalLevel(ps)
 	outcome := ps.p.ApplyDakenClear(r.MissCount, d.keystrokes, s.params)
+
+	// リザルト統計を集計（#51）。1報告=1ダケンクリア。総ミス打鍵数は missCount を積算、コンボは高水位を維持。
+	ps.totalDakenCleared++
+	ps.totalMiss += r.MissCount
+	if outcome.Value > ps.maxCombo {
+		ps.maxCombo = outcome.Value
+	}
+
 	out := []Outbound{to(from, proto.ComboUpdated{ComboValue: outcome.Value, Delta: outcome.Delta, Reason: comboReasonToProto(outcome.Reason)})}
 
 	switch d.typ {
@@ -219,7 +232,7 @@ func (s *Session) checkFinished() []Outbound {
 		if ps.alive {
 			out = append(out, to(pid, proto.GameOver{
 				Rank: 1, KoCount: ps.koCount, FinalBadgeCount: ps.badges,
-				TypingStats: proto.TypingStats{MaxCombo: ps.p.Combo()},
+				TypingStats: s.typingStats(ps),
 			}))
 		}
 	}
@@ -227,6 +240,17 @@ func (s *Session) checkFinished() []Outbound {
 }
 
 // ── 共通ヘルパ ────────────────────────────────────────────
+
+// typingStats は GameOver 用のリザルト統計を組み立てる（#51）。checkFinished /
+// eliminateWithKO の両方の GameOver 生成箇所で共有する。ElapsedMs は試合経過時間。
+func (s *Session) typingStats(ps *playerState) proto.TypingStats {
+	return proto.TypingStats{
+		TotalDakenCleared: ps.totalDakenCleared,
+		TotalMiss:         ps.totalMiss,
+		MaxCombo:          ps.maxCombo,
+		ElapsedMs:         int(s.elapsedMs),
+	}
+}
 
 // issueDaken は次のお題を発行し、台帳に記録して DakenInstance を返す。
 func (s *Session) issueDaken(ps *playerState, typ proto.DakenType) proto.DakenInstance {
