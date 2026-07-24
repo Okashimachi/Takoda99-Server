@@ -15,6 +15,7 @@ textro99-server を Render にデプロイする手順と、疎通確認の方�
 
 ### 設定（任意）
 - 起動モード/Bot数を変える: Docker Command を `/server --mode match --bots 5` 等に上書き。
+- **結合テスト用（solo）**: `--mode solo` にすると /ws 接続ごとに「人間1＋Bot」で即試合開始し、単独クライアントで `MatchStart` 以降の全メッセージを検証できる（#56）。本番（99人・match）前に必ず戻す（#57）。現在の `render.yaml` は検証のため一時的に solo。
 - 調整値をリモート取得する: 環境変数 `CONFIG_URL` に config-front の JSON エンドポイントを設定（未設定なら内蔵デフォルトで起動）。
 
 ## 疎通確認
