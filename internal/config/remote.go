@@ -54,21 +54,10 @@ func (l *RemoteLoader) Load(ctx context.Context) (game.GameParameters, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&gp); err != nil {
 		return def, fmt.Errorf("config: JSONデコード: %w", err)
 	}
-	if err := validate(gp); err != nil {
+	if err := gp.Validate(); err != nil {
 		return def, fmt.Errorf("config: 値の検証: %w", err)
 	}
 	return gp, nil
-}
-
-// validate は最小限の妥当性チェック（破綻値を弾く）。
-func validate(gp game.GameParameters) error {
-	if gp.Stack.Limit <= 0 {
-		return fmt.Errorf("stack.limit は正である必要 (got %d)", gp.Stack.Limit)
-	}
-	if gp.Difficulty.MaxLevel <= 0 {
-		return fmt.Errorf("difficulty.maxLevel は正である必要 (got %d)", gp.Difficulty.MaxLevel)
-	}
-	return nil
 }
 
 var _ game.ConfigProvider = (*RemoteLoader)(nil)

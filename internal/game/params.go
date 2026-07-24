@@ -5,6 +5,8 @@
 // （proto は契約として参照可）。継ぎ目は ports.go（DIP）。すべての調整値は GameParameters 経由。
 package game
 
+import "fmt"
+
 // GameParameters は数値バランスの全項目。正典は
 // Textro99-Docs/03_サーバー仕様/04_パラメータ仕様.md。
 // サーバーが起動時に config(ConfigProvider) 経由で外部取得し、失敗時は DefaultParameters()。
@@ -69,6 +71,18 @@ type MatchingParams struct {
 type SessionParams struct {
 	TickIntervalMs    int `json:"tickIntervalMs"`
 	PublishIntervalMs int `json:"publishIntervalMs"` // 99人ミニ盤面の配信間隔（tickより低頻度で帯域を抑える）
+}
+
+// Validate は破綻値を弾く最小限の検証。config 取得（RemoteLoader / DB / config-front POST）で
+// 共通に使う。コア game が GameParameters の不変条件を所有する（検証ロジックの単一ソース）。
+func (gp GameParameters) Validate() error {
+	if gp.Stack.Limit <= 0 {
+		return fmt.Errorf("stack.limit は正である必要 (got %d)", gp.Stack.Limit)
+	}
+	if gp.Difficulty.MaxLevel <= 0 {
+		return fmt.Errorf("difficulty.maxLevel は正である必要 (got %d)", gp.Difficulty.MaxLevel)
+	}
+	return nil
 }
 
 // DefaultParameters はリモートコンフィグ取得失敗時のフォールバック内蔵デフォルト。

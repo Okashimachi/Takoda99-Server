@@ -59,6 +59,20 @@ linters:
             - pkg: "github.com/coder/websocket"
               desc: "game はWebSocketを知らない（通信は transport 層）。"
 
+        # ── ルール2.5: インフラ・アダプタ db は永続化ドライバを閉じ込める ──
+        # internal/db は Postgres(pgx) を使ってよい唯一の場所（config/store の純粋層を汚さない）。
+        # 依存の向きは内向き（game/proto/store へ）に保ち、スパイン(駆動)は参照しない。
+        infra-db-boundary:
+          files:
+            - "**/internal/db/**"
+          deny:
+            - pkg: "textro99/internal/room"
+              desc: "db はスパイン(駆動)に依存しない。合成ルートが配線する。"
+            - pkg: "textro99/internal/matchmaking"
+              desc: "db はマッチングに依存しない。"
+            - pkg: "textro99/internal/transport"
+              desc: "db は通信層に依存しない。"
+
         # ── ルール3: 層3部品は game/proto へ向かうのみ ──
         # targeting/odai/config は game(ports実装のため)・proto・標準ライブラリだけに依存する。
         # スパイン(room/matchmaking/transport)への依存は隔離を壊すため禁止。
