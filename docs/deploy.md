@@ -18,6 +18,15 @@ textro99-server を Render にデプロイする手順と、疎通確認の方�
 - **結合テスト用（solo）**: `--mode solo` にすると /ws 接続ごとに「人間1＋Bot」で即試合開始し、単独クライアントで `MatchStart` 以降の全メッセージを検証できる（#56）。本番（99人・match）前に必ず戻す（#57）。現在の `render.yaml` は検証のため一時的に solo。
 - 調整値をリモート取得する: 環境変数 `CONFIG_URL` に config-front の JSON エンドポイントを設定（未設定なら内蔵デフォルトで起動）。
 
+### config を DB 化して Web から編集する（#49/#50）
+- `DATABASE_URL` を設定すると config を **Postgres**（Neon 想定）から取得し、`GET/POST /api/params` で編集できる（未設定なら内蔵デフォルト、`/api/params` は 503）。
+- 起動時に `game_config` テーブルを自動作成＋内蔵デフォルトで seed。config はマッチ生成時に読み直すので、編集は**次の試合から再起動なしで反映**。
+- 関連 env:
+  - `DATABASE_URL` … Postgres 接続文字列。
+  - `CONFIG_ADMIN_TOKEN` … `POST /api/params` の共有トークン（`X-Admin-Token` ヘッダで照合）。未設定だと POST は 503。
+  - `CONFIG_FRONT_ORIGIN` … CORS の許可オリジン（config-front の URL）。未設定は `*`。
+- config-front（#51）は `GET/POST https://<service>.onrender.com/api/params` を叩く。
+
 ## 疎通確認
 ```bash
 # 1) ヘルスチェック（HTTP）

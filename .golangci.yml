@@ -73,6 +73,22 @@ linters:
             - pkg: "textro99/internal/transport"
               desc: "db は通信層に依存しない。"
 
+        # ── ルール2.6: HTTPアダプタ configapi は Store インターフェース越しに使う ──
+        # configapi(/api/params) は game(GameParameters/Validate) と net/http のみに依存し、
+        # 永続化実装(db)には依存しない（Store を注入）。スパインにも依存しない。
+        http-adapters-boundary:
+          files:
+            - "**/internal/configapi/**"
+          deny:
+            - pkg: "textro99/internal/db"
+              desc: "configapi は db 実装に依存しない。Store インターフェースを合成ルートが注入する。"
+            - pkg: "textro99/internal/room"
+              desc: "configapi はスパイン(駆動)に依存しない。"
+            - pkg: "textro99/internal/matchmaking"
+              desc: "configapi はマッチングに依存しない。"
+            - pkg: "textro99/internal/transport"
+              desc: "configapi は WS 通信層に依存しない。"
+
         # ── ルール3: 層3部品は game/proto へ向かうのみ ──
         # targeting/odai/config は game(ports実装のため)・proto・標準ライブラリだけに依存する。
         # スパイン(room/matchmaking/transport)への依存は隔離を壊すため禁止。

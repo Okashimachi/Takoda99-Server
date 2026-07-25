@@ -19,6 +19,7 @@ import (
 	"textro99/internal/app"
 	"textro99/internal/bot"
 	"textro99/internal/config"
+	"textro99/internal/configapi"
 	"textro99/internal/db"
 	"textro99/internal/game"
 	"textro99/internal/matchmaking"
@@ -100,6 +101,15 @@ func main() {
 			mm.Join(matchmaking.Player{Id: id, Conn: conn})
 		})
 	}
+
+	// config 管理API（/api/params）。config-front(#51) が編集に使う。
+	// 永続化(Postgres)がある時だけ意味を持つので、provider が db.ConfigStore の時に本物の Store を渡す。
+	// DBが無ければ nil を渡し、ハンドラは 503 を返す（config-front に「DB未設定」を明示）。
+	var cfgStore configapi.Store
+	if cs, ok := provider.(*db.ConfigStore); ok {
+		cfgStore = cs
+	}
+	http.Handle("/api/params", configapi.NewHandler(cfgStore, os.Getenv("CONFIG_ADMIN_TOKEN"), os.Getenv("CONFIG_FRONT_ORIGIN")))
 
 	// ヘルスチェック（Render 等の稼働監視・疎通確認用）。
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
