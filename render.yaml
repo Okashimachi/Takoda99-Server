@@ -9,8 +9,11 @@ services:
     plan: free
     healthCheckPath: /healthz
     autoDeploy: true
-    # 起動モードやBot補完数を変えたい場合はここで dockerCommand を上書きする:
-    # dockerCommand: /server --mode match --bots 5
+    # 【一時】Webフロント単独結合テスト用に solo モードで起動（#56）。
+    # solo = /ws 接続ごとに「人間1＋Bot」で即試合開始 → 単独で MatchStart 以降を検証できる。
+    # ★本番（99人）前に必ずこの行を削除 or --mode match に戻す（#57）。
+    dockerCommand: /server --mode solo --bots 5
+    # （本番の既定は Dockerfile の CMD = --mode match）
     # 調整値をリモート取得する場合は config-front の URL を渡す:
     # envVars:
     #   - key: CONFIG_URL
