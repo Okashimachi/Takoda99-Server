@@ -19,6 +19,7 @@ import (
 	"textro99/internal/app"
 	"textro99/internal/bot"
 	"textro99/internal/config"
+	"textro99/internal/db"
 	"textro99/internal/game"
 	"textro99/internal/matchmaking"
 	"textro99/internal/proto"
@@ -34,20 +35,28 @@ func main() {
 
 	ctx := context.Background()
 
-	url := *configURL
-	if url == "" {
-		url = os.Getenv("CONFIG_URL") // Render 等では env で渡すのが自然
-	}
-	var provider game.ConfigProvider = config.DefaultLoader{}
-	if url != "" {
-		provider = config.NewRemoteLoader(url)
-	}
-	params, err := provider.Load(ctx)
+	provider := chooseProvider(ctx, *configURL)
+
+	// マッチング用パラメータ（minPlayers/countdown 等）は起動時スナップショット。
+	// ※これらの動的リロード（当日 minPlayers 変更）は matchmaker 側の対応が要る別課題。
+	initial, err := provider.Load(ctx)
 	if err != nil {
-		log.Printf("config: 取得失敗のためデフォルト値で起動: %v", err)
+		log.Printf("config: 起動時取得失敗のためデフォルトで継続: %v", err)
 	}
-	deps := app.DefaultDeps()
-	deps.Params = params // config から取得した値で上書き（失敗時はデフォルトのまま）
+	baseDeps := app.DefaultDeps()
+
+	// loadDeps はマッチ生成のたびに最新 config を読み、その試合用の Deps を作る。
+	// ＝ config-front での編集が「次の試合から」再起動なしで反映される（進行中の試合は固定）。
+	// provider.Load は失敗時も有効なデフォルトを返すので p は常に使用可能。
+	loadDeps := func() app.Deps {
+		d := baseDeps
+		p, err := provider.Load(ctx)
+		if err != nil {
+			log.Printf("config: マッチ用取得失敗のためデフォルトで継続: %v", err)
+		}
+		d.Params = p
+		return d
+	}
 
 	var ids atomic.Int64
 	nextID := func() game.PlayerId { return game.PlayerId(idString(ids.Add(1))) }
@@ -66,13 +75,16 @@ func main() {
 				players = append(players, app.NewBotPlayer(ctx, nextID(), bot.DefaultConfig()))
 			}
 			log.Printf("solo: 試合開始 human=%s bots=%d", id, *bots)
-			go app.RunMatch(ctx, deps, players)
+			go app.RunMatch(ctx, loadDeps(), players)
 		})
 
 	default: // match
 		mm := matchmaking.New(matchmaking.Config{
-			Params:  params.Matching,
-			Start:   func(players []matchmaking.Player) { log.Printf("match: 試合開始 players=%d", len(players)); go app.RunMatch(ctx, deps, players) },
+			Params: initial.Matching,
+			Start: func(players []matchmaking.Player) {
+				log.Printf("match: 試合開始 players=%d", len(players))
+				go app.RunMatch(ctx, loadDeps(), players)
+			},
 			NewBot:  func() matchmaking.Player { return app.NewBotPlayer(ctx, nextID(), bot.DefaultConfig()) },
 			MinFill: *bots,
 		})
@@ -99,6 +111,36 @@ func main() {
 	if err := http.ListenAndServe(*addr, nil); err != nil {
 		log.Fatalf("listen: %v", err)
 	}
+}
+
+// chooseProvider は環境に応じて ConfigProvider を選ぶ。
+// 優先順位: DATABASE_URL(Postgres) > --config-url / CONFIG_URL(HTTP) > 内蔵デフォルト。
+// DB接続・マイグレーション失敗でも必ず有効な ConfigProvider を返す（起動を止めない・04仕様7章）。
+func chooseProvider(ctx context.Context, configURL string) game.ConfigProvider {
+	if dsn := os.Getenv("DATABASE_URL"); dsn != "" {
+		pool, err := db.NewPool(ctx, dsn)
+		if err != nil {
+			log.Printf("config: DB接続失敗のため設定は内蔵デフォルト: %v", err)
+			return config.DefaultLoader{}
+		}
+		cs := db.NewConfigStore(pool)
+		if err := cs.Migrate(ctx); err != nil {
+			log.Printf("config: DBマイグレーション失敗のため設定は内蔵デフォルト: %v", err)
+			return config.DefaultLoader{}
+		}
+		log.Printf("config: Postgres から取得（DATABASE_URL）")
+		return cs
+	}
+	url := configURL
+	if url == "" {
+		url = os.Getenv("CONFIG_URL") // Render 等では env で渡すのが自然
+	}
+	if url != "" {
+		log.Printf("config: HTTP から取得（%s）", url)
+		return config.NewRemoteLoader(url)
+	}
+	log.Printf("config: 内蔵デフォルトで起動")
+	return config.DefaultLoader{}
 }
 
 // listenAddr は addr フラグの既定値。Render 等は $PORT を渡すのでそれを優先する。
