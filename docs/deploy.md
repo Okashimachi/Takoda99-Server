@@ -4,7 +4,7 @@ textro99-server を Render にデプロイする手順と、疎通確認の方�
 
 ## 前提
 - サーバーは `$PORT`（Render が注入）を listen する。未設定なら `:8080`。
-- ビルドは `Dockerfile`（go 1.23 / public な Textro99-Proto を go.mod で解決）。go.work は使わない。
+- ビルドは `Dockerfile`（go 1.25 / public な Textro99-Proto を go.mod で解決）。go.work は使わない。
 - ヘルスチェック: `GET /healthz` → `200 ok`。
 
 ## デプロイ手順（Render ダッシュボード）
