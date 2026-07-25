@@ -1,6 +1,7 @@
 # textro99-server コンテナ。Render(docker runtime) 等でそのままデプロイできる。
 # go.work は使わず go.mod/go.sum で public な Textro99-Proto を解決する（CIと同条件）。
-FROM golang:1.23-alpine AS build
+# go は go.mod の go ディレクティブ（現状 1.25.0 / pgx v5 が要求）に合わせる。
+FROM golang:1.25-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
