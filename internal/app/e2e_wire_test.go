@@ -47,7 +47,7 @@ func TestE2E_ClientWireFlow(t *testing.T) {
 	// solo 相当のハンドラ: 接続で Welcome→人間1＋Bot3で試合開始。
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		conn, err := transport.Accept(w, r)
+		conn, err := transport.Accept(w, r, transport.AcceptOptions{AllowAll: true})
 		if err != nil {
 			return
 		}

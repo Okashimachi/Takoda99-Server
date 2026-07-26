@@ -94,9 +94,30 @@ func (c *wsConnection) Close() error {
 	return err
 }
 
+// AcceptOptions は WS ハンドシェイクの Origin 許可設定。
+//
+// coder/websocket は既定で「Origin の host が Host と一致しないと拒否」する（CSWSH 防御）。
+// ブラウザは Origin を必ず送るため、別オリジンのフロント（localhost:5173 等）はこの既定だと
+// 一切接続できない。許可オリジンを OriginPatterns で明示するか、AllowAll で検証を無効化する。
+// 本ゲームの /ws は Cookie 認証等の ambient authority を持たないため AllowAll でも実害は小さい。
+type AcceptOptions struct {
+	// AllowedOriginHosts は許可する Origin の host[:port] パターン（例 "localhost:5173", "*.vercel.app"）。
+	// 空かつ AllowAll=false なら同一オリジンのみ許可（coder/websocket の既定）。
+	AllowedOriginHosts []string
+	// AllowAll=true で任意オリジンを許可（Origin 検証を無効化）。dev/結合用。
+	AllowAll bool
+}
+
 // Accept は HTTP リクエストを WebSocket に昇格し、Connection を返す（サーバー側）。
-func Accept(w http.ResponseWriter, r *http.Request) (Connection, error) {
-	conn, err := websocket.Accept(w, r, nil)
+// opts で許可オリジンを制御する（未指定＝同一オリジンのみ）。
+func Accept(w http.ResponseWriter, r *http.Request, opts AcceptOptions) (Connection, error) {
+	wopts := &websocket.AcceptOptions{}
+	if opts.AllowAll {
+		wopts.InsecureSkipVerify = true
+	} else if len(opts.AllowedOriginHosts) > 0 {
+		wopts.OriginPatterns = opts.AllowedOriginHosts
+	}
+	conn, err := websocket.Accept(w, r, wopts)
 	if err != nil {
 		return nil, err
 	}

@@ -24,8 +24,18 @@ textro99-server を Render にデプロイする手順と、疎通確認の方�
 - 関連 env:
   - `DATABASE_URL` … Postgres 接続文字列。
   - `CONFIG_ADMIN_TOKEN` … `POST /api/params` の共有トークン（`X-Admin-Token` ヘッダで照合）。未設定だと POST は 503。
-  - `CONFIG_FRONT_ORIGIN` … CORS の許可オリジン（config-front の URL）。未設定は `*`。
+  - `CONFIG_FRONT_ORIGIN` … `/api/params` の CORS 許可オリジン（config-front の URL）。**カンマ区切りで複数可**。未設定は `*`。
 - config-front（#51）は `GET/POST https://<service>.onrender.com/api/params` を叩く。
+
+### 許可オリジン（ブラウザ結合の要）
+ブラウザは `Origin` を必ず送り、サーバーは 2 系統でオリジンを見る。**どちらも末尾スラッシュ無し**で指定する（`https://ex.com` ○ / `https://ex.com/` ✗ = ブラウザの Origin と一致しない。CONFIG 側は自動で除去するが揃えるのが無難）。
+
+- **`ALLOWED_ORIGINS`** … **`/ws`（ゲームクライアント）** の許可オリジン。カンマ区切り（フルURL or `host:port`、`*.vercel.app` 等のワイルドカード可）。
+  - **未設定なら全許可**（結合をブロックしないための既定。`/ws` は Cookie 認証等を持たないため実害小）。本番で絞るならフロントのオリジンを列挙。
+  - 例: `ALLOWED_ORIGINS=http://localhost:5173,http://localhost:4173,https://<web-front>.vercel.app`
+- **`CONFIG_FRONT_ORIGIN`** … **`/api/params`（config-front）** の CORS 許可オリジン（上記）。
+
+> なぜ2つ: `/ws` はゲームクライアント（Web/Unity）、`/api/params` は config-front と**相手が別**なので許可リストを分けている。両方に同じ値を入れても害はない。
 
 ## 疎通確認
 ```bash

@@ -42,7 +42,7 @@ func do(h http.Handler, method, token string, body []byte) *httptest.ResponseRec
 
 func TestGet_ReturnsFullParams(t *testing.T) {
 	store := &fakeStore{gp: game.DefaultParameters()}
-	h := NewHandler(store, tok, "")
+	h := NewHandler(store, tok, nil)
 	w := do(h, http.MethodGet, "", nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
@@ -60,14 +60,14 @@ func TestGet_ReturnsFullParams(t *testing.T) {
 }
 
 func TestGet_LoadError_500(t *testing.T) {
-	h := NewHandler(&fakeStore{loadErr: errors.New("db down")}, tok, "")
+	h := NewHandler(&fakeStore{loadErr: errors.New("db down")}, tok, nil)
 	if w := do(h, http.MethodGet, "", nil); w.Code != http.StatusInternalServerError {
 		t.Fatalf("want 500, got %d", w.Code)
 	}
 }
 
 func TestOptions_Preflight_204(t *testing.T) {
-	h := NewHandler(&fakeStore{}, tok, "https://config-front.example")
+	h := NewHandler(&fakeStore{}, tok, []string{"https://config-front.example"})
 	w := do(h, http.MethodOptions, "", nil)
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("want 204, got %d", w.Code)
@@ -82,7 +82,7 @@ func TestOptions_Preflight_204(t *testing.T) {
 
 func TestPost_Valid_SavesAndReturns(t *testing.T) {
 	store := &fakeStore{gp: game.DefaultParameters()}
-	h := NewHandler(store, tok, "")
+	h := NewHandler(store, tok, nil)
 	body, _ := json.Marshal(func() game.GameParameters {
 		gp := game.DefaultParameters()
 		gp.Stack.Limit = 15
@@ -99,7 +99,7 @@ func TestPost_Valid_SavesAndReturns(t *testing.T) {
 
 func TestPost_NoToken_401(t *testing.T) {
 	store := &fakeStore{gp: game.DefaultParameters()}
-	h := NewHandler(store, tok, "")
+	h := NewHandler(store, tok, nil)
 	body, _ := json.Marshal(game.DefaultParameters())
 	if w := do(h, http.MethodPost, "", body); w.Code != http.StatusUnauthorized {
 		t.Fatalf("want 401, got %d", w.Code)
@@ -113,7 +113,7 @@ func TestPost_NoToken_401(t *testing.T) {
 }
 
 func TestPost_TokenNotConfigured_503(t *testing.T) {
-	h := NewHandler(&fakeStore{}, "", "") // token 空
+	h := NewHandler(&fakeStore{}, "", nil) // token 空
 	body, _ := json.Marshal(game.DefaultParameters())
 	if w := do(h, http.MethodPost, "anything", body); w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("want 503, got %d", w.Code)
@@ -121,7 +121,7 @@ func TestPost_TokenNotConfigured_503(t *testing.T) {
 }
 
 func TestPost_InvalidJSON_400(t *testing.T) {
-	h := NewHandler(&fakeStore{}, tok, "")
+	h := NewHandler(&fakeStore{}, tok, nil)
 	if w := do(h, http.MethodPost, tok, []byte("{not json")); w.Code != http.StatusBadRequest {
 		t.Fatalf("want 400, got %d", w.Code)
 	}
@@ -129,7 +129,7 @@ func TestPost_InvalidJSON_400(t *testing.T) {
 
 func TestPost_InvalidValues_400_NotSaved(t *testing.T) {
 	store := &fakeStore{gp: game.DefaultParameters()}
-	h := NewHandler(store, tok, "")
+	h := NewHandler(store, tok, nil)
 	bad := game.DefaultParameters()
 	bad.Stack.Limit = 0 // Validate で弾かれる
 	body, _ := json.Marshal(bad)
@@ -142,12 +142,50 @@ func TestPost_InvalidValues_400_NotSaved(t *testing.T) {
 }
 
 func TestNilStore_503(t *testing.T) {
-	h := NewHandler(nil, tok, "")
+	h := NewHandler(nil, tok, nil)
 	if w := do(h, http.MethodGet, "", nil); w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("GET want 503, got %d", w.Code)
 	}
 	body, _ := json.Marshal(game.DefaultParameters())
 	if w := do(h, http.MethodPost, tok, body); w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("POST want 503, got %d", w.Code)
+	}
+}
+
+func reqWithOrigin(h http.Handler, origin string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest(http.MethodOptions, "/api/params", nil)
+	if origin != "" {
+		r.Header.Set("Origin", origin)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	return w
+}
+
+func acao(w *httptest.ResponseRecorder) string {
+	return w.Header().Get("Access-Control-Allow-Origin")
+}
+
+func TestCORS_MultiOrigin_EchoesAllowed(t *testing.T) {
+	// 末尾スラッシュ付きでも正規化して一致すること。
+	h := NewHandler(&fakeStore{}, tok, []string{"https://a.example/", "http://localhost:5173"})
+	if got := acao(reqWithOrigin(h, "https://a.example")); got != "https://a.example" {
+		t.Fatalf("許可Origin(スラッシュ正規化)が反映されない: %q", got)
+	}
+	if got := acao(reqWithOrigin(h, "http://localhost:5173")); got != "http://localhost:5173" {
+		t.Fatalf("localhost が許可されない: %q", got)
+	}
+	// 非許可 Origin は先頭を返す（そのブラウザの Origin と不一致→ブロックされる）。
+	if got := acao(reqWithOrigin(h, "https://evil.example")); got != "https://a.example" {
+		t.Fatalf("非許可Originの扱いが想定外: %q", got)
+	}
+}
+
+func TestCORS_Wildcard_And_Empty(t *testing.T) {
+	if got := acao(reqWithOrigin(NewHandler(&fakeStore{}, tok, []string{"*"}), "http://anything")); got != "*" {
+		t.Fatalf(`"*" は全許可のはず: %q`, got)
+	}
+	if got := acao(reqWithOrigin(NewHandler(&fakeStore{}, tok, nil), "http://anything")); got != "*" {
+		t.Fatalf("空リストは * のはず: %q", got)
 	}
 }
