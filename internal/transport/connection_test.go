@@ -16,7 +16,7 @@ import (
 func TestWSConnection_RoundTripAndClose(t *testing.T) {
 	// サーバー: 1メッセージをエコーし、クライアント切断まで生存。
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c, err := Accept(w, r)
+		c, err := Accept(w, r, AcceptOptions{AllowAll: true})
 		if err != nil {
 			return
 		}

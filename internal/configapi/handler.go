@@ -10,6 +10,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"textro99/internal/game"
 )
@@ -23,24 +24,29 @@ type Store interface {
 const maxBodyBytes = 64 << 10 // 64KiB。GameParameters は極小なので十分。
 
 type handler struct {
-	store  Store
-	token  string
-	origin string
+	store   Store
+	token   string
+	origins []string // 正規化済み（前後空白・末尾スラッシュ除去）。空なら "*"
 }
 
 // NewHandler は /api/params 用の http.Handler を作る。
 //   - store: 永続化の口。nil の場合、GET/POST は 503（DB未設定）を返す。
 //   - token: POST 保護用の共有トークン。空文字なら POST は 503（無認証で書けないように）。
-//   - allowOrigin: CORS の Access-Control-Allow-Origin。空なら "*"。
-func NewHandler(store Store, token, allowOrigin string) http.Handler {
-	if allowOrigin == "" {
-		allowOrigin = "*"
+//   - allowOrigins: CORS 許可オリジンのリスト（カンマ区切りを分解済み）。空なら "*"、"*" を含めば全許可。
+//     末尾スラッシュはブラウザの Origin と一致しないため自動で除去する。
+func NewHandler(store Store, token string, allowOrigins []string) http.Handler {
+	norm := make([]string, 0, len(allowOrigins))
+	for _, o := range allowOrigins {
+		o = strings.TrimRight(strings.TrimSpace(o), "/")
+		if o != "" {
+			norm = append(norm, o)
+		}
 	}
-	return &handler{store: store, token: token, origin: allowOrigin}
+	return &handler{store: store, token: token, origins: norm}
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	h.setCORS(w)
+	h.setCORS(w, r)
 	switch r.Method {
 	case http.MethodOptions:
 		w.WriteHeader(http.StatusNoContent) // プリフライト
@@ -53,11 +59,30 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *handler) setCORS(w http.ResponseWriter) {
+func (h *handler) setCORS(w http.ResponseWriter, r *http.Request) {
 	head := w.Header()
-	head.Set("Access-Control-Allow-Origin", h.origin)
+	head.Set("Vary", "Origin")
 	head.Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 	head.Set("Access-Control-Allow-Headers", "Content-Type, X-Admin-Token")
+	head.Set("Access-Control-Allow-Origin", h.allowOriginFor(r.Header.Get("Origin")))
+}
+
+// allowOriginFor は返す Access-Control-Allow-Origin 値を決める。
+// リスト空→ "*"。"*" を含む→ "*"。リクエスト Origin が許可内→そのまま反映。
+// それ以外→リスト先頭（非許可オリジンは自分の Origin と一致しないのでブラウザが弾く）。
+func (h *handler) allowOriginFor(reqOrigin string) string {
+	if len(h.origins) == 0 {
+		return "*"
+	}
+	for _, o := range h.origins {
+		if o == "*" {
+			return "*"
+		}
+		if strings.EqualFold(o, reqOrigin) {
+			return reqOrigin
+		}
+	}
+	return h.origins[0]
 }
 
 // get は現在の GameParameters を完全な JSON で返す（読み取りは公開）。

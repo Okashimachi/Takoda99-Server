@@ -287,6 +287,7 @@ function send(type: string, payload: object) {
 - [ ] match モードでは `MatchStart` 前に `MatchmakingStatus` が来る。solo では即 `MatchStart`。
 - [ ] `elapsedMs` は表示・統計用。整合の権威はサーバー（発行→受信の実時間）。
 - [ ] フィールド名は **camelCase**。数値は数値型（文字列にしない）。
+- [ ] **ブラウザから `/ws` に繋がらない（connecting→reconnecting を繰り返す）**時は、サーバー側の**許可オリジン設定**を確認。サーバーは WS upgrade 時に `Origin` を検証しており、許可外のオリジン（例 `http://localhost:5173`）は拒否される（websocat/Node は `Origin` を送らないので通る＝クライアント起因ではない）。サーバーの `ALLOWED_ORIGINS`（カンマ区切り）に自分のオリジンを追加してもらう。**未設定時は全許可**なので、通常はデプロイ済みなら繋がる。クライアント側で `Origin` は変えられない。
 - [ ] ID類（`playerId` / `matchId` / `dakenId` / `warningId`）は**サーバー割当ての不透明文字列**。**パースや自前生成をしない**（`dakenId` の "p-1-1" 等の形は実装詳細で、依存しない）。§4 の `(契約)` サンプル中のID値は説明用の例。
 
 ---

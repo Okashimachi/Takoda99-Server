@@ -12,8 +12,10 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"sync/atomic"
 
 	"textro99/internal/app"
@@ -62,10 +64,15 @@ func main() {
 	var ids atomic.Int64
 	nextID := func() game.PlayerId { return game.PlayerId(idString(ids.Add(1))) }
 
+	// /ws の許可オリジン。ブラウザは Origin を必ず送り、coder/websocket は既定で同一オリジン以外を
+	// 拒否するため、フロント（localhost:5173 等）を ALLOWED_ORIGINS（カンマ区切り）で許可する。
+	// 未設定なら全許可（結合をブロックしない。/ws は Cookie 認証等を持たないため実害小）。
+	wsAccept := wsAcceptOptions(parseCSV(os.Getenv("ALLOWED_ORIGINS")))
+
 	switch *mode {
 	case "solo":
 		http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-			conn, err := transport.Accept(w, r)
+			conn, err := transport.Accept(w, r, wsAccept)
 			if err != nil {
 				return
 			}
@@ -91,7 +98,7 @@ func main() {
 		})
 		go mm.Run(ctx)
 		http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-			conn, err := transport.Accept(w, r)
+			conn, err := transport.Accept(w, r, wsAccept)
 			if err != nil {
 				return
 			}
@@ -109,7 +116,8 @@ func main() {
 	if cs, ok := provider.(*db.ConfigStore); ok {
 		cfgStore = cs
 	}
-	http.Handle("/api/params", configapi.NewHandler(cfgStore, os.Getenv("CONFIG_ADMIN_TOKEN"), os.Getenv("CONFIG_FRONT_ORIGIN")))
+	// CONFIG_FRONT_ORIGIN はカンマ区切りで複数可（config-front を複数環境で使う場合）。空なら "*"。
+	http.Handle("/api/params", configapi.NewHandler(cfgStore, os.Getenv("CONFIG_ADMIN_TOKEN"), parseCSV(os.Getenv("CONFIG_FRONT_ORIGIN"))))
 
 	// ヘルスチェック（Render 等の稼働監視・疎通確認用）。
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -151,6 +159,42 @@ func chooseProvider(ctx context.Context, configURL string) game.ConfigProvider {
 	}
 	log.Printf("config: 内蔵デフォルトで起動")
 	return config.DefaultLoader{}
+}
+
+// parseCSV はカンマ区切り文字列を trim して非空要素のリストにする。
+func parseCSV(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// wsAcceptOptions は許可オリジン（フルURL or host[:port]）から /ws の受け入れ設定を作る。
+// 空 or "*" を含む → 全許可（結合をブロックしない既定）。それ以外 → host パターンの許可リスト。
+func wsAcceptOptions(origins []string) transport.AcceptOptions {
+	if len(origins) == 0 {
+		return transport.AcceptOptions{AllowAll: true}
+	}
+	hosts := make([]string, 0, len(origins))
+	for _, o := range origins {
+		if o == "*" {
+			return transport.AcceptOptions{AllowAll: true}
+		}
+		hosts = append(hosts, originHost(o))
+	}
+	return transport.AcceptOptions{AllowedOriginHosts: hosts}
+}
+
+// originHost は "http://localhost:5173/" → "localhost:5173"。scheme 無し（既に host パターン）ならそのまま。
+func originHost(o string) string {
+	o = strings.TrimRight(strings.TrimSpace(o), "/")
+	if u, err := url.Parse(o); err == nil && u.Host != "" {
+		return u.Host
+	}
+	return o
 }
 
 // listenAddr は addr フラグの既定値。Render 等は $PORT を渡すのでそれを優先する。
