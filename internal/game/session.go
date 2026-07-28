@@ -1,14 +1,16 @@
 package game
 
 import (
-	"fmt"
 	"math/rand"
 
 	"textro99/internal/proto"
 )
 
 // session.go は【層1コア】1試合の状態機械。純粋・Tick(dt)駆動（時計は持たず room が dt を渡す）。
-// 戦闘ロジックは attack.go(#21a) / offset.go(#21b) / stack.go(#21c) / difficulty.go(#21d) に分割。
+//
+// たこ焼き版の実ロジック（客レジストリ/行列/客分配/評価EMA・正規化/信用/我慢・離脱/フェーズ/
+// 火力/下位淘汰/リザルト）は tako-B 以降で段階的に実装する。現状は【骨組み】：
+// 状態機械（WaitingStart/Running/Finished）＋ MatchStart 配信＋空の Tick / ApplyOrderServed。
 
 // SessionState は試合の状態。
 type SessionState int
@@ -33,90 +35,44 @@ type Outbound struct {
 }
 
 func to(pid PlayerId, msg any) Outbound { return Outbound{To: Recipient{PlayerId: pid}, Msg: msg} }
-func broadcastMsg(msg any) Outbound     { return Outbound{To: Recipient{Broadcast: true}, Msg: msg} }
 
-// issuedDaken はサーバーが発行済みのダケン（整合検証・打鍵数引き・時間切れ監視の元）。
-type issuedDaken struct {
-	keystrokes  int
-	typ         proto.DakenType
-	timeLimitMs int
-	issuedAtMs  int64
+// storeState は1店分の横断状態。たこ焼き版で creditLife/evalRaw/evalNormalized/rank/servedStats を
+// 加える（tako-B）。現状は骨組みの最小フィールドのみ。
+type storeState struct {
+	id    PlayerId
+	name  string
+	alive bool
 }
 
-// warning は予告(AttackWarning)。power は相殺(#21b)、issuedAt+grace は expire(#21b)に使う。
-type warning struct {
-	id         proto.WarningId
-	attacker   PlayerId
-	victim     PlayerId
-	power      int
-	issuedAtMs int64
-	graceMs    int
-}
-
-// impactAtMs は着弾予定時刻（相殺の充当順＝着弾が近い順のため）。
-func (w *warning) impactAtMs() int64 { return w.issuedAtMs + int64(w.graceMs) }
-
-// playerState は1人分の横断状態。per-player に属する状態はここに集約する。
-type playerState struct {
-	id       PlayerId
-	name     string
-	p        Player // コンボ（判定式は combo.go）
-	stack    int    // ダケンスタック（受領ダケン数。上限で脱落）
-	trapMilestone int // トラップ誘発のハイウォーターマーク（#21c）
-	badges   int
-	koCount  int
-	strategy int // 現在の作戦（既定4）
-	alive    bool
-
-	// リザルト用タイプ統計（GameOver.TypingStats へ集計。#51）。
-	maxCombo          int // 到達した最大コンボ（終了時点ではなく高水位）
-	totalDakenCleared int // クリアしたダケン総数
-	totalMiss         int // 総ミス打鍵数（各報告の missCount の合計）
-
-	issued           map[proto.DakenId]*issuedDaken
-	pendingAgainstMe []proto.WarningId // 自分宛の予告（カウンター/相殺/巻き添え）
-	lastImpactor     *PlayerId         // 直近着弾者（リベンジ／KO帰属）
-	dakenSeq         int
-}
-
-// PlayerInit は NewSession に渡す初期プレイヤー情報。
+// PlayerInit は NewSession に渡す初期店舗情報。
 type PlayerInit struct {
 	Id          PlayerId
 	DisplayName string
 }
 
-// Session は1試合。strategies/words はDIPで注入される部品実装。
+// Session は1試合。words はDIPで注入される部品実装。
 type Session struct {
-	id         proto.MatchId
-	params     GameParameters
-	strategies map[int]TargetingStrategy
-	words      WordSource
-	rng        *rand.Rand
+	id     proto.MatchId
+	params GameParameters
+	words  WordSource
+	rng    *rand.Rand
 
-	players     map[PlayerId]*playerState
-	order       []PlayerId // 安定順（隣狙いの基準は targeting 側でIDソート）
-	warnings    map[proto.WarningId]*warning
-	state       SessionState
-	elapsedMs   int64
-	aliveCount  int
-	warnSeq     int
-	globalLevel int // 全体難易度段階（#21d）
+	stores     map[PlayerId]*storeState
+	order      []PlayerId
+	state      SessionState
+	elapsedMs  int64
+	aliveCount int
 }
 
-// NewSession は WaitingStart 状態の試合を作る。まだお題は配らない（Start で配る）。
-func NewSession(id proto.MatchId, params GameParameters, strategies map[int]TargetingStrategy,
-	words WordSource, rng *rand.Rand, inits []PlayerInit) *Session {
+// NewSession は WaitingStart 状態の試合を作る。客・お題は Start / Tick 側（tako-C以降）で扱う。
+func NewSession(id proto.MatchId, params GameParameters, words WordSource, rng *rand.Rand, inits []PlayerInit) *Session {
 	s := &Session{
-		id: id, params: params, strategies: strategies, words: words, rng: rng,
-		players:  make(map[PlayerId]*playerState, len(inits)),
-		warnings: make(map[proto.WarningId]*warning),
-		state:    WaitingStart,
+		id: id, params: params, words: words, rng: rng,
+		stores: make(map[PlayerId]*storeState, len(inits)),
+		state:  WaitingStart,
 	}
 	for _, in := range inits {
-		s.players[in.Id] = &playerState{
-			id: in.Id, name: in.DisplayName, strategy: 4, alive: true,
-			issued: make(map[proto.DakenId]*issuedDaken),
-		}
+		s.stores[in.Id] = &storeState{id: in.Id, name: in.DisplayName, alive: true}
 		s.order = append(s.order, in.Id)
 	}
 	s.aliveCount = len(inits)
@@ -126,248 +82,67 @@ func NewSession(id proto.MatchId, params GameParameters, strategies map[int]Targ
 // State は現在の状態を返す。
 func (s *Session) State() SessionState { return s.state }
 
-// Snapshot は現在の全プレイヤー要約と生存人数を返す（room/StatePublisher が盤面の定期配信に使う）。
-func (s *Session) Snapshot() ([]proto.PlayerSummary, int) {
+// Snapshot は99店概況と生存数を返す（publisher が盤面の定期配信に使う）。
+func (s *Session) Snapshot() ([]proto.StoreSummary, int) {
 	return s.summaries(), s.aliveCount
 }
 
-// Start は WaitingStart→Running へ遷移し、各プレイヤーへ MatchStart（初期お題つき）を配る。
+// Start は WaitingStart→Running へ遷移し、各店へ MatchStart を配る。
 func (s *Session) Start() []Outbound {
 	if s.state != WaitingStart {
 		return nil
 	}
 	s.state = Running
-	summaries := s.summaries()
+	stores := s.summaries()
 	out := make([]Outbound, 0, len(s.order))
-	for _, pid := range s.order {
-		ps := s.players[pid]
-		d := s.issueDaken(ps, proto.DakenNormal)
-		out = append(out, to(pid, proto.MatchStart{
-			MatchId:      s.id,
-			SelfPlayerId: pid,
-			Players:      summaries,
-			InitialDaken: d,
-			Parameters:   s.publicParams(),
+	for _, sid := range s.order {
+		out = append(out, to(sid, proto.MatchStart{
+			MatchId:     s.id,
+			SelfStoreId: sid,
+			Params:      s.publicParams(),
+			Phase:       proto.PhaseEarly,
+			Stores:      stores,
 		}))
 	}
 	return out
 }
 
-// ApplyDakenClear は判定済みのお題クリア報告を受け、コンボ確定＋種別ごとの後処理を返す。
-func (s *Session) ApplyDakenClear(from PlayerId, r proto.DakenClearReport) []Outbound {
-	ps := s.players[from]
-	if ps == nil || !ps.alive || s.state != Running {
-		return nil
-	}
-	d, ok := ps.issued[r.DakenId]
-	if !ok {
-		return nil // dakenId 整合検証: 発行中でない報告は無視（プロトコル仕様7章）
-	}
-	delete(ps.issued, r.DakenId)
-
-	prevPersonal := s.personalLevel(ps)
-	outcome := ps.p.ApplyDakenClear(r.MissCount, d.keystrokes, s.params)
-
-	// リザルト統計を集計（#51）。1報告=1ダケンクリア。総ミス打鍵数は missCount を積算、コンボは高水位を維持。
-	ps.totalDakenCleared++
-	ps.totalMiss += r.MissCount
-	if outcome.Value > ps.maxCombo {
-		ps.maxCombo = outcome.Value
-	}
-
-	out := []Outbound{to(from, proto.ComboUpdated{ComboValue: outcome.Value, Delta: outcome.Delta, Reason: comboReasonToProto(outcome.Reason)})}
-
-	switch d.typ {
-	case proto.DakenNormal:
-		nd := s.issueDaken(ps, proto.DakenNormal)
-		out = append(out, to(from, proto.DakenIssued{Daken: []proto.DakenInstance{nd}}))
-	case proto.DakenEnemySent:
-		if ps.stack > 0 {
-			ps.stack--
-		}
-		out = append(out, s.dakenStackUpdated(ps, false))
-	case proto.DakenTrap:
-		if r.MissCount > 0 { // トラップミス→ペナルティ加算（#21c）
-			out = append(out, s.addStack(ps, s.params.Stack.TrapMissPenalty)...)
-		}
-	}
-
-	if ps.alive && s.personalLevel(ps) != prevPersonal { // 個人難易度が変わったら通知（#21d）
-		out = append(out, s.difficultyUpdatedFor(ps))
-	}
-	out = append(out, s.checkFinished()...)
-	return out
-}
-
-// ApplyStrategy は現在の作戦を差し替える（次の攻撃で参照）。
-func (s *Session) ApplyStrategy(from PlayerId, r proto.StrategySelect) []Outbound {
-	ps := s.players[from]
-	if ps == nil {
-		return nil
-	}
-	if r.StrategyId >= 0 && r.StrategyId <= 9 {
-		ps.strategy = r.StrategyId
-	}
+// ApplyOrderServed は提供完了(OrderServed)を処理する（サニティ→評価EMA→行列除去）。
+// tako-E で実装。現状は無処理。
+func (s *Session) ApplyOrderServed(from PlayerId, r proto.OrderServed) []Outbound {
+	_ = from
+	_ = r
 	return nil
 }
 
-// Tick は時間を dt 進め、全体難易度上昇・時間切れ積み残し・予告着弾・終了を処理する。
+// Tick は時間を dt 進める。実ループ（フェーズ/分配/我慢/離脱/評価/火力/storm/配信）は
+// tako-C 以降で実装する。現状は経過時間の加算のみ。
 func (s *Session) Tick(dtMs int) []Outbound {
 	if s.state != Running {
 		return nil
 	}
 	s.elapsedMs += int64(dtMs)
-	var out []Outbound
-	out = append(out, s.advanceGlobalDifficulty()...) // #21d
-	out = append(out, s.expireTimeouts()...)          // #21d 時間切れ→積み残し
-	out = append(out, s.expireWarnings()...)          // #21b 予告grace超過→着弾
-	out = append(out, s.checkFinished()...)
-	return out
+	return nil
 }
 
-// checkFinished は生存1人以下で Finished へ遷移し、優勝者へ GameOver を返す。
-func (s *Session) checkFinished() []Outbound {
-	if s.state != Running || s.aliveCount > 1 {
-		return nil
-	}
-	s.state = Finished
-	var out []Outbound
-	for _, pid := range s.order {
-		ps := s.players[pid]
-		if ps.alive {
-			out = append(out, to(pid, proto.GameOver{
-				Rank: 1, KoCount: ps.koCount, FinalBadgeCount: ps.badges,
-				TypingStats: s.typingStats(ps),
-			}))
-		}
-	}
-	return out
-}
+// ── ヘルパ ────────────────────────────────────────────────
 
-// ── 共通ヘルパ ────────────────────────────────────────────
-
-// typingStats は GameOver 用のリザルト統計を組み立てる（#51）。checkFinished /
-// eliminateWithKO の両方の GameOver 生成箇所で共有する。ElapsedMs は試合経過時間。
-func (s *Session) typingStats(ps *playerState) proto.TypingStats {
-	return proto.TypingStats{
-		TotalDakenCleared: ps.totalDakenCleared,
-		TotalMiss:         ps.totalMiss,
-		MaxCombo:          ps.maxCombo,
-		ElapsedMs:         int(s.elapsedMs),
-	}
-}
-
-// issueDaken は次のお題を発行し、台帳に記録して DakenInstance を返す。
-func (s *Session) issueDaken(ps *playerState, typ proto.DakenType) proto.DakenInstance {
-	lvl := s.effectiveLevel(ps)
-	var w Word
-	if typ == proto.DakenTrap {
-		w = s.words.NextTrap(s.rng)
-	} else {
-		w = s.words.Next(lvl, s.rng)
-	}
-	ps.dakenSeq++
-	id := fmt.Sprintf("%s-%d", ps.id, ps.dakenSeq)
-	tl := s.timeLimitFor(lvl)
-	ps.issued[id] = &issuedDaken{keystrokes: w.KeystrokeCount, typ: typ, timeLimitMs: tl, issuedAtMs: s.elapsedMs}
-	return proto.DakenInstance{
-		DakenId: id, Type: typ, Text: w.Text, DifficultyLevel: lvl,
-		TimeLimitMs: tl, IssuedAtServerTimeMs: s.elapsedMs,
-	}
-}
-
-// timeLimitFor は難易度段階のダケン制限時間。
-func (s *Session) timeLimitFor(level int) int {
-	o := s.params.Odai
-	tl := o.BaseTimeLimitMs - o.PerLevelReductionMs*level
-	if tl < o.MinTimeLimitMs {
-		tl = o.MinTimeLimitMs
-	}
-	return tl
-}
-
-func (s *Session) dakenStackUpdated(ps *playerState, trapPending bool) Outbound {
-	return to(ps.id, proto.DakenStackUpdated{Count: ps.stack, Limit: s.params.Stack.Limit, TrapPending: trapPending})
-}
-
-// resolveTargets は作戦idで対象を解決する。未登録は作戦4へフォールバック。
-func (s *Session) resolveTargets(id int, ctx TargetingContext) []PlayerId {
-	st := s.strategies[id]
-	if st == nil {
-		st = s.strategies[4]
-	}
-	if st == nil {
-		return nil
-	}
-	return st.SelectTargets(ctx)
-}
-
-// targetingContext は現在の生存状況から作戦解決用スナップショットを組み立てる。
-func (s *Session) targetingContext(ps *playerState) TargetingContext {
-	alive := make([]PlayerView, 0, s.aliveCount)
-	for _, pid := range s.order {
-		q := s.players[pid]
-		if !q.alive {
-			continue
-		}
-		alive = append(alive, PlayerView{
-			PlayerId: q.id, ComboValue: q.p.Combo(), DakenStackCount: q.stack,
-			DakenStackLimit: s.params.Stack.Limit, BadgeCount: q.badges,
-			IncomingWarnings: s.incomingCount(q.id),
-		})
-	}
-	var pending []PlayerId // 新しい順（作戦1カウンター）
-	for i := len(ps.pendingAgainstMe) - 1; i >= 0; i-- {
-		if w := s.warnings[ps.pendingAgainstMe[i]]; w != nil {
-			pending = append(pending, w.attacker)
-		}
-	}
-	return TargetingContext{SelfId: ps.id, Alive: alive, PendingAttackers: pending, LastImpactorId: ps.lastImpactor, Rng: s.rng}
-}
-
-// incomingCount は pid を対象に現在 Pending 中の予告数。
-func (s *Session) incomingCount(pid PlayerId) int {
-	n := 0
-	for _, w := range s.warnings {
-		if w.victim == pid {
-			n++
-		}
-	}
-	return n
-}
-
-func (s *Session) summaries() []proto.PlayerSummary {
-	out := make([]proto.PlayerSummary, 0, len(s.order))
-	for _, pid := range s.order {
-		p := s.players[pid]
-		out = append(out, proto.PlayerSummary{
-			PlayerId: p.id, DisplayName: p.name, ComboValue: p.p.Combo(),
-			DakenStackCount: p.stack, DakenStackLimit: s.params.Stack.Limit,
-			BadgeCount: p.badges, Alive: p.alive,
+func (s *Session) summaries() []proto.StoreSummary {
+	out := make([]proto.StoreSummary, 0, len(s.order))
+	for _, sid := range s.order {
+		st := s.stores[sid]
+		out = append(out, proto.StoreSummary{
+			StoreId:     st.id,
+			DisplayName: st.name,
+			Alive:       st.alive,
 		})
 	}
 	return out
 }
 
+// publicParams はクライアント表示用の公開サブセット。tako-K で新スキーマから正しくマップする。
 func (s *Session) publicParams() proto.GameParametersPublicSubset {
 	return proto.GameParametersPublicSubset{
-		StackLimit:             s.params.Stack.Limit,
-		TrapTriggerInterval:    s.params.Stack.TrapTriggerInterval,
-		PersonalDifficultyStep: s.params.Combo.PersonalDifficultyStep,
-		DifficultyMaxLevel:     s.params.Difficulty.MaxLevel,
-	}
-}
-
-// comboReasonToProto は内部の理由列挙を proto の契約値へ写像する（境界での変換）。
-func comboReasonToProto(r ComboReason) proto.ComboReason {
-	switch r {
-	case ReasonClear:
-		return proto.ComboClear
-	case ReasonMiss:
-		return proto.ComboMiss
-	case ReasonConsumed:
-		return proto.ComboConsumed
-	default:
-		return proto.ComboClear
+		MaxStores: len(s.order),
 	}
 }

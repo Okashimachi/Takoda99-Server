@@ -3,12 +3,11 @@
 //	go run ./cmd/server --mode match   # マッチングプール起動（人数下限＋カウントダウン＋Bot補完）
 //	go run ./cmd/server --mode solo    # 接続クライアント＋Botで即試合（ローカル確認用）
 //
-// 数値は GameParameters 経由（config）。作戦/お題/Bot は差し替え可能な部品を注入する。
+// 数値は GameParameters 経由（config）。お題/Bot は差し替え可能な部品を注入する。
 package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"log"
 	"net/http"
@@ -25,7 +24,6 @@ import (
 	"textro99/internal/db"
 	"textro99/internal/game"
 	"textro99/internal/matchmaking"
-	"textro99/internal/proto"
 	"textro99/internal/transport"
 )
 
@@ -77,7 +75,6 @@ func main() {
 				return
 			}
 			id := nextID()
-			welcome(conn, id)
 			players := []matchmaking.Player{{Id: id, Conn: conn}}
 			for i := 0; i < *bots; i++ {
 				players = append(players, app.NewBotPlayer(ctx, nextID(), bot.DefaultConfig()))
@@ -103,7 +100,6 @@ func main() {
 				return
 			}
 			id := nextID()
-			welcome(conn, id)
 			log.Printf("match: 参加 %s", id)
 			mm.Join(matchmaking.Player{Id: id, Conn: conn})
 		})
@@ -205,14 +201,7 @@ func listenAddr() string {
 	return ":8080"
 }
 
-func welcome(conn transport.Connection, id game.PlayerId) {
-	data, err := json.Marshal(proto.Welcome{PlayerId: id})
-	if err != nil {
-		return
-	}
-	_ = conn.Send(proto.Envelope{Type: proto.TypeWelcome, Payload: data})
-}
-
+// idString は店舗ID（"s-N"）を作る。
 func idString(n int64) string {
-	return "p-" + strconv.FormatInt(n, 10)
+	return "s-" + strconv.FormatInt(n, 10)
 }

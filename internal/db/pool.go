@@ -1,7 +1,7 @@
 // Package db は【インフラ・アダプタ】Postgres 永続化の実体。pgx を用いて
 // game.ConfigProvider（設定の取得/保存）と将来の試合結果保存（store.ResultStore, #52）を実装する。
 //
-// 第三者ドライバ(pgx)をこの層に閉じ込め、純粋な層3部品(config/odai/targeting)を汚さない
+// 第三者ドライバ(pgx)をこの層に閉じ込め、純粋な層3部品(config/odai)を汚さない
 // （transport が coder/websocket を閉じ込めるのと同じ役割）。合成ルート(cmd/server)が配線する。
 // ライブな試合状態は in-memory のまま。ここが触るのは永続データ（config/結果/統計）だけ。
 package db

@@ -2,9 +2,8 @@ module textro99
 
 go 1.25.0
 
-require github.com/Okashimachi/Textro99-Proto v0.1.0
-
 require (
+	github.com/Okashimachi/Takoda99-Proto v0.2.0
 	github.com/coder/websocket v1.8.15
 	github.com/jackc/pgx/v5 v5.10.0
 )
