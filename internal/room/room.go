@@ -121,22 +121,13 @@ func (r *Room) readConn(pid game.PlayerId, c transport.Connection) {
 }
 
 // handle は受信メッセージを型で振り分け、対応する session の step 関数を呼ぶ。
+// たこ焼き版の試合中 C2S は実質 OrderServed のみ。
 func (r *Room) handle(in inbound) []game.Outbound {
 	switch in.env.Type {
-	case proto.TypeDakenClearReport:
-		var m proto.DakenClearReport
+	case proto.TypeOrderServed:
+		var m proto.OrderServed
 		if json.Unmarshal(in.env.Payload, &m) == nil {
-			return r.session.ApplyDakenClear(in.pid, m)
-		}
-	case proto.TypeAttackRequest:
-		var m proto.AttackRequest
-		if json.Unmarshal(in.env.Payload, &m) == nil {
-			return r.session.ApplyAttack(in.pid, m)
-		}
-	case proto.TypeStrategySelect:
-		var m proto.StrategySelect
-		if json.Unmarshal(in.env.Payload, &m) == nil {
-			return r.session.ApplyStrategy(in.pid, m)
+			return r.session.ApplyOrderServed(in.pid, m)
 		}
 	}
 	return nil
@@ -165,34 +156,28 @@ func (r *Room) dispatch(out []game.Outbound) {
 func envelopeOf(msg any) (proto.Envelope, bool) {
 	var typ string
 	switch msg.(type) {
-	case proto.Welcome:
-		typ = proto.TypeWelcome
 	case proto.MatchStart:
 		typ = proto.TypeMatchStart
-	case proto.DakenIssued:
-		typ = proto.TypeDakenIssued
-	case proto.DakenExpired:
-		typ = proto.TypeDakenExpired
-	case proto.ComboUpdated:
-		typ = proto.TypeComboUpdated
-	case proto.DifficultyUpdated:
-		typ = proto.TypeDifficultyUpdated
-	case proto.AttackIncoming:
-		typ = proto.TypeAttackIncoming
-	case proto.AttackFailed:
-		typ = proto.TypeAttackFailed
-	case proto.OffsetResolved:
-		typ = proto.TypeOffsetResolved
-	case proto.DakenStackUpdated:
-		typ = proto.TypeDakenStackUpdated
-	case proto.KoNotified:
-		typ = proto.TypeKoNotified
-	case proto.PlayerListUpdated:
-		typ = proto.TypePlayerListUpdated
-	case proto.PlayerListDelta:
-		typ = proto.TypePlayerListDelta
-	case proto.GameOver:
-		typ = proto.TypeGameOver
+	case proto.CustomerArrived: // = CustomerView
+		typ = proto.TypeCustomerArrived
+	case proto.CustomerLeft:
+		typ = proto.TypeCustomerLeft
+	case proto.CreditUpdate:
+		typ = proto.TypeCreditUpdate
+	case proto.EvaluationUpdate:
+		typ = proto.TypeEvaluationUpdate
+	case proto.DifficultyUpdate:
+		typ = proto.TypeDifficultyUpdate
+	case proto.PhaseChange:
+		typ = proto.TypePhaseChange
+	case proto.StoreListUpdate:
+		typ = proto.TypeStoreListUpdate
+	case proto.ForcedEliminationWarning:
+		typ = proto.TypeForcedEliminationWarning
+	case proto.StoreEliminated:
+		typ = proto.TypeStoreEliminated
+	case proto.MatchEnd:
+		typ = proto.TypeMatchEnd
 	case proto.MatchmakingStatus:
 		typ = proto.TypeMatchmakingStatus
 	default:

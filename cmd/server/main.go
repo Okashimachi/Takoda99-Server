@@ -8,7 +8,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"log"
 	"net/http"
@@ -25,7 +24,6 @@ import (
 	"textro99/internal/db"
 	"textro99/internal/game"
 	"textro99/internal/matchmaking"
-	"textro99/internal/proto"
 	"textro99/internal/transport"
 )
 
@@ -77,7 +75,6 @@ func main() {
 				return
 			}
 			id := nextID()
-			welcome(conn, id)
 			players := []matchmaking.Player{{Id: id, Conn: conn}}
 			for i := 0; i < *bots; i++ {
 				players = append(players, app.NewBotPlayer(ctx, nextID(), bot.DefaultConfig()))
@@ -103,7 +100,6 @@ func main() {
 				return
 			}
 			id := nextID()
-			welcome(conn, id)
 			log.Printf("match: 参加 %s", id)
 			mm.Join(matchmaking.Player{Id: id, Conn: conn})
 		})
@@ -203,14 +199,6 @@ func listenAddr() string {
 		return ":" + p
 	}
 	return ":8080"
-}
-
-func welcome(conn transport.Connection, id game.PlayerId) {
-	data, err := json.Marshal(proto.Welcome{PlayerId: id})
-	if err != nil {
-		return
-	}
-	_ = conn.Send(proto.Envelope{Type: proto.TypeWelcome, Payload: data})
 }
 
 func idString(n int64) string {

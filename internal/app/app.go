@@ -16,43 +16,25 @@ import (
 	"textro99/internal/odai"
 	"textro99/internal/room"
 	"textro99/internal/store"
-	"textro99/internal/targeting"
 	"textro99/internal/transport"
 )
 
 // Deps は試合を組むための依存一式（合成ルートが用意して注入する）。
+// ※ 旧「作戦(TargetingStrategy)」は廃止（たこ焼き版は直接攻撃なし）。
 type Deps struct {
-	Params     game.GameParameters
-	Strategies map[int]game.TargetingStrategy
-	Words      game.WordSource
-	Store      store.ResultStore
-	Clock      room.Clock
+	Params game.GameParameters
+	Words  game.WordSource
+	Store  store.ResultStore
+	Clock  room.Clock
 }
 
-// DefaultStrategies は作戦0〜9の全実装を登録した集合を返す。
-func DefaultStrategies() map[int]game.TargetingStrategy {
-	return map[int]game.TargetingStrategy{
-		0: targeting.SplitAttackStrategy{},
-		1: targeting.CounterStrategy{},
-		2: targeting.FinisherStrategy{},
-		3: targeting.BadgeHunterStrategy{},
-		4: targeting.RandomStrategy{},
-		5: targeting.RevengeStrategy{},
-		6: targeting.TallPoppyStrategy{},
-		7: targeting.NeighborStrategy{},
-		8: targeting.PileOnStrategy{},
-		9: targeting.PacifistHunterStrategy{},
-	}
-}
-
-// DefaultDeps は DefaultLoader 相当の内蔵デフォルトで Deps を組む（solo/検証用の手軽な既定）。
+// DefaultDeps は内蔵デフォルトで Deps を組む（solo/検証用の手軽な既定）。
 func DefaultDeps() Deps {
 	return Deps{
-		Params:     game.DefaultParameters(),
-		Strategies: DefaultStrategies(),
-		Words:      odai.NewStaticPool(),
-		Store:      store.Noop{},
-		Clock:      room.RealClock{},
+		Params: game.DefaultParameters(),
+		Words:  odai.NewStaticPool(),
+		Store:  store.Noop{},
+		Clock:  room.RealClock{},
 	}
 }
 
@@ -75,7 +57,7 @@ func RunMatch(ctx context.Context, d Deps, players []matchmaking.Player) {
 		inits = append(inits, game.PlayerInit{Id: p.Id, DisplayName: string(p.Id)})
 		conns[p.Id] = p.Conn
 	}
-	sess := game.NewSession(nextMatchID(), d.Params, d.Strategies, d.Words, newRng(), inits)
+	sess := game.NewSession(nextMatchID(), d.Params, d.Words, newRng(), inits)
 	pub := transport.NewFullPublisher(d.Params.Session.PublishIntervalMs)
 	rm := room.New(sess, conns, d.Params.Session.TickIntervalMs, d.Clock, pub)
 	rm.Run(ctx)
