@@ -3,7 +3,7 @@
 //	go run ./cmd/server --mode match   # マッチングプール起動（人数下限＋カウントダウン＋Bot補完）
 //	go run ./cmd/server --mode solo    # 接続クライアント＋Botで即試合（ローカル確認用）
 //
-// 数値は GameParameters 経由（config）。作戦/お題/Bot は差し替え可能な部品を注入する。
+// 数値は GameParameters 経由（config）。お題/Bot は差し替え可能な部品を注入する。
 package main
 
 import (

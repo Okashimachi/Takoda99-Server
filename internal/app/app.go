@@ -1,4 +1,4 @@
-// Package app は【合成寄り】試合の組み立て（session+room の構築、Bot枠の生成、作戦の登録）を
+// Package app は【合成寄り】試合の組み立て（session+room の構築、Bot枠の生成）を
 // 再利用可能・テスト可能な形で提供する。cmd/server/main.go はこれと transport/matchmaking を
 // 薄く配線するだけにする。
 package app
