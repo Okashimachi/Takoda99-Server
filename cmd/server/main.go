@@ -201,6 +201,7 @@ func listenAddr() string {
 	return ":8080"
 }
 
+// idString は店舗ID（"s-N"）を作る。
 func idString(n int64) string {
-	return "p-" + strconv.FormatInt(n, 10)
+	return "s-" + strconv.FormatInt(n, 10)
 }

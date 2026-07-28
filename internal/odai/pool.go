@@ -1,8 +1,8 @@
-// Package odai は【層3・部品】難易度段階ごとのダケン（出題語）を供給する。
+// Package odai は【層3・部品】難易度（火力）段階ごとのお題単語を供給する。
 //
 // interface(WordSource) と Word 型はコア game が所有する（game/ports.go, DIP）。
 // ここは game.WordSource を実装するだけ。依存は game/stdlib のみ（depguard で機械強制）。
-// dakenId 発行・制限時間・難易度算出は game.Session が Word を包んで行う（odai は状態を持たない）。
+// お題ID発行・我慢ゲージ・難易度算出は game.Session が Word を包んで行う（odai は状態を持たない）。
 package odai
 
 import (

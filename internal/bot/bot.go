@@ -26,8 +26,6 @@ func DefaultConfig() Config { return Config{ServeIntervalMs: 500, MissRate: 0.05
 // Bot は1接続を自動操作する。
 type Bot struct {
 	conn transport.Connection
-	cfg  Config
-	rng  RandSource
 }
 
 // RandSource は Bot が使う乱数源（*rand.Rand を満たす最小 interface）。
@@ -36,8 +34,11 @@ type RandSource interface {
 }
 
 // New は Bot を作る。conn は自分の（クライアント側）接続。
+// cfg/rng は tako-J（OrderServed 自動生成）で使う。現状の no-op では保持しない。
 func New(conn transport.Connection, cfg Config, rng RandSource) *Bot {
-	return &Bot{conn: conn, cfg: cfg, rng: rng}
+	_ = cfg
+	_ = rng
+	return &Bot{conn: conn}
 }
 
 // Run は Bot を駆動する。現状は受信を読み流し、MatchEnd 受信・切断・ctx キャンセルで終了する。
@@ -61,6 +62,3 @@ func (b *Bot) Run(ctx context.Context) {
 		}
 	}
 }
-
-// _ は tako-J までの未使用フィールド抑止（cfg/rng は tako-J で使用）。
-var _ = func(b *Bot) (Config, RandSource) { return b.cfg, b.rng }

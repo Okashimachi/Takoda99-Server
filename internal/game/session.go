@@ -35,7 +35,6 @@ type Outbound struct {
 }
 
 func to(pid PlayerId, msg any) Outbound { return Outbound{To: Recipient{PlayerId: pid}, Msg: msg} }
-func broadcastMsg(msg any) Outbound     { return Outbound{To: Recipient{Broadcast: true}, Msg: msg} }
 
 // storeState は1店分の横断状態。たこ焼き版で creditLife/evalRaw/evalNormalized/rank/servedStats を
 // 加える（tako-B）。現状は骨組みの最小フィールドのみ。
@@ -147,6 +146,3 @@ func (s *Session) publicParams() proto.GameParametersPublicSubset {
 		MaxStores: len(s.order),
 	}
 }
-
-// 未使用の骨組みヘルパ（tako-C 以降で使用）。
-var _ = broadcastMsg
