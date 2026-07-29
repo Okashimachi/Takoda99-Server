@@ -19,6 +19,16 @@ type GameParameters struct {
 	Odai       OdaiParams       `json:"odai"`
 	Matching   MatchingParams   `json:"matching"`
 	Session    SessionParams    `json:"session"`
+
+	// たこ焼き版で追加（tako-B）。旧項目(Combo/Attack/Stack/Difficulty/Odai)は tako-K で
+	// 客/評価/信用/フェーズ/火力の新スキーマへ置換予定。
+	Credit CreditParams `json:"credit"`
+}
+
+// CreditParams: 信用（ライフ）。客の離脱でのみ減少・0で自滅脱落。
+// tako-K で leaveLoss(属性別) 等を拡充する。
+type CreditParams struct {
+	InitialLife int `json:"initialLife"` // 初期信用（例:3。約3回の離脱で脱落）
 }
 
 // ComboParams: コンボの蓄積・減衰・個人難易度連動。
@@ -125,7 +135,8 @@ func DefaultParameters() GameParameters {
 		},
 		Session: SessionParams{
 			TickIntervalMs:    150,
-			PublishIntervalMs: 250, // 約4Hz。KO等の即時イベントとは別に、盤面は低頻度スナップ
+			PublishIntervalMs: 250, // 約4Hz。即時イベントとは別に、盤面は低頻度スナップ
 		},
+		Credit: CreditParams{InitialLife: 3},
 	}
 }
