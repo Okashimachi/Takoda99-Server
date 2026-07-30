@@ -28,6 +28,20 @@ type GameParameters struct {
 	// 評価/信用/フェーズ/火力の新スキーマへ置換予定。
 	Credit   CreditParams   `json:"credit"`   // tako-B
 	Customer CustomerParams `json:"customer"` // tako-D
+	Eval     EvalParams     `json:"eval"`     // tako-E
+}
+
+// EvalParams: 提供スコア→評価EMA の調整値（tako-E）。すべて全項目 comparable に保つ（== 比較維持）。
+type EvalParams struct {
+	EmaAlpha        float64 `json:"emaAlpha"`        // 評価EMA の係数（0..1・大きいほど直近重視）
+	WeightAccuracy  float64 `json:"weightAccuracy"`  // 提供スコアの精度重み w_acc
+	WeightSpeed     float64 `json:"weightSpeed"`     // 提供スコアの速度重み w_spd
+	SpeedBaselineMs int     `json:"speedBaselineMs"` // 速度=baseline/elapsed が 1.0 になる基準所要
+	SpeedCap        float64 `json:"speedCap"`        // 速度の上限（速すぎる報告の頭打ち）
+	MinMsPerWord    int     `json:"minMsPerWord"`    // サニティ下限：1語あたり最小所要（elapsed 下限＝×orderCount）
+	BuzzBonus       float64 `json:"buzzBonus"`       // JK(Buzz)満足時の一時加点
+	BuzzDecay       float64 `json:"buzzDecay"`       // 一時加点の毎tick乗算減衰（0..1）
+	BuzzCap         float64 `json:"buzzCap"`         // 一時加点の上限
 }
 
 // CreditParams: 信用（ライフ）。客の離脱でのみ減少・0で自滅脱落。
@@ -174,6 +188,17 @@ func DefaultParameters() GameParameters {
 			Bonus:   AttributeSpec{Attribute: proto.AttrBonus, Weight: 15, PatienceBaseMs: 9000, OrderCount: 2},
 			Claimer: AttributeSpec{Attribute: proto.AttrClaimer, Weight: 10, PatienceBaseMs: 6000, OrderCount: 1},
 			Buzz:    AttributeSpec{Attribute: proto.AttrBuzz, Weight: 5, PatienceBaseMs: 12000, OrderCount: 4},
+		},
+		Eval: EvalParams{
+			EmaAlpha:        0.3,
+			WeightAccuracy:  0.5,
+			WeightSpeed:     0.5,
+			SpeedBaselineMs: 4000,
+			SpeedCap:        2.0,
+			MinMsPerWord:    200,
+			BuzzBonus:       0.2,
+			BuzzDecay:       0.98,
+			BuzzCap:         0.5,
 		},
 	}
 }

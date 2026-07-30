@@ -44,17 +44,27 @@ type customer struct {
 	patienceMaxMs  int
 	patienceLeftMs int
 	orderCount     int       // 打つ単語数（属性別・来店時のお題本数）
+	keystrokeTotal int       // 来店時に発行した全語の正準打鍵数の合計（精度算出の分母・tako-E）
 	assignedStore  *PlayerId // 割り当て先の店。nil=未割当（restPool）
 }
 
-// storeState は1店分の権威状態。リザルト統計(servedStats)は tako-E（提供処理）で追加する。
+// servedStats は1店の提供集計（リザルト用・tako-E）。平均は結果確定時(tako-I)に算出する。
+type servedStats struct {
+	count       int     // 提供した注文数
+	accuracySum float64 // 精度の総和（÷count で平均精度）
+	elapsedSum  int64   // 所要msの総和（÷count で平均所要）
+}
+
+// storeState は1店分の権威状態。
 type storeState struct {
 	id             PlayerId
 	name           string
 	creditLife     int     // 信用(HP)。客の離脱でのみ減少・0で自滅脱落（tako-F）
 	evalRaw        float64 // 評価EMA（正規化前・tako-E で更新）
+	buzzBonus      float64 // JK(Buzz)満足の一時加点（毎tick減衰・tako-E）
 	evalNormalized float64 // 生存店内パーセンタイル 0..1（tako-G で更新）
 	rank           int     // 生存店内の評価順位（tako-G）
+	served         servedStats
 	alive          bool
 }
 
@@ -144,11 +154,89 @@ func (s *Session) Start() []Outbound {
 	return out
 }
 
-// ApplyOrderServed は提供完了(OrderServed)を処理する（サニティ→評価EMA→行列除去）。tako-E で実装。
+// ApplyOrderServed は提供完了(OrderServed)を処理する（tako-E）。
+// サニティ検証 → 提供スコア(perOrder) → 評価EMA反映 → 満足客を行列から除去 → EvaluationUpdate 配信。
+// 判定の権威はサーバー：クライアント計測(elapsedMs/missCount)は性善説で受けるが下限クランプ＋逸脱棄却する。
 func (s *Session) ApplyOrderServed(from PlayerId, r proto.OrderServed) []Outbound {
-	_ = from
-	_ = r
-	return nil
+	if s.state != Running {
+		return nil
+	}
+	st := s.stores[from]
+	c := s.customers[r.CustomerId]
+	q := s.storeQueues[from]
+	// サニティ①：該当客が存在し、この店の行列先頭（＝対応中）か。割当済み＋先頭一致の両方を要求し、
+	// 途中の客を飛ばして捌く逸脱を棄却する（先頭のみ patience 減算する tako-F と整合させる）。
+	if st == nil || !st.alive || c == nil || c.assignedStore == nil || *c.assignedStore != from ||
+		len(q) == 0 || q[0] != r.CustomerId {
+		return nil
+	}
+	// 注: 「提供間隔が短すぎないか」のレート制限は tako-E では入れない。純粋・tick駆動のコアが持つ
+	// 時計は tick 粒度(≒150ms)しかなく、minMsPerWord(200ms)基準で判定すると正当な連続提供を
+	// 誤棄却する。提供完了の間隔と1注文の所要は別物でもある。本格的なレート制限は専用のアンチ
+	// チート課題（細かい時計/トークンバケット）で扱う。ここでは下記の下限クランプで score 膨張を防ぐ。
+
+	ep := s.params.Eval
+	// サニティ②：elapsedMs を下限（minMsPerWord×orderCount）へクランプ。missCount は [0, 総打鍵] へ。
+	floor := ep.MinMsPerWord * c.orderCount
+	elapsed := r.ElapsedMs
+	if elapsed < floor {
+		elapsed = floor
+	}
+	if elapsed <= 0 {
+		elapsed = 1 // 0除算保険（floor<=0 の異常設定）
+	}
+	keys := c.keystrokeTotal
+	if keys <= 0 {
+		keys = 1 // 0除算保険（打鍵数不明の異常）
+	}
+	miss := r.MissCount
+	if miss < 0 {
+		miss = 0
+	}
+	if miss > keys {
+		miss = keys
+	}
+
+	// 提供スコア：perOrder = w_acc*精度 + w_spd*速度。
+	accuracy := 1 - float64(miss)/float64(keys)                                   // 0..1
+	speed := clampF(float64(ep.SpeedBaselineMs)/float64(elapsed), 0, ep.SpeedCap) // 0..speedCap
+	perOrder := ep.WeightAccuracy*accuracy + ep.WeightSpeed*speed
+
+	// 評価EMA反映。JK(Buzz)は一時加点（上限クランプ・減衰は stepEvaluate）。
+	st.evalRaw = ep.EmaAlpha*perOrder + (1-ep.EmaAlpha)*st.evalRaw
+	if c.attribute == proto.AttrBuzz {
+		st.buzzBonus = clampF(st.buzzBonus+ep.BuzzBonus, 0, ep.BuzzCap)
+	}
+
+	// リザルト集計。
+	st.served.count++
+	st.served.accuracySum += accuracy
+	st.served.elapsedSum += int64(elapsed)
+
+	// 満足：対応中の客を行列から除き、たべたべエリアへ戻す（次tickで tako-G の分配対象）。
+	s.releaseToRest(r.CustomerId)
+
+	// 評価更新を提供店へ配信（normalized/rank は tako-G が次tickで付与）。
+	return append([]Outbound(nil), to(from, proto.EvaluationUpdate{
+		EvalRaw:    s.evalScore(st),
+		Normalized: st.evalNormalized,
+		Rank:       st.rank,
+		AliveCount: s.aliveCount,
+	}))
+}
+
+// evalScore は正規化/順位付けに使う実効評価＝EMA基準＋JK一時加点。
+func (s *Session) evalScore(st *storeState) float64 { return st.evalRaw + st.buzzBonus }
+
+// clampF は v を [lo,hi] に収める。
+func clampF(v, lo, hi float64) float64 {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
 }
 
 // Tick は時間を dt 進め、試合ループの各ステップを試合進行仕様 §4 の順序で呼ぶ。
@@ -187,8 +275,22 @@ func (s *Session) stepDistribute(out []Outbound) []Outbound { return out }
 // 属性(Normal/Bonus/Claimer/Buzz)で発火可否を分岐しない（#29 の詰まりガード）。tako-F。
 func (s *Session) stepPatience(dtMs int, out []Outbound) []Outbound { _ = dtMs; return out }
 
-// stepEvaluate は tako-E で積まれた提供結果を集計し evalRaw(EMA) を更新する。tako-E。
-func (s *Session) stepEvaluate(out []Outbound) []Outbound { return out }
+// stepEvaluate は評価の時間減衰を進める（tako-E）。
+// evalRaw 本体は提供イベント(ApplyOrderServed)で即時反映するため、ここでは JK 一時加点(buzzBonus)を
+// 毎tick減衰させるだけ。微小値は 0 に丸めて残留を防ぐ。配信は次の提供/正規化(tako-G)に委ねる。
+func (s *Session) stepEvaluate(out []Outbound) []Outbound {
+	decay := s.params.Eval.BuzzDecay
+	for _, st := range s.stores {
+		if !st.alive || st.buzzBonus == 0 {
+			continue
+		}
+		st.buzzBonus *= decay
+		if st.buzzBonus < 1e-4 {
+			st.buzzBonus = 0
+		}
+	}
+	return out
+}
 
 // stepNormalize は生存店内で evalRaw をパーセンタイル化(evalNormalized)＋rank 確定し、EvaluationUpdate を配る。tako-G。
 func (s *Session) stepNormalize(out []Outbound) []Outbound { return out }
@@ -270,9 +372,13 @@ func (s *Session) admitCustomer(cid proto.CustomerId, store PlayerId) (Outbound,
 	}
 	s.assignCustomer(cid, store) // 行列末尾へ＋我慢ゲージ満タン
 	words := make([]string, 0, c.orderCount)
+	keystrokes := 0
 	for i := 0; i < c.orderCount; i++ {
-		words = append(words, s.words.Next(s.wordLevel(), s.rng).Text)
+		w := s.words.Next(s.wordLevel(), s.rng)
+		words = append(words, w.Text)
+		keystrokes += w.KeystrokeCount
 	}
+	c.keystrokeTotal = keystrokes // 精度算出の分母（tako-E の提供処理が参照）
 	view := proto.CustomerView{
 		CustomerId:    cid,
 		Attribute:     c.attribute,
