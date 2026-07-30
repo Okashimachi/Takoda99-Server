@@ -65,7 +65,6 @@ type storeState struct {
 	evalNormalized float64 // 生存店内パーセンタイル 0..1（tako-G で更新）
 	rank           int     // 生存店内の評価順位（tako-G）
 	served         servedStats
-	lastServeMs    int64 // 直近の提供を受理した試合内時刻（提供間隔サニティ・tako-E）
 	alive          bool
 }
 
@@ -168,14 +167,13 @@ func (s *Session) ApplyOrderServed(from PlayerId, r proto.OrderServed) []Outboun
 	if st == nil || !st.alive || c == nil || c.assignedStore == nil || *c.assignedStore != from {
 		return nil
 	}
-	// サニティ②：提供間隔が短すぎない（2件目以降のみ）。1語分の最小所要より速い連投は棄却。
-	minGap := int64(s.params.Eval.MinMsPerWord)
-	if st.served.count > 0 && s.elapsedMs-st.lastServeMs < minGap {
-		return nil
-	}
+	// 注: 「提供間隔が短すぎないか」のレート制限は tako-E では入れない。純粋・tick駆動のコアが持つ
+	// 時計は tick 粒度(≒150ms)しかなく、minMsPerWord(200ms)基準で判定すると正当な連続提供を
+	// 誤棄却する。提供完了の間隔と1注文の所要は別物でもある。本格的なレート制限は専用のアンチ
+	// チート課題（細かい時計/トークンバケット）で扱う。ここでは下記の下限クランプで score 膨張を防ぐ。
 
 	ep := s.params.Eval
-	// サニティ③：elapsedMs を下限（minMsPerWord×orderCount）へクランプ。missCount は [0, 総打鍵] へ。
+	// サニティ②：elapsedMs を下限（minMsPerWord×orderCount）へクランプ。missCount は [0, 総打鍵] へ。
 	floor := ep.MinMsPerWord * c.orderCount
 	elapsed := r.ElapsedMs
 	if elapsed < floor {
@@ -211,7 +209,6 @@ func (s *Session) ApplyOrderServed(from PlayerId, r proto.OrderServed) []Outboun
 	st.served.count++
 	st.served.accuracySum += accuracy
 	st.served.elapsedSum += int64(elapsed)
-	st.lastServeMs = s.elapsedMs
 
 	// 満足：対応中の客を行列から除き、たべたべエリアへ戻す（次tickで tako-G の分配対象）。
 	s.releaseToRest(r.CustomerId)

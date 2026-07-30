@@ -391,8 +391,8 @@ func TestApplyOrderServed_ClampsElapsedFloor(t *testing.T) {
 	}
 }
 
-// 提供間隔が短すぎる連投は棄却（2件目以降）。
-func TestApplyOrderServed_RejectsTooFrequent(t *testing.T) {
+// 連続提供は tick 未経過でも両方受理される（提供間隔レート制限は入れない＝正当プレイを誤棄却しない）。
+func TestApplyOrderServed_AllowsConsecutive(t *testing.T) {
 	s := newTestSession(2)
 	s.Start()
 	store := s.order[0]
@@ -401,15 +401,14 @@ func TestApplyOrderServed_RejectsTooFrequent(t *testing.T) {
 	placeAssigned(s, a, store, proto.AttrNormal, 1, 5)
 	placeAssigned(s, b, store, proto.AttrNormal, 1, 5)
 
-	// elapsedMs=0（tick未経過）。1件目は受理、直後の2件目は間隔0で棄却。
 	if out := s.ApplyOrderServed(store, proto.OrderServed{CustomerId: a, ElapsedMs: 3000}); out == nil {
 		t.Fatal("1件目は受理されるはず")
 	}
-	if out := s.ApplyOrderServed(store, proto.OrderServed{CustomerId: b, ElapsedMs: 3000}); out != nil {
-		t.Fatalf("間隔ゼロの2件目は棄却されるはず: %v", out)
+	if out := s.ApplyOrderServed(store, proto.OrderServed{CustomerId: b, ElapsedMs: 3000}); out == nil {
+		t.Fatal("2件目も受理されるはず（tick未経過でも棄却しない）")
 	}
-	if s.customers[b].assignedStore == nil {
-		t.Fatal("棄却された客 b は割当のまま残るはず")
+	if s.stores[store].served.count != 2 {
+		t.Fatalf("2件とも集計されるはず: %d", s.stores[store].served.count)
 	}
 }
 
