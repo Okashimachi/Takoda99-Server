@@ -163,8 +163,11 @@ func (s *Session) ApplyOrderServed(from PlayerId, r proto.OrderServed) []Outboun
 	}
 	st := s.stores[from]
 	c := s.customers[r.CustomerId]
-	// サニティ①：該当客が存在し、この店に割当済み（＝対応中）か。逸脱は棄却。
-	if st == nil || !st.alive || c == nil || c.assignedStore == nil || *c.assignedStore != from {
+	q := s.storeQueues[from]
+	// サニティ①：該当客が存在し、この店の行列先頭（＝対応中）か。割当済み＋先頭一致の両方を要求し、
+	// 途中の客を飛ばして捌く逸脱を棄却する（先頭のみ patience 減算する tako-F と整合させる）。
+	if st == nil || !st.alive || c == nil || c.assignedStore == nil || *c.assignedStore != from ||
+		len(q) == 0 || q[0] != r.CustomerId {
 		return nil
 	}
 	// 注: 「提供間隔が短すぎないか」のレート制限は tako-E では入れない。純粋・tick駆動のコアが持つ

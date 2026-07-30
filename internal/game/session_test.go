@@ -391,6 +391,28 @@ func TestApplyOrderServed_ClampsElapsedFloor(t *testing.T) {
 	}
 }
 
+// 行列先頭以外の客の提供は棄却（対応中＝先頭のみ）。
+func TestApplyOrderServed_RejectsNonFront(t *testing.T) {
+	s := newTestSession(2)
+	s.Start()
+	store := s.order[0]
+	front := proto.CustomerId("front")
+	behind := proto.CustomerId("behind")
+	placeAssigned(s, front, store, proto.AttrNormal, 1, 5)
+	placeAssigned(s, behind, store, proto.AttrNormal, 1, 5) // 行列2番目
+
+	if out := s.ApplyOrderServed(store, proto.OrderServed{CustomerId: behind, ElapsedMs: 3000}); out != nil {
+		t.Fatalf("先頭以外(behind)の提供は棄却されるはず: %v", out)
+	}
+	if s.stores[store].served.count != 0 {
+		t.Fatalf("棄却時は集計されないはず: %d", s.stores[store].served.count)
+	}
+	// 先頭(front)なら受理。
+	if out := s.ApplyOrderServed(store, proto.OrderServed{CustomerId: front, ElapsedMs: 3000}); out == nil {
+		t.Fatal("先頭(front)の提供は受理されるはず")
+	}
+}
+
 // 連続提供は tick 未経過でも両方受理される（提供間隔レート制限は入れない＝正当プレイを誤棄却しない）。
 func TestApplyOrderServed_AllowsConsecutive(t *testing.T) {
 	s := newTestSession(2)
