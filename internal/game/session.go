@@ -1,6 +1,7 @@
 package game
 
 import (
+	"fmt"
 	"math/rand"
 
 	"textro99/internal/proto"
@@ -42,6 +43,7 @@ type customer struct {
 	attribute      proto.CustomerAttribute
 	patienceMaxMs  int
 	patienceLeftMs int
+	orderCount     int       // 打つ単語数（属性別・来店時のお題本数）
 	assignedStore  *PlayerId // 割り当て先の店。nil=未割当（restPool）
 }
 
@@ -86,7 +88,7 @@ type Session struct {
 }
 
 // NewSession は WaitingStart 状態の試合を作る。店舗を初期ライフ／評価初期値で用意し、
-// 客レジストリ・行列・たべたべエリアは空で初期化する（客の 300 初期化は tako-D）。
+// 客レジストリ・行列・たべたべエリアは空で初期化する（客の生成は Start 時の initCustomers）。
 func NewSession(id proto.MatchId, params GameParameters, words WordSource, rng *rand.Rand, inits []PlayerInit) *Session {
 	s := &Session{
 		id: id, params: params, words: words, rng: rng,
@@ -121,12 +123,13 @@ func (s *Session) Snapshot() ([]proto.StoreSummary, int) {
 	return s.summaries(), s.aliveCount
 }
 
-// Start は WaitingStart→Running へ遷移し、各店へ MatchStart を配る。
+// Start は WaitingStart→Running へ遷移し、客プール(300)を生成して各店へ MatchStart を配る。
 func (s *Session) Start() []Outbound {
 	if s.state != WaitingStart {
 		return nil
 	}
 	s.state = Running
+	s.initCustomers()
 	stores := s.summaries()
 	out := make([]Outbound, 0, len(s.order))
 	for _, sid := range s.order {
@@ -209,6 +212,79 @@ func (s *Session) checkFinish(out []Outbound) []Outbound {
 	}
 	return out
 }
+
+// ── 客システム（tako-D）──────────────────────────────────────
+
+// initCustomers は客プール（customerTotal 人）を生成し、属性・我慢・注文数を付与して
+// たべたべエリア(restPool) に積む。Start 時に一度だけ呼ぶ。実際に「いつ・どの店へ」来店させるかは
+// 分配(tako-G)。Claimer の中盤解禁などフェーズ制御は tako-G/H。
+func (s *Session) initCustomers() {
+	total := s.params.Customer.Total
+	s.restPool = make([]proto.CustomerId, 0, total)
+	for i := 0; i < total; i++ {
+		cid := proto.CustomerId(fmt.Sprintf("c-%d", i+1))
+		spec := s.rollAttribute()
+		s.customers[cid] = &customer{
+			attribute:     spec.Attribute,
+			patienceMaxMs: spec.PatienceBaseMs,
+			orderCount:    spec.OrderCount,
+		}
+		s.restPool = append(s.restPool, cid)
+	}
+}
+
+// attributeSpecs は属性仕様を固定順（Normal→Bonus→Claimer→Buzz）で返す。
+// 重み抽選の決定性のため順序を固定する。
+func (s *Session) attributeSpecs() []AttributeSpec {
+	c := s.params.Customer
+	return []AttributeSpec{c.Normal, c.Bonus, c.Claimer, c.Buzz}
+}
+
+// rollAttribute は出現率の重みに従って属性仕様を1つ引く（rng・順序で決定的）。
+func (s *Session) rollAttribute() AttributeSpec {
+	specs := s.attributeSpecs()
+	total := 0
+	for _, a := range specs {
+		total += a.Weight
+	}
+	if total <= 0 {
+		return specs[0] // 保険（重みが全て0の異常設定でもパニックさせない）
+	}
+	r := s.rng.Intn(total)
+	for _, a := range specs {
+		if r < a.Weight {
+			return a
+		}
+		r -= a.Weight
+	}
+	return specs[len(specs)-1]
+}
+
+// admitCustomer は客1人を store へ来店させる単位処理（分配 tako-G が呼ぶ）。
+// 行列へ割り当て、お題単語を orderCount 本発行し、その店への CustomerArrived を返す。
+// 客が存在しない場合は ok=false。
+func (s *Session) admitCustomer(cid proto.CustomerId, store PlayerId) (Outbound, bool) {
+	c := s.customers[cid]
+	if c == nil {
+		return Outbound{}, false
+	}
+	s.assignCustomer(cid, store) // 行列末尾へ＋我慢ゲージ満タン
+	words := make([]string, 0, c.orderCount)
+	for i := 0; i < c.orderCount; i++ {
+		words = append(words, s.words.Next(s.wordLevel(), s.rng).Text)
+	}
+	view := proto.CustomerView{
+		CustomerId:    cid,
+		Attribute:     c.attribute,
+		OrderCount:    c.orderCount,
+		Words:         words,
+		PatienceMaxMs: c.patienceMaxMs,
+	}
+	return to(store, view), true // CustomerArrived(=CustomerView) を来店店へ
+}
+
+// wordLevel はお題難度の実効レベル。火力(Heat)由来にするのは tako-H。当面は基準レベル 0。
+func (s *Session) wordLevel() int { return 0 }
 
 // ── 客の移動ヘルパ（実体を複製せず ID配列の増減のみ・一貫性バグ回避）──────────
 

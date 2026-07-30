@@ -212,6 +212,95 @@ func TestTick_SoloIdles(t *testing.T) {
 	}
 }
 
+// Start で客プール（customerTotal 人）が生成され、たべたべエリアに積まれる。
+func TestStart_InitsCustomers(t *testing.T) {
+	total := DefaultParameters().Customer.Total
+	s := newTestSession(3)
+	if len(s.customers) != 0 || len(s.restPool) != 0 {
+		t.Fatalf("Start 前は空のはず: customers=%d rest=%d", len(s.customers), len(s.restPool))
+	}
+	s.Start()
+	if len(s.customers) != total || len(s.restPool) != total {
+		t.Fatalf("客プールが %d 人のはず: customers=%d rest=%d", total, len(s.customers), len(s.restPool))
+	}
+	for cid, c := range s.customers {
+		if c.orderCount <= 0 || c.patienceMaxMs <= 0 {
+			t.Fatalf("%s: orderCount/patienceMaxMs が未設定: order=%d patience=%d", cid, c.orderCount, c.patienceMaxMs)
+		}
+		if c.assignedStore != nil {
+			t.Fatalf("%s: 初期は未割当(restPool)のはず", cid)
+		}
+	}
+}
+
+// admitCustomer は来店処理：行列へ割り当て・お題本数=orderCount で CustomerArrived を返す。
+func TestAdmitCustomer(t *testing.T) {
+	s := newTestSession(2)
+	s.Start()
+	store := s.order[0]
+	cid := s.restPool[0]
+	want := s.customers[cid]
+
+	out, ok := s.admitCustomer(cid, store)
+	if !ok {
+		t.Fatal("admitCustomer が失敗した")
+	}
+	if out.To.PlayerId != store {
+		t.Fatalf("宛先が来店店でない: %s != %s", out.To.PlayerId, store)
+	}
+	view, ok := out.Msg.(proto.CustomerArrived)
+	if !ok {
+		t.Fatalf("CustomerArrived でない: %T", out.Msg)
+	}
+	if view.CustomerId != cid || view.Attribute != want.attribute {
+		t.Fatalf("view の client/attr 不一致: %+v", view)
+	}
+	if view.OrderCount != want.orderCount || len(view.Words) != want.orderCount {
+		t.Fatalf("words 本数=orderCount(%d) のはず: orderCount=%d words=%d", want.orderCount, view.OrderCount, len(view.Words))
+	}
+	if view.PatienceMaxMs != want.patienceMaxMs {
+		t.Fatalf("patienceMaxMs 不一致: %d != %d", view.PatienceMaxMs, want.patienceMaxMs)
+	}
+	// 行列へ入り、restPool から抜けている。
+	q := s.storeQueues[store]
+	if len(q) != 1 || q[0] != cid {
+		t.Fatalf("行列に入っていない: %v", q)
+	}
+	for _, r := range s.restPool {
+		if r == cid {
+			t.Fatal("restPool から抜けていない")
+		}
+	}
+}
+
+// 属性分布が出現率（重み）に概ね一致する（シード固定・決定的）。
+func TestAttributeDistribution(t *testing.T) {
+	s := newTestSession(3)
+	s.Start()
+	total := len(s.customers)
+	counts := map[proto.CustomerAttribute]int{}
+	for _, c := range s.customers {
+		counts[c.attribute]++
+	}
+	// 全属性が出現し、各割合が期待重み比の ±10ポイント以内。
+	specs := s.attributeSpecs()
+	weightSum := 0
+	for _, a := range specs {
+		weightSum += a.Weight
+	}
+	for _, a := range specs {
+		got := counts[a.Attribute]
+		if got == 0 {
+			t.Fatalf("属性 %s が1人も出現していない", a.Attribute)
+		}
+		wantFrac := float64(a.Weight) / float64(weightSum)
+		gotFrac := float64(got) / float64(total)
+		if diff := gotFrac - wantFrac; diff < -0.1 || diff > 0.1 {
+			t.Fatalf("属性 %s の割合が乖離: want~%.2f got %.2f", a.Attribute, wantFrac, gotFrac)
+		}
+	}
+}
+
 // MatchStart の公開params に matchTimeLimitMs が乗る（案A の配線確認）。
 func TestPublicParams_CarriesMatchTimeLimit(t *testing.T) {
 	want := DefaultParameters().Session.MatchTimeLimitMs
