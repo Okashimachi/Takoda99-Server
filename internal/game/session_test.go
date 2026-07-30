@@ -12,7 +12,9 @@ import (
 type fakeWords struct{}
 
 func (fakeWords) Next(int, *rand.Rand) Word { return Word{Text: "たこ", KeystrokeCount: 4} }
-func (fakeWords) NextTrap(*rand.Rand) Word  { return Word{Text: "ながいおだい", KeystrokeCount: 12} }
+func (fakeWords) NextTrap(*rand.Rand) Word {
+	return Word{Text: "ながいおだい", KeystrokeCount: 12}
+}
 
 func newTestSession(n int) *Session {
 	inits := make([]PlayerInit, n)
@@ -123,5 +125,103 @@ func TestCustomerMove(t *testing.T) {
 	}
 	if s.customers[cid].assignedStore != nil {
 		t.Fatal("assignedStore がクリアされていない")
+	}
+}
+
+// Tick は Running 以外では何もしない（時間も状態も動かさない）。
+func TestTick_NotRunningNoOp(t *testing.T) {
+	s := newTestSession(3) // WaitingStart のまま
+	if out := s.Tick(150); out != nil {
+		t.Fatalf("未開始の Tick は nil のはず: %v", out)
+	}
+	if s.tick != 0 || s.elapsedMs != 0 {
+		t.Fatalf("未開始で時間が進んだ: tick=%d elapsed=%d", s.tick, s.elapsedMs)
+	}
+}
+
+// 骨格ステップは no-op なので、Tick を繰り返しても落ちず・出力なしで時間だけ進む。
+func TestTick_AdvancesNoOutput(t *testing.T) {
+	s := newTestSession(3)
+	s.Start()
+	const n, dt = 5, 150
+	for i := 0; i < n; i++ {
+		if out := s.Tick(dt); out != nil {
+			t.Fatalf("骨格 Tick は出力なしのはず(i=%d): %v", i, out)
+		}
+	}
+	if s.tick != n {
+		t.Fatalf("tick が %d 進むはず: %d", n, s.tick)
+	}
+	if s.elapsedMs != int64(n*dt) {
+		t.Fatalf("elapsedMs=%d のはず: %d", n*dt, s.elapsedMs)
+	}
+	if s.State() != Running {
+		t.Fatalf("まだ Running のはず: %v", s.State())
+	}
+}
+
+// 大きな dt でも落ちない（tako-L のシミュレータが Tick(大dt) を反復呼びする前提）。
+func TestTick_BigDt(t *testing.T) {
+	s := newTestSession(3)
+	s.params.Session.MatchTimeLimitMs = 0 // 時間切れ終了を無効化し dt 耐性だけ見る
+	s.Start()
+	s.Tick(60000)
+	if s.elapsedMs != 60000 || s.tick != 1 {
+		t.Fatalf("大dtで elapsed/tick が進むはず: elapsed=%d tick=%d", s.elapsedMs, s.tick)
+	}
+	if s.State() != Running {
+		t.Fatalf("時間切れ無効なので Running のはず: %v", s.State())
+	}
+}
+
+// 生存1で Finished（中身＝順位確定/MatchEnd は tako-I）。
+func TestTick_FinishOnLastAlive(t *testing.T) {
+	s := newTestSession(3)
+	s.Start()
+	s.aliveCount = 1 // storm(tako-H)で1店残った状況を模す
+	s.Tick(150)
+	if s.State() != Finished {
+		t.Fatalf("生存1で Finished のはず: %v", s.State())
+	}
+}
+
+// 時間切れで Finished。
+func TestTick_FinishOnTimeLimit(t *testing.T) {
+	s := newTestSession(3)
+	s.params.Session.MatchTimeLimitMs = 1000
+	s.Start()
+	s.Tick(1000)
+	if s.State() != Finished {
+		t.Fatalf("時間切れで Finished のはず: %v", s.State())
+	}
+	if out := s.Tick(150); out != nil {
+		t.Fatalf("Finished 後の Tick は nil のはず: %v", out)
+	}
+}
+
+// solo/dev（単独店＋MatchTimeLimitMs=0）は終了せず idle し続ける（設計どおり）。
+func TestTick_SoloIdles(t *testing.T) {
+	s := newTestSession(1)
+	s.params.Session.MatchTimeLimitMs = 0
+	s.Start()
+	for i := 0; i < 100; i++ {
+		s.Tick(1000)
+	}
+	if s.State() != Running {
+		t.Fatalf("solo は idle 継続（Running）のはず: %v", s.State())
+	}
+}
+
+// MatchStart の公開params に matchTimeLimitMs が乗る（案A の配線確認）。
+func TestPublicParams_CarriesMatchTimeLimit(t *testing.T) {
+	want := DefaultParameters().Session.MatchTimeLimitMs
+	s := newTestSession(3)
+	out := s.Start()
+	ms, ok := out[0].Msg.(proto.MatchStart)
+	if !ok {
+		t.Fatalf("MatchStart でない: %T", out[0].Msg)
+	}
+	if ms.Params.MatchTimeLimitMs != want {
+		t.Fatalf("公開paramsの matchTimeLimitMs=%d のはず: %d", want, ms.Params.MatchTimeLimitMs)
 	}
 }

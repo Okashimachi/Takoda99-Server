@@ -70,9 +70,9 @@ type Session struct {
 	rng    *rand.Rand
 
 	// 客の権威データ（単一情報源）。移動は ID配列の増減のみ（実体を複製・破棄しない）。
-	customers   map[proto.CustomerId]*customer   // 客レジストリ（tako-D で 300 初期化）
-	storeQueues map[PlayerId][]proto.CustomerId  // 各店の行列（先頭=対応中）
-	restPool    []proto.CustomerId               // たべたべエリア（未割当）
+	customers   map[proto.CustomerId]*customer  // 客レジストリ（tako-D で 300 初期化）
+	storeQueues map[PlayerId][]proto.CustomerId // 各店の行列（先頭=対応中）
+	restPool    []proto.CustomerId              // たべたべエリア（未割当）
 
 	stores map[PlayerId]*storeState
 	order  []PlayerId // 安定順
@@ -148,14 +148,66 @@ func (s *Session) ApplyOrderServed(from PlayerId, r proto.OrderServed) []Outboun
 	return nil
 }
 
-// Tick は時間を dt 進める。実ループ（フェーズ/分配/我慢/離脱/評価/火力/storm/配信）は tako-C 以降。
+// Tick は時間を dt 進め、試合ループの各ステップを試合進行仕様 §4 の順序で呼ぶ。
+// 各ステップは現状ほぼ no-op のフックで、実ロジックは担当 issue が埋める（tako-D〜H/I）。
+// 出力は宛先つき []Outbound として集約して返し、room が Envelope 化して配信する。
+// dt は room が渡す（session は時計を持たない）。大きな dt でも回る＝tako-L のシミュレータが反復呼びできる。
 func (s *Session) Tick(dtMs int) []Outbound {
 	if s.state != Running {
 		return nil
 	}
 	s.elapsedMs += int64(dtMs)
 	s.tick++
-	return nil
+
+	var out []Outbound
+	out = s.stepPhase(out)          // 1. フェーズ判定（Early/Mid/Late）      → tako-H
+	out = s.stepDistribute(out)     // 2. 客分配（restPool→行列・CustomerArrived）→ tako-G(+D)
+	out = s.stepPatience(dtMs, out) // 3. 我慢ゲージ減算 → 離脱（CustomerLeft/信用）→ tako-F
+	out = s.stepEvaluate(out)       // 4. 評価再計算（perOrder の集計/EMA）      → tako-E
+	out = s.stepNormalize(out)      // 5. 正規化 → rank（EvaluationUpdate）      → tako-G
+	out = s.stepHeat(out)           // 6. 火力更新（DifficultyUpdate）           → tako-H
+	out = s.stepStorm(out)          // 7. 下位淘汰の判定・予告（StoreEliminated/警告）→ tako-H
+	out = s.checkFinish(out)        // 終了条件（生存1/時間切れ）。リザルト確定は tako-I
+	return out
+}
+
+// ── 試合ループの各ステップ（tako-C は順序骨格のみ。中身は担当 issue が実装）──────────
+// いずれも権威状態を更新し、必要な S2C を out へ append して返す（accumulator）。
+
+// stepPhase は elapsedMs からフェーズ（Early/Mid/Late）を判定し、変化時に PhaseChange を配る。tako-H。
+func (s *Session) stepPhase(out []Outbound) []Outbound { return out }
+
+// stepDistribute は restPool の客と補充が要る店へ客を割り当て、CustomerArrived を配る。tako-G(+D)。
+func (s *Session) stepDistribute(out []Outbound) []Outbound { return out }
+
+// stepPatience は各店の行列先頭客の我慢ゲージを dt 減算し、0 で離脱（CustomerLeft＋信用減）させる。
+// 属性(Normal/Bonus/Claimer/Buzz)で発火可否を分岐しない（#29 の詰まりガード）。tako-F。
+func (s *Session) stepPatience(dtMs int, out []Outbound) []Outbound { _ = dtMs; return out }
+
+// stepEvaluate は tako-E で積まれた提供結果を集計し evalRaw(EMA) を更新する。tako-E。
+func (s *Session) stepEvaluate(out []Outbound) []Outbound { return out }
+
+// stepNormalize は生存店内で evalRaw をパーセンタイル化(evalNormalized)＋rank 確定し、EvaluationUpdate を配る。tako-G。
+func (s *Session) stepNormalize(out []Outbound) []Outbound { return out }
+
+// stepHeat は全体火力(heatLevel)を更新し、変化時に DifficultyUpdate を配る。tako-H。
+func (s *Session) stepHeat(out []Outbound) []Outbound { return out }
+
+// stepStorm は下位淘汰(storm)の予告・確定を行い、ForcedEliminationWarning/StoreEliminated を配る。tako-H。
+func (s *Session) stepStorm(out []Outbound) []Outbound { return out }
+
+// checkFinish は終了条件を判定し、満たせば Finished へ遷移する。
+// 生存1（BR勝者確定）と時間切れの2条件。順位確定・MatchEnd 配信は tako-I が担う。
+//   - 生存1: len(order)>1 で始まった試合のみ（単独店の solo/dev セッションは即終了させない）。
+//   - 時間切れ: MatchTimeLimitMs>0（0=無効＝solo/dev の idle 継続）。
+func (s *Session) checkFinish(out []Outbound) []Outbound {
+	limit := s.params.Session.MatchTimeLimitMs
+	timeUp := limit > 0 && s.elapsedMs >= int64(limit)
+	lastAlive := len(s.order) > 1 && s.aliveCount <= 1
+	if timeUp || lastAlive {
+		s.state = Finished
+	}
+	return out
 }
 
 // ── 客の移動ヘルパ（実体を複製せず ID配列の増減のみ・一貫性バグ回避）──────────
@@ -214,10 +266,11 @@ func (s *Session) summaries() []proto.StoreSummary {
 	return out
 }
 
-// publicParams はクライアント表示用の公開サブセット。matchTimeLimitMs は tako-K で新パラメータから。
+// publicParams はクライアント表示用の公開サブセット。
 func (s *Session) publicParams() proto.GameParametersPublicSubset {
 	return proto.GameParametersPublicSubset{
-		InitialLife: s.params.Credit.InitialLife,
-		MaxStores:   len(s.order),
+		MatchTimeLimitMs: s.params.Session.MatchTimeLimitMs,
+		InitialLife:      s.params.Credit.InitialLife,
+		MaxStores:        len(s.order),
 	}
 }

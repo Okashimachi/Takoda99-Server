@@ -81,6 +81,7 @@ type MatchingParams struct {
 type SessionParams struct {
 	TickIntervalMs    int `json:"tickIntervalMs"`
 	PublishIntervalMs int `json:"publishIntervalMs"` // 99人ミニ盤面の配信間隔（tickより低頻度で帯域を抑える）
+	MatchTimeLimitMs  int `json:"matchTimeLimitMs"`  // 試合の制限時間。0=無効（solo/dev の idle 継続用）。tako-C の終了条件が参照
 }
 
 // Validate は破綻値を弾く最小限の検証。config 取得（RemoteLoader / DB / config-front POST）で
@@ -135,7 +136,8 @@ func DefaultParameters() GameParameters {
 		},
 		Session: SessionParams{
 			TickIntervalMs:    150,
-			PublishIntervalMs: 250, // 約4Hz。即時イベントとは別に、盤面は低頻度スナップ
+			PublishIntervalMs: 250,    // 約4Hz。即時イベントとは別に、盤面は低頻度スナップ
+			MatchTimeLimitMs:  180000, // 3分（実測調整前のサンプル）。0 で無効＝solo/dev の idle 継続
 		},
 		Credit: CreditParams{InitialLife: 3},
 	}
