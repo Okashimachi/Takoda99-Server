@@ -301,6 +301,144 @@ func TestAttributeDistribution(t *testing.T) {
 	}
 }
 
+// placeAssigned はテスト用に、既知の属性/打鍵数の客を store に割当済みで置く。
+func placeAssigned(s *Session, cid proto.CustomerId, store PlayerId, attr proto.CustomerAttribute, orderCount, keystrokes int) {
+	s.customers[cid] = &customer{
+		attribute:      attr,
+		patienceMaxMs:  5000,
+		orderCount:     orderCount,
+		keystrokeTotal: keystrokes,
+	}
+	s.restPool = append(s.restPool, cid)
+	s.assignCustomer(cid, store)
+}
+
+// 提供完了で evalRaw が上がり、対象客が行列から消える（たべたべエリアへ戻る）。
+func TestApplyOrderServed_RaisesEvalAndSatisfies(t *testing.T) {
+	s := newTestSession(2)
+	s.Start()
+	store := s.order[0]
+	cid := proto.CustomerId("cust-A")
+	placeAssigned(s, cid, store, proto.AttrNormal, 2, 10)
+
+	out := s.ApplyOrderServed(store, proto.OrderServed{CustomerId: cid, ElapsedMs: 4000, MissCount: 0})
+
+	st := s.stores[store]
+	if st.evalRaw <= 0 {
+		t.Fatalf("evalRaw が上がっていない: %v", st.evalRaw)
+	}
+	if st.served.count != 1 {
+		t.Fatalf("servedStats.count=1 のはず: %d", st.served.count)
+	}
+	// 行列から消え、restPool に戻っている。
+	for _, q := range s.storeQueues[store] {
+		if q == cid {
+			t.Fatal("満足客が行列に残っている")
+		}
+	}
+	if s.customers[cid].assignedStore != nil {
+		t.Fatal("assignedStore がクリアされていない")
+	}
+	// EvaluationUpdate が提供店へ返る。
+	if len(out) != 1 {
+		t.Fatalf("EvaluationUpdate 1件のはず: %d", len(out))
+	}
+	ev, ok := out[0].Msg.(proto.EvaluationUpdate)
+	if !ok || out[0].To.PlayerId != store {
+		t.Fatalf("提供店への EvaluationUpdate でない: %T to=%s", out[0].Msg, out[0].To.PlayerId)
+	}
+	if ev.EvalRaw <= 0 || ev.AliveCount != 2 {
+		t.Fatalf("EvaluationUpdate の値が不正: %+v", ev)
+	}
+}
+
+// 割当外の客の提供は棄却（nil・状態不変）。
+func TestApplyOrderServed_RejectsUnassigned(t *testing.T) {
+	s := newTestSession(2)
+	s.Start()
+	store := s.order[0]
+	before := s.stores[store].evalRaw
+
+	// そもそも存在しない客。
+	if out := s.ApplyOrderServed(store, proto.OrderServed{CustomerId: "ghost"}); out != nil {
+		t.Fatalf("未割当客は棄却されるはず: %v", out)
+	}
+	// 別店に割り当てられた客を、無関係な店から提供報告。
+	cid := proto.CustomerId("cust-B")
+	placeAssigned(s, cid, s.order[1], proto.AttrNormal, 1, 5)
+	if out := s.ApplyOrderServed(store, proto.OrderServed{CustomerId: cid, ElapsedMs: 3000}); out != nil {
+		t.Fatalf("別店の客の提供は棄却されるはず: %v", out)
+	}
+	if s.stores[store].evalRaw != before {
+		t.Fatalf("棄却時に評価が動いた: %v → %v", before, s.stores[store].evalRaw)
+	}
+}
+
+// elapsedMs 下限クランプ：超人的な速さ(1ms)は floor と同じ扱いになる。
+func TestApplyOrderServed_ClampsElapsedFloor(t *testing.T) {
+	mk := func(elapsed int) float64 {
+		s := newTestSession(2)
+		s.Start()
+		store := s.order[0]
+		cid := proto.CustomerId("c")
+		placeAssigned(s, cid, store, proto.AttrNormal, 2, 10)
+		s.ApplyOrderServed(store, proto.OrderServed{CustomerId: cid, ElapsedMs: elapsed, MissCount: 0})
+		return s.stores[store].evalRaw
+	}
+	floor := DefaultParameters().Eval.MinMsPerWord * 2 // orderCount=2
+	if got, want := mk(1), mk(floor); got != want {
+		t.Fatalf("1ms は floor(%dms) にクランプされ同値のはず: got=%v want=%v", floor, got, want)
+	}
+}
+
+// 提供間隔が短すぎる連投は棄却（2件目以降）。
+func TestApplyOrderServed_RejectsTooFrequent(t *testing.T) {
+	s := newTestSession(2)
+	s.Start()
+	store := s.order[0]
+	a := proto.CustomerId("a")
+	b := proto.CustomerId("b")
+	placeAssigned(s, a, store, proto.AttrNormal, 1, 5)
+	placeAssigned(s, b, store, proto.AttrNormal, 1, 5)
+
+	// elapsedMs=0（tick未経過）。1件目は受理、直後の2件目は間隔0で棄却。
+	if out := s.ApplyOrderServed(store, proto.OrderServed{CustomerId: a, ElapsedMs: 3000}); out == nil {
+		t.Fatal("1件目は受理されるはず")
+	}
+	if out := s.ApplyOrderServed(store, proto.OrderServed{CustomerId: b, ElapsedMs: 3000}); out != nil {
+		t.Fatalf("間隔ゼロの2件目は棄却されるはず: %v", out)
+	}
+	if s.customers[b].assignedStore == nil {
+		t.Fatal("棄却された客 b は割当のまま残るはず")
+	}
+}
+
+// JK(Buzz)加点は毎tick減衰する。
+func TestBuzzBonusDecays(t *testing.T) {
+	s := newTestSession(2)
+	s.Start()
+	store := s.order[0]
+	cid := proto.CustomerId("jk")
+	placeAssigned(s, cid, store, proto.AttrBuzz, 1, 5)
+	s.ApplyOrderServed(store, proto.OrderServed{CustomerId: cid, ElapsedMs: 3000, MissCount: 0})
+
+	st := s.stores[store]
+	if st.buzzBonus <= 0 {
+		t.Fatalf("Buzz 提供で一時加点が付くはず: %v", st.buzzBonus)
+	}
+	first := st.buzzBonus
+	s.Tick(150)
+	if st.buzzBonus >= first {
+		t.Fatalf("stepEvaluate で減衰するはず: %v → %v", first, st.buzzBonus)
+	}
+	for i := 0; i < 1000; i++ {
+		s.Tick(150)
+	}
+	if st.buzzBonus != 0 {
+		t.Fatalf("十分tick後は 0 に丸まるはず: %v", st.buzzBonus)
+	}
+}
+
 // MatchStart の公開params に matchTimeLimitMs が乗る（案A の配線確認）。
 func TestPublicParams_CarriesMatchTimeLimit(t *testing.T) {
 	want := DefaultParameters().Session.MatchTimeLimitMs
