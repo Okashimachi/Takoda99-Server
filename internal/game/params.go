@@ -5,10 +5,14 @@
 // （proto は契約として参照可）。継ぎ目は ports.go（DIP）。すべての調整値は GameParameters 経由。
 package game
 
-import "fmt"
+import (
+	"fmt"
+
+	"textro99/internal/proto"
+)
 
 // GameParameters は数値バランスの全項目。正典は
-// Textro99-Docs/03_サーバー仕様/04_パラメータ仕様.md。
+// Takoda99-Docs/03_サーバー仕様/04_パラメータ仕様.md。
 // サーバーが起動時に config(ConfigProvider) 経由で外部取得し、失敗時は DefaultParameters()。
 // クライアントへは MatchStart で公開サブセット（proto側）に絞って配信する。
 type GameParameters struct {
@@ -20,15 +24,36 @@ type GameParameters struct {
 	Matching   MatchingParams   `json:"matching"`
 	Session    SessionParams    `json:"session"`
 
-	// たこ焼き版で追加（tako-B）。旧項目(Combo/Attack/Stack/Difficulty/Odai)は tako-K で
-	// 客/評価/信用/フェーズ/火力の新スキーマへ置換予定。
-	Credit CreditParams `json:"credit"`
+	// たこ焼き版で追加。旧項目(Combo/Attack/Stack/Difficulty/Odai)は tako-K で
+	// 評価/信用/フェーズ/火力の新スキーマへ置換予定。
+	Credit   CreditParams   `json:"credit"`   // tako-B
+	Customer CustomerParams `json:"customer"` // tako-D
 }
 
 // CreditParams: 信用（ライフ）。客の離脱でのみ減少・0で自滅脱落。
 // tako-K で leaveLoss(属性別) 等を拡充する。
 type CreditParams struct {
 	InitialLife int `json:"initialLife"` // 初期信用（例:3。約3回の離脱で脱落）
+}
+
+// CustomerParams: 客システム（総数・属性ごとの出現率/我慢/注文数）。tako-D。
+// Claimer の中盤解禁など「いつ来店させるか」の制御は分配(tako-G)/フェーズ(tako-H)側が持つ。
+// ここは客の生成定義（何人・どんな客か）のみ。
+// 属性は proto で閉じた4種なので固定フィールドで持つ（GameParameters の == 比較可能性を保つ）。
+type CustomerParams struct {
+	Total   int           `json:"total"` // 客総数（例:300）
+	Normal  AttributeSpec `json:"normal"`
+	Bonus   AttributeSpec `json:"bonus"`
+	Claimer AttributeSpec `json:"claimer"`
+	Buzz    AttributeSpec `json:"buzz"`
+}
+
+// AttributeSpec: 1属性分の生成パラメータ。
+type AttributeSpec struct {
+	Attribute      proto.CustomerAttribute `json:"attribute"`
+	Weight         int                     `json:"weight"`         // 出現率の相対重み（Σで正規化）
+	PatienceBaseMs int                     `json:"patienceBaseMs"` // 我慢ゲージ最大の基準
+	OrderCount     int                     `json:"orderCount"`     // 打つ単語数（Buzz は多め）
 }
 
 // ComboParams: コンボの蓄積・減衰・個人難易度連動。
@@ -93,6 +118,9 @@ func (gp GameParameters) Validate() error {
 	if gp.Difficulty.MaxLevel <= 0 {
 		return fmt.Errorf("difficulty.maxLevel は正である必要 (got %d)", gp.Difficulty.MaxLevel)
 	}
+	if gp.Customer.Total <= 0 {
+		return fmt.Errorf("customer.total は正である必要 (got %d)", gp.Customer.Total)
+	}
 	return nil
 }
 
@@ -140,5 +168,12 @@ func DefaultParameters() GameParameters {
 			MatchTimeLimitMs:  180000, // 3分（実測調整前のサンプル）。0 で無効＝solo/dev の idle 継続
 		},
 		Credit: CreditParams{InitialLife: 3},
+		Customer: CustomerParams{
+			Total:   300,
+			Normal:  AttributeSpec{Attribute: proto.AttrNormal, Weight: 70, PatienceBaseMs: 8000, OrderCount: 2},
+			Bonus:   AttributeSpec{Attribute: proto.AttrBonus, Weight: 15, PatienceBaseMs: 9000, OrderCount: 2},
+			Claimer: AttributeSpec{Attribute: proto.AttrClaimer, Weight: 10, PatienceBaseMs: 6000, OrderCount: 1},
+			Buzz:    AttributeSpec{Attribute: proto.AttrBuzz, Weight: 5, PatienceBaseMs: 12000, OrderCount: 4},
+		},
 	}
 }
