@@ -50,7 +50,7 @@ func TestE2E_ClientWireFlow(t *testing.T) {
 		players := []matchmaking.Player{{Id: id, Conn: conn, Name: string(id)}}
 		for i := 0; i < 3; i++ {
 			players = append(players, app.NewBotPlayer(ctx, nextID(),
-				bot.Config{ServeIntervalMs: 40, MissRate: 0.02}))
+				bot.Config{BaseAccuracy: 0.98, BaseElapsedMs: 40, AccuracyJitter: 0, ElapsedJitterMs: 0}))
 		}
 		go app.RunMatch(ctx, deps, players)
 	})

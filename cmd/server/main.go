@@ -58,8 +58,10 @@ func main() {
 	botConfig := func() bot.Config {
 		p, _ := provider.Load(ctx)
 		return bot.Config{
-			ServeIntervalMs: p.Bot.ServeIntervalMs,
-			MissRate:        p.Bot.MissRate,
+			BaseAccuracy:    p.Bot.BaseAccuracy,
+			BaseElapsedMs:   p.Bot.BaseElapsedMs,
+			AccuracyJitter:  p.Bot.AccuracyJitter,
+			ElapsedJitterMs: p.Bot.ElapsedJitterMs,
 		}
 	}
 

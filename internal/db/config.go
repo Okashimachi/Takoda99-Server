@@ -91,6 +91,7 @@ func (s *ConfigStore) Load(ctx context.Context) (game.GameParameters, error) {
 		s.mu.RUnlock()
 		return def, fmt.Errorf("db: config デコード: %w", err)
 	}
+	backfillDefaults(&gp, def)
 	if err := gp.Validate(); err != nil {
 		s.mu.RLock()
 		if s.lastGood.Session.TickIntervalMs != 0 {
@@ -129,6 +130,30 @@ func (s *ConfigStore) Save(ctx context.Context, gp game.GameParameters) error {
 	s.mu.Unlock()
 
 	return nil
+}
+
+func backfillDefaults(gp *game.GameParameters, def game.GameParameters) {
+	if gp.Phase == (game.PhaseParams{}) {
+		gp.Phase = def.Phase
+	}
+	if gp.Heat == (game.HeatParams{}) {
+		gp.Heat = def.Heat
+	}
+	if gp.Storm == (game.StormParams{}) {
+		gp.Storm = def.Storm
+	}
+	if gp.Distribution == (game.DistributionParams{}) {
+		gp.Distribution = def.Distribution
+	}
+	if gp.Patience == (game.PatienceParams{}) {
+		gp.Patience = def.Patience
+	}
+	if gp.Bot == (game.BotParams{}) {
+		gp.Bot = def.Bot
+	}
+	if gp.Credit.LeaveLoss == (game.LeaveLoss{}) {
+		gp.Credit.LeaveLoss = def.Credit.LeaveLoss
+	}
 }
 
 // コンパイル時に game.ConfigProvider 充足を保証する。

@@ -141,8 +141,10 @@ type PatienceParams struct {
 
 // BotParams: CPU（Bot）の強さ。
 type BotParams struct {
-	ServeIntervalMs int     `json:"serveIntervalMs"`
-	MissRate        float64 `json:"missRate"`
+	BaseAccuracy    float64 `json:"baseAccuracy"`
+	BaseElapsedMs   int     `json:"baseElapsedMs"`
+	AccuracyJitter  float64 `json:"accuracyJitter"`
+	ElapsedJitterMs int     `json:"elapsedJitterMs"`
 }
 
 // Validate は破綻値を弾く最小限の検証。
@@ -156,11 +158,11 @@ func (gp GameParameters) Validate() error {
 	if gp.Session.TickIntervalMs <= 0 {
 		return fmt.Errorf("session.tickIntervalMs は正である必要 (got %d)", gp.Session.TickIntervalMs)
 	}
-	if gp.Bot.ServeIntervalMs <= 0 {
-		return fmt.Errorf("bot.serveIntervalMs は正である必要 (got %d)", gp.Bot.ServeIntervalMs)
+	if gp.Bot.BaseElapsedMs <= 0 {
+		return fmt.Errorf("bot.baseElapsedMs は正である必要 (got %d)", gp.Bot.BaseElapsedMs)
 	}
-	if gp.Bot.MissRate < 0 || gp.Bot.MissRate > 1 {
-		return fmt.Errorf("bot.missRate は 0..1 である必要 (got %v)", gp.Bot.MissRate)
+	if gp.Bot.BaseAccuracy < 0 || gp.Bot.BaseAccuracy > 1 {
+		return fmt.Errorf("bot.baseAccuracy は 0..1 である必要 (got %v)", gp.Bot.BaseAccuracy)
 	}
 	if gp.Heat.MaxLevel <= 0 {
 		return fmt.Errorf("heat.maxLevel は正である必要 (got %d)", gp.Heat.MaxLevel)
@@ -241,8 +243,10 @@ func DefaultParameters() GameParameters {
 			AlertMs: 2000,
 		},
 		Bot: BotParams{
-			ServeIntervalMs: 800,
-			MissRate:        0.05,
+			BaseAccuracy:    0.85,
+			BaseElapsedMs:   3000,
+			AccuracyJitter:  0.1,
+			ElapsedJitterMs: 500,
 		},
 	}
 }
