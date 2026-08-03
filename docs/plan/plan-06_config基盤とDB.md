@@ -382,6 +382,8 @@ export interface PatienceParams {
 
 export interface DistributionParams {
   queueRefillThreshold: number;
+  /** 重みの下駄。0 で「評価のみ」の設計文書どおりの式に戻るが、
+   *  その場合は最下位店に客が来なくなる（Plan-03 §2.5）。当日の逆転しやすさの調整つまみ。 */
   weightFloor: number;
 }
 
