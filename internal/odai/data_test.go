@@ -26,18 +26,29 @@ func TestKeystrokes(t *testing.T) {
 	}
 }
 
-// 段階0〜10 がすべて 最低5語 で埋まり、各語の打鍵数が正である。
+// 段階0〜4 がすべて 最低20語 で埋まり、各語の打鍵数が正である。
 func TestPlaceholderWords_AllLevelsCovered(t *testing.T) {
 	words := placeholderWords()
-	for lvl := 0; lvl <= 10; lvl++ {
+	for lvl := 0; lvl <= 4; lvl++ {
 		ws, ok := words[lvl]
-		if !ok || len(ws) < 5 {
-			t.Fatalf("段階 %d は最低5語必要: len=%d ok=%v", lvl, len(ws), ok)
+		if !ok || len(ws) < 20 {
+			t.Fatalf("段階 %d は最低20語必要: len=%d ok=%v", lvl, len(ws), ok)
 		}
 		for _, w := range ws {
 			if w.Text == "" || w.KeystrokeCount <= 0 {
 				t.Fatalf("段階 %d に不正な語: %+v", lvl, w)
 			}
 		}
+	}
+}
+
+func TestPlaceholderWords_TotalCount(t *testing.T) {
+	words := placeholderWords()
+	total := 0
+	for _, ws := range words {
+		total += len(ws)
+	}
+	if total < 100 {
+		t.Fatalf("語彙は最低100語必要: got %d", total)
 	}
 }
