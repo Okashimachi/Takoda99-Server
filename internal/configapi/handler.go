@@ -12,7 +12,7 @@ import (
 	"net/http"
 	"strings"
 
-	"textro99/internal/game"
+	"takoda99/internal/game"
 )
 
 // Store は現在の GameParameters を読み書きする口（db.ConfigStore が満たす）。

@@ -55,6 +55,3 @@ jobs:
         uses: golangci/golangci-lint-action@v7
         with:
           version: v2.6.2
-          # 設定のリモートJSONスキーマ照合を無効化（golangci-lint.run への取得が
-          # ランナーからタイムアウトして CI が落ちるため）。lint 本体は通常どおり走る。
-          verify: false

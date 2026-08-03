@@ -10,17 +10,16 @@ import (
 	"sync/atomic"
 	"time"
 
-	"textro99/internal/bot"
-	"textro99/internal/game"
-	"textro99/internal/matchmaking"
-	"textro99/internal/odai"
-	"textro99/internal/room"
-	"textro99/internal/store"
-	"textro99/internal/transport"
+	"takoda99/internal/bot"
+	"takoda99/internal/game"
+	"takoda99/internal/matchmaking"
+	"takoda99/internal/odai"
+	"takoda99/internal/room"
+	"takoda99/internal/store"
+	"takoda99/internal/transport"
 )
 
 // Deps は試合を組むための依存一式（合成ルートが用意して注入する）。
-// ※ 旧「作戦(TargetingStrategy)」は廃止（たこ焼き版は直接攻撃なし）。
 type Deps struct {
 	Params game.GameParameters
 	Words  game.WordSource
@@ -28,7 +27,7 @@ type Deps struct {
 	Clock  room.Clock
 }
 
-// DefaultDeps は内蔵デフォルトで Deps を組む（solo/検証用の手軽な既定）。
+// DefaultDeps は DefaultLoader 相当の内蔵デフォルトで Deps を組む（solo/検証用の手軽な既定）。
 func DefaultDeps() Deps {
 	return Deps{
 		Params: game.DefaultParameters(),
@@ -49,12 +48,15 @@ var matchSeq atomic.Int64
 func nextMatchID() string { return fmt.Sprintf("m-%d", matchSeq.Add(1)) }
 
 // RunMatch は players で1試合を構築して最後まで駆動する（ctx キャンセルでも抜ける）。
-// 呼び出し側で go RunMatch(...) する想定。
 func RunMatch(ctx context.Context, d Deps, players []matchmaking.Player) {
 	inits := make([]game.PlayerInit, 0, len(players))
 	conns := make(map[game.PlayerId]transport.Connection, len(players))
 	for _, p := range players {
-		inits = append(inits, game.PlayerInit{Id: p.Id, DisplayName: string(p.Id)})
+		name := p.Name
+		if name == "" {
+			name = string(p.Id)
+		}
+		inits = append(inits, game.PlayerInit{Id: p.Id, DisplayName: name})
 		conns[p.Id] = p.Conn
 	}
 	sess := game.NewSession(nextMatchID(), d.Params, d.Words, newRng(), inits)
@@ -63,11 +65,10 @@ func RunMatch(ctx context.Context, d Deps, players []matchmaking.Player) {
 	rm.Run(ctx)
 }
 
-// NewBotPlayer は Bot 枠を1つ作る。内部で Pipe を張り、client 側を Bot が駆動し、
-// server 側を試合に組み込む matchmaking.Player として返す。
+// NewBotPlayer は Bot 枠を1つ作る。
 func NewBotPlayer(ctx context.Context, id game.PlayerId, cfg bot.Config) matchmaking.Player {
 	srv, cli := transport.Pipe()
 	b := bot.New(cli, cfg, newRng())
 	go b.Run(ctx)
-	return matchmaking.Player{Id: id, Conn: srv}
+	return matchmaking.Player{Id: id, Conn: srv, Name: "BOT " + string(id)}
 }

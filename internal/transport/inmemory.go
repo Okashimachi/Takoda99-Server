@@ -4,7 +4,7 @@ import (
 	"errors"
 	"sync"
 
-	"textro99/internal/proto"
+	"takoda99/internal/proto"
 )
 
 // inmemory.go は【#31】実ソケット無しの疑似接続。Bot（#35）と99人負荷検証（#50a/b）の土台。

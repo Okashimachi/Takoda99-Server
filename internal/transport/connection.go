@@ -14,7 +14,7 @@ import (
 
 	"github.com/coder/websocket"
 
-	"textro99/internal/proto"
+	"takoda99/internal/proto"
 )
 
 // writeTimeout は1メッセージ送信の上限。遅い/ストールしたクライアントで Write が無限に

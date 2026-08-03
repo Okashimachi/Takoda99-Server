@@ -1,50 +1,31 @@
 # デプロイ（Render）
 
-Takoda99-Server を Render にデプロイする手順と、疎通確認の方法。
-
-> 当日のオペレーション手順・ロールバック・トラブル対応は `docs/plan/plan-10_デプロイ戦略.md` に詳しい。
-> 本書は「デプロイの仕組みと環境変数」のリファレンス。
+textro99-server を Render にデプロイする手順と、疎通確認の方法。
 
 ## 前提
 - サーバーは `$PORT`（Render が注入）を listen する。未設定なら `:8080`。
-- ビルドは `Dockerfile`（go 1.25 / public な Takoda99-Proto を go.mod で解決）。go.work は使わない。
+- ビルドは `Dockerfile`（go 1.25 / public な Textro99-Proto を go.mod で解決）。go.work は使わない。
 - ヘルスチェック: `GET /healthz` → `200 ok`。
 
 ## デプロイ手順（Render ダッシュボード）
-1. Render で **New > Blueprint** を選び、この `Takoda99-Server` リポジトリを指定する（`render.yaml` が読まれる）。
+1. Render で **New > Blueprint** を選び、この `Textro99-Server` リポジトリを指定する（`render.yaml` が読まれる）。
    - または **New > Web Service** で同リポジトリを選び、Runtime を **Docker** にする（`Dockerfile` を自動検出）。
-2. プランは検証中は **Free** で可（スリープあり）。**本番は Starter 以上**でスリープ無効化（#41）。
+2. プランは検証中は **Free** で可（スリープあり）。本番前に **Starter 以上**でスリープ無効化（#72）。
 3. 作成するとビルド→デプロイが走り、`https://<service>.onrender.com` が払い出される。
 
-### 起動モード
-- **本番（99店）**: `--mode match`。マッチングプールが人数下限＋カウントダウンで試合を開始する。
-- **結合テスト/デモ（solo）**: `--mode solo` にすると `/ws` 接続ごとに「人間1＋Bot」で即試合開始し、単独クライアントで `MatchStart` 以降の全メッセージを検証できる（#36）。
-- Docker Command を `/server --mode match --bots 5` 等に上書きして変える。
-- **本番前に match へ戻すのを忘れないこと**（#37）。
+### 設定（任意）
+- 起動モード/Bot数を変える: Docker Command を `/server --mode match --bots 5` 等に上書き。
+- **結合テスト用（solo）**: `--mode solo` にすると /ws 接続ごとに「人間1＋Bot」で即試合開始し、単独クライアントで `MatchStart` 以降の全メッセージを検証できる（#56）。本番（99人・match）前に必ず戻す（#57）。現在の `render.yaml` は検証のため一時的に solo。
+- 調整値をリモート取得する: 環境変数 `CONFIG_URL` に config-front の JSON エンドポイントを設定（未設定なら内蔵デフォルトで起動）。
 
-### 調整値（config）
-- 環境変数 `CONFIG_URL` に JSON エンドポイントを設定するとリモート取得（未設定なら内蔵デフォルト）。
-- `DATABASE_URL` を設定すると config を **Postgres** から取得し、`GET/POST /api/params` で編集できる（未設定なら内蔵デフォルト、`/api/params` は 503）。
-- 優先順位: `DATABASE_URL` > `CONFIG_URL` > 内蔵デフォルト。**DB 接続やマイグレーションに失敗しても起動は止まらない**（内蔵デフォルトへフォールバック）。
-- 起動時に設定テーブルを自動作成＋内蔵デフォルトで seed。
-
-#### 反映タイミング（重要）
-| パラメータ | 反映 |
-|---|---|
-| 試合系（信用・我慢・評価・フェーズ・火力・storm・分配） | **次の試合から**（再起動不要） |
-| matching 系（minPlayers / maxPlayers / countdown） | **要再起動**（起動時スナップショットのため） |
-
-config はマッチ生成時に読み直すので、進行中の試合のパラメータは固定される。
-
-### 環境変数一覧
-| 変数 | 用途 |
-|---|---|
-| `DATABASE_URL` | Postgres 接続文字列（設定・お題・試合結果） |
-| `CONFIG_URL` | config を HTTP 取得する場合のエンドポイント |
-| `CONFIG_ADMIN_TOKEN` | `POST /api/params` の共有トークン（`X-Admin-Token` で照合）。未設定だと POST は 503 |
-| `CONFIG_FRONT_ORIGIN` | `/api/params` の CORS 許可オリジン（config-front の URL）。カンマ区切りで複数可。未設定は `*` |
-| `ALLOWED_ORIGINS` | `/ws` の許可オリジン。カンマ区切り。未設定なら全許可 |
-| `GOGC` | GC 頻度の調整（スパイク対策で `200` 推奨・`docs/plan/plan-09`） |
+### config を DB 化して Web から編集する（#49/#50）
+- `DATABASE_URL` を設定すると config を **Postgres**（Neon 想定）から取得し、`GET/POST /api/params` で編集できる（未設定なら内蔵デフォルト、`/api/params` は 503）。
+- 起動時に `game_config` テーブルを自動作成＋内蔵デフォルトで seed。config はマッチ生成時に読み直すので、編集は**次の試合から再起動なしで反映**。
+- 関連 env:
+  - `DATABASE_URL` … Postgres 接続文字列。
+  - `CONFIG_ADMIN_TOKEN` … `POST /api/params` の共有トークン（`X-Admin-Token` ヘッダで照合）。未設定だと POST は 503。
+  - `CONFIG_FRONT_ORIGIN` … `/api/params` の CORS 許可オリジン（config-front の URL）。**カンマ区切りで複数可**。未設定は `*`。
+- config-front（#51）は `GET/POST https://<service>.onrender.com/api/params` を叩く。
 
 ### 許可オリジン（ブラウザ結合の要）
 ブラウザは `Origin` を必ず送り、サーバーは 2 系統でオリジンを見る。**どちらも末尾スラッシュ無し**で指定する（`https://ex.com` ○ / `https://ex.com/` ✗ = ブラウザの Origin と一致しない。CONFIG 側は自動で除去するが揃えるのが無難）。
@@ -63,16 +44,12 @@ curl https://<service>.onrender.com/healthz          # => ok
 
 # 2) WebSocket 疎通（要 websocat 等）
 websocat wss://<service>.onrender.com/ws
+#   接続に成功すると、サーバーから Welcome メッセージ（{"type":"Welcome",...}）が届く
 ```
 
-- `--mode solo` なら接続直後に試合が始まり、`{"type":"MatchStart",...}` が届く。
-- `--mode match` なら `{"type":"MatchmakingStatus",...}` が届き、人数が揃うまで待機する。
-- upgrade できてこれらが届けば、通信経路（本番）は成立。
-
-> 旧 Textro99 にあった `Welcome` メッセージは**廃止済み**。Takoda99-Proto に存在しないので、
-> 届かなくても異常ではない。接続直後の最初の S2C は上記のいずれか。
+- WebSocket が upgrade できて Welcome が届けば、通信経路（本番）は成立。
+- 実クライアント（Web/Unity）との結合は #60/#61。
 
 ## 注意
-- **Free プランはスリープ**する（無アクセスで停止→次アクセスで起動に数秒）。デモ/本番は Starter 以上へ（#41）。
-- **試合中にデプロイすると進行中の試合は消える**（ライブ状態はメモリのため）。ハッカソン中は試合の合間にデプロイする。
-- 本番の負荷実測は `docs/plan/plan-11_負荷テスト.md`。
+- **Free プランはスリープ**する（無アクセスで停止→次アクセスで起動に数秒）。デモ/本番は #72 で Starter 以上へ。
+- 本番の負荷実測も #72。

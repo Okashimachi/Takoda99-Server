@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"textro99/internal/proto"
+	"takoda99/internal/proto"
 )
 
 // 実WebSocket でメッセージが往復し、切断で Receive チャネルが閉じることを検証する。

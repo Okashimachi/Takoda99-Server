@@ -9,7 +9,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"textro99/internal/game"
+	"takoda99/internal/game"
 )
 
 type fakeStore struct {
@@ -51,8 +51,8 @@ func TestGet_ReturnsFullParams(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &gp); err != nil {
 		t.Fatalf("返却JSONがGameParametersでない: %v", err)
 	}
-	if gp.Stack.Limit != game.DefaultParameters().Stack.Limit {
-		t.Fatalf("値が一致しない: %d", gp.Stack.Limit)
+	if gp.Credit.InitialLife != game.DefaultParameters().Credit.InitialLife {
+		t.Fatalf("値が一致しない: %d", gp.Credit.InitialLife)
 	}
 	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "*" {
 		t.Fatalf("CORS未設定: %q", got)
@@ -85,14 +85,14 @@ func TestPost_Valid_SavesAndReturns(t *testing.T) {
 	h := NewHandler(store, tok, nil)
 	body, _ := json.Marshal(func() game.GameParameters {
 		gp := game.DefaultParameters()
-		gp.Stack.Limit = 15
+		gp.Credit.InitialLife = 15
 		return gp
 	}())
 	w := do(h, http.MethodPost, tok, body)
 	if w.Code != http.StatusOK {
 		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
 	}
-	if store.saved == nil || store.saved.Stack.Limit != 15 {
+	if store.saved == nil || store.saved.Credit.InitialLife != 15 {
 		t.Fatalf("保存されていない: %+v", store.saved)
 	}
 }
@@ -131,7 +131,7 @@ func TestPost_InvalidValues_400_NotSaved(t *testing.T) {
 	store := &fakeStore{gp: game.DefaultParameters()}
 	h := NewHandler(store, tok, nil)
 	bad := game.DefaultParameters()
-	bad.Stack.Limit = 0 // Validate で弾かれる
+	bad.Customer.Total = 0 // Validate で弾かれる
 	body, _ := json.Marshal(bad)
 	if w := do(h, http.MethodPost, tok, body); w.Code != http.StatusBadRequest {
 		t.Fatalf("want 400, got %d", w.Code)

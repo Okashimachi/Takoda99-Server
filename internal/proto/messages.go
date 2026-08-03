@@ -1,6 +1,6 @@
 // Package proto は canonical な契約リポジトリ github.com/Okashimachi/Takoda99-Proto を
 // server 内から参照するための薄いラッパ。canonical の型・定数を type alias / const で再輸出し、
-// server 側の import パスを "textro99/internal/proto" に固定する。
+// server 側の import パスを "takoda99/internal/proto" に固定する。
 //
 // canonical に新メッセージ/型が増えたら、この再輸出リストにも1行追加する
 // （未追加の型を使うと "undefined" の明示的コンパイルエラーになる）。型の追加・変更・削除は

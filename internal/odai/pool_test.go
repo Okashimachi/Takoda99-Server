@@ -19,17 +19,8 @@ func TestStaticPool_Next(t *testing.T) {
 // データの無い高段階を要求しても、下位段階へフォールバックして有効な語を返す。
 func TestStaticPool_Next_FallsBackForSparseLevel(t *testing.T) {
 	p := NewStaticPool()
-	w := p.Next(10, rng(1)) // 現状10段階目のデータは未整備
+	w := p.Next(10, rng(1)) // 段階10はデータ有り
 	if w.Text == "" || w.KeystrokeCount <= 0 {
 		t.Fatalf("got %+v, want フォールバックで有効な語", w)
-	}
-}
-
-// NextTrap は煽り長文を返す。
-func TestStaticPool_NextTrap(t *testing.T) {
-	p := NewStaticPool()
-	w := p.NextTrap(rng(1))
-	if w.Text == "" || w.KeystrokeCount <= 0 {
-		t.Fatalf("got %+v, want 有効なトラップ語", w)
 	}
 }
