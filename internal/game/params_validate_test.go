@@ -33,19 +33,19 @@ func TestGameParameters_Validate(t *testing.T) {
 		}
 	})
 
-	t.Run("bot.serveIntervalMs<=0 を弾く", func(t *testing.T) {
+	t.Run("bot.baseElapsedMs<=0 を弾く", func(t *testing.T) {
 		gp := DefaultParameters()
-		gp.Bot.ServeIntervalMs = 0
+		gp.Bot.BaseElapsedMs = 0
 		if err := gp.Validate(); err == nil {
-			t.Fatal("bot.serveIntervalMs=0 はエラーになるべき")
+			t.Fatal("bot.baseElapsedMs=0 はエラーになるべき")
 		}
 	})
 
-	t.Run("bot.missRate が範囲外を弾く", func(t *testing.T) {
+	t.Run("bot.baseAccuracy が範囲外を弾く", func(t *testing.T) {
 		gp := DefaultParameters()
-		gp.Bot.MissRate = 1.5
+		gp.Bot.BaseAccuracy = 1.5
 		if err := gp.Validate(); err == nil {
-			t.Fatal("bot.missRate=1.5 はエラーになるべき")
+			t.Fatal("bot.baseAccuracy=1.5 はエラーになるべき")
 		}
 	})
 

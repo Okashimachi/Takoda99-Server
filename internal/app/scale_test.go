@@ -33,7 +33,7 @@ func TestScale_99Bots_RunsToCompletion(t *testing.T) {
 
 	inits := make([]game.PlayerInit, 0, n)
 	conns := make(map[game.PlayerId]transport.Connection, n)
-	botCfg := bot.Config{ServeIntervalMs: 15, MissRate: 0.1}
+	botCfg := bot.Config{BaseAccuracy: 0.9, BaseElapsedMs: 15, AccuracyJitter: 0, ElapsedJitterMs: 0}
 	for i := 0; i < n; i++ {
 		id := game.PlayerId(fmt.Sprintf("bot%02d", i))
 		srv, cli := transport.Pipe()

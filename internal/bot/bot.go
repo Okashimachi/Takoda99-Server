@@ -16,12 +16,16 @@ import (
 
 // Config は Bot の強さ・振る舞い。
 type Config struct {
-	ServeIntervalMs int
-	MissRate        float64
+	BaseAccuracy    float64
+	BaseElapsedMs   int
+	AccuracyJitter  float64
+	ElapsedJitterMs int
 }
 
 // DefaultConfig は無難な既定値。
-func DefaultConfig() Config { return Config{ServeIntervalMs: 800, MissRate: 0.05} }
+func DefaultConfig() Config {
+	return Config{BaseAccuracy: 0.85, BaseElapsedMs: 3000, AccuracyJitter: 0.1, ElapsedJitterMs: 500}
+}
 
 // Bot は1接続を自動操作する。
 type Bot struct {
@@ -39,9 +43,9 @@ func New(conn transport.Connection, cfg Config, rng *rand.Rand) *Bot {
 // Run は Bot を駆動する。
 func (b *Bot) Run(ctx context.Context) {
 	defer func() { _ = b.conn.Close() }()
-	iv := time.Duration(b.cfg.ServeIntervalMs) * time.Millisecond
+	iv := time.Duration(b.cfg.BaseElapsedMs) * time.Millisecond
 	if iv <= 0 {
-		iv = 800 * time.Millisecond
+		iv = 3000 * time.Millisecond
 	}
 	ticker := time.NewTicker(iv)
 	defer ticker.Stop()
@@ -89,13 +93,26 @@ func (b *Bot) act() {
 	cid := b.pendingCid[0]
 	b.pendingCid = b.pendingCid[1:]
 
+	elapsed := b.cfg.BaseElapsedMs
+	if b.cfg.ElapsedJitterMs > 0 {
+		elapsed += b.rng.Intn(2*b.cfg.ElapsedJitterMs+1) - b.cfg.ElapsedJitterMs
+	}
+	if elapsed < 1 {
+		elapsed = 1
+	}
+
+	acc := b.cfg.BaseAccuracy
+	if b.cfg.AccuracyJitter > 0 {
+		acc += (b.rng.Float64()*2 - 1) * b.cfg.AccuracyJitter
+	}
 	miss := 0
-	if b.rng.Float64() < b.cfg.MissRate {
+	if b.rng.Float64() > acc {
 		miss = 1
 	}
+
 	b.send(proto.TypeOrderServed, proto.OrderServed{
 		CustomerId: cid,
-		ElapsedMs:  b.cfg.ServeIntervalMs,
+		ElapsedMs:  elapsed,
 		MissCount:  miss,
 	})
 }

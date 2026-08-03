@@ -27,7 +27,7 @@ func recv(t *testing.T, c transport.Connection) proto.Envelope {
 // Bot は CustomerArrived で受け取った客に対して OrderServed を送る。
 func TestBot_ServesArrivedCustomer(t *testing.T) {
 	srv, cli := transport.Pipe()
-	b := New(cli, Config{ServeIntervalMs: 1000, MissRate: 0}, rand.New(rand.NewSource(1)))
+	b := New(cli, Config{BaseAccuracy: 1.0, BaseElapsedMs: 1000, AccuracyJitter: 0, ElapsedJitterMs: 0}, rand.New(rand.NewSource(1)))
 
 	// CustomerArrived を受信したと仮定。
 	p, _ := json.Marshal(proto.CustomerView{CustomerId: "c-1", OrderCount: 2, Words: []string{"ねこ", "いぬ"}})
@@ -48,7 +48,7 @@ func TestBot_ServesArrivedCustomer(t *testing.T) {
 // CustomerArrived で受け取った複数客も保持し、順に提供する。
 func TestBot_ServesMultipleCustomers(t *testing.T) {
 	srv, cli := transport.Pipe()
-	b := New(cli, Config{ServeIntervalMs: 1000, MissRate: 0}, rand.New(rand.NewSource(1)))
+	b := New(cli, Config{BaseAccuracy: 1.0, BaseElapsedMs: 1000, AccuracyJitter: 0, ElapsedJitterMs: 0}, rand.New(rand.NewSource(1)))
 
 	// 2人の客が来店。
 	for _, cid := range []string{"c-1", "c-2"} {
