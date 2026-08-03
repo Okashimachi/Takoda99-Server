@@ -36,12 +36,14 @@ type Outbound struct {
 }
 
 func to(pid PlayerId, msg any) Outbound { return Outbound{To: Recipient{PlayerId: pid}, Msg: msg} }
+func broadcastMsg(msg any) Outbound     { return Outbound{To: Recipient{Broadcast: true}, Msg: msg} }
 
 // customer は客1人の権威状態。属性は試合中不変。
 type customer struct {
 	attribute      proto.CustomerAttribute
-	patienceMaxMs int
-	orderCount    int
+	patienceMaxMs  int
+	patienceLeftMs int
+	orderCount     int
 	keystrokeTotal int
 	assignedStore  *PlayerId
 }
@@ -62,8 +64,10 @@ type storeState struct {
 	buzzBonus      float64
 	evalNormalized float64
 	rank           int
-	served servedStats
-	alive  bool
+	served      servedStats
+	alive       bool
+	finalRank   int
+	elimination string
 }
 
 // PlayerInit は NewSession に渡す初期店舗情報。
@@ -242,7 +246,79 @@ func (s *Session) Tick(dtMs int) []Outbound {
 
 func (s *Session) stepPhase(out []Outbound) []Outbound      { return out }
 func (s *Session) stepDistribute(out []Outbound) []Outbound  { return out }
-func (s *Session) stepPatience(dtMs int, out []Outbound) []Outbound { _ = dtMs; return out }
+func (s *Session) stepPatience(dtMs int, out []Outbound) []Outbound {
+	effectiveDt := dtMs
+	if s.phase == proto.PhaseLate && s.params.Patience.LateMul > 0 {
+		effectiveDt = int(float64(dtMs) / s.params.Patience.LateMul)
+	}
+
+	for _, sid := range s.order {
+		st := s.stores[sid]
+		if !st.alive {
+			continue
+		}
+		q := s.storeQueues[sid]
+		if len(q) == 0 {
+			continue
+		}
+		head := s.customers[q[0]]
+		head.patienceLeftMs -= effectiveDt
+		if head.patienceLeftMs <= 0 {
+			out = s.processLeave(sid, q[0], out)
+		}
+	}
+	return out
+}
+
+func (s *Session) processLeave(store PlayerId, cid proto.CustomerId, out []Outbound) []Outbound {
+	c := s.customers[cid]
+
+	out = append(out, to(store, proto.CustomerLeft{
+		CustomerId: cid,
+		Reason:     proto.LeaveTimeout,
+	}))
+
+	s.releaseToRest(cid)
+
+	loss := s.params.Credit.LeaveLoss.For(c.attribute)
+	st := s.stores[store]
+	st.creditLife -= loss
+
+	out = append(out, to(store, proto.CreditUpdate{
+		Life:   st.creditLife,
+		Delta:  -loss,
+		Reason: proto.CreditCustomerLeft,
+	}))
+
+	if st.creditLife <= 0 {
+		out = s.selfCollapse(store, out)
+	}
+
+	return out
+}
+
+func (s *Session) selfCollapse(store PlayerId, out []Outbound) []Outbound {
+	st := s.stores[store]
+
+	st.alive = false
+	s.aliveCount--
+
+	for len(s.storeQueues[store]) > 0 {
+		cid := s.storeQueues[store][0]
+		s.releaseToRest(cid)
+	}
+
+	st.finalRank = s.aliveCount + 1
+	st.elimination = string(proto.ElimSelfCollapse)
+
+	out = append(out, broadcastMsg(proto.StoreEliminated{
+		StoreId:   store,
+		Reason:    proto.ElimSelfCollapse,
+		FinalRank: st.finalRank,
+	}))
+
+	return out
+}
 
 func (s *Session) stepEvaluate(out []Outbound) []Outbound {
 	decay := s.params.Eval.BuzzDecay
