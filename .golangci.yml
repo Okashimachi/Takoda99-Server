@@ -1,10 +1,10 @@
-# golangci-lint 設定 — textro99-server
+# golangci-lint 設定 — takoda99-server
 # 目的: 層アーキの依存ルールを機械的に強制する（docs/architecture.md）。
 #   - コア game は他の internal 部品/スパインを import しない（proto は可）
 #   - 層3部品（targeting/odai/config）は game/proto へ向かうのみ（スパイン参照禁止）
 # 実行: golangci-lint run
 #
-# ※ モジュール名を textro99 から変更したら、下の import パスも一括置換すること。
+# ※ モジュール名を takoda99 から変更したら、下の import パスも一括置換すること。
 
 version: "2"
 
@@ -28,24 +28,24 @@ linters:
             - "**/internal/game/**"
           allow:
             - "$gostd"
-            - "textro99/internal/proto"
-            - "textro99/internal/game"
+            - "takoda99/internal/proto"
+            - "takoda99/internal/game"
           deny:
-            - pkg: "textro99/internal/targeting"
+            - pkg: "takoda99/internal/targeting"
               desc: "game は作戦の具体実装を知らない。TargetingStrategy を注入して呼ぶ（DIP）。"
-            - pkg: "textro99/internal/odai"
+            - pkg: "takoda99/internal/odai"
               desc: "game はお題供給の実装を知らない。WordSource を注入して呼ぶ（DIP）。"
-            - pkg: "textro99/internal/config"
+            - pkg: "takoda99/internal/config"
               desc: "game は設定取得を知らない。ConfigProvider を注入して呼ぶ（DIP）。"
-            - pkg: "textro99/internal/bot"
+            - pkg: "takoda99/internal/bot"
               desc: "game は bot を知らない。"
-            - pkg: "textro99/internal/store"
+            - pkg: "takoda99/internal/store"
               desc: "game は永続化を知らない。"
-            - pkg: "textro99/internal/room"
+            - pkg: "takoda99/internal/room"
               desc: "game はスパイン(駆動)を知らない。room が game を駆動する一方向。"
-            - pkg: "textro99/internal/matchmaking"
+            - pkg: "takoda99/internal/matchmaking"
               desc: "game はマッチングを知らない。"
-            - pkg: "textro99/internal/transport"
+            - pkg: "takoda99/internal/transport"
               desc: "game は通信を知らない（純粋なコアに保つ）。"
 
         # ── ルール2: コア game は I/O・通信の具象に依存しない ──
@@ -66,11 +66,11 @@ linters:
           files:
             - "**/internal/db/**"
           deny:
-            - pkg: "textro99/internal/room"
+            - pkg: "takoda99/internal/room"
               desc: "db はスパイン(駆動)に依存しない。合成ルートが配線する。"
-            - pkg: "textro99/internal/matchmaking"
+            - pkg: "takoda99/internal/matchmaking"
               desc: "db はマッチングに依存しない。"
-            - pkg: "textro99/internal/transport"
+            - pkg: "takoda99/internal/transport"
               desc: "db は通信層に依存しない。"
 
         # ── ルール2.6: HTTPアダプタ configapi は Store インターフェース越しに使う ──
@@ -80,13 +80,13 @@ linters:
           files:
             - "**/internal/configapi/**"
           deny:
-            - pkg: "textro99/internal/db"
+            - pkg: "takoda99/internal/db"
               desc: "configapi は db 実装に依存しない。Store インターフェースを合成ルートが注入する。"
-            - pkg: "textro99/internal/room"
+            - pkg: "takoda99/internal/room"
               desc: "configapi はスパイン(駆動)に依存しない。"
-            - pkg: "textro99/internal/matchmaking"
+            - pkg: "takoda99/internal/matchmaking"
               desc: "configapi はマッチングに依存しない。"
-            - pkg: "textro99/internal/transport"
+            - pkg: "takoda99/internal/transport"
               desc: "configapi は WS 通信層に依存しない。"
 
         # ── ルール3: 層3部品は game/proto へ向かうのみ ──
@@ -99,17 +99,17 @@ linters:
             - "**/internal/config/**"
           allow:
             - "$gostd"
-            - "textro99/internal/game"
-            - "textro99/internal/proto"
-            - "textro99/internal/targeting"
-            - "textro99/internal/odai"
-            - "textro99/internal/config"
+            - "takoda99/internal/game"
+            - "takoda99/internal/proto"
+            - "takoda99/internal/targeting"
+            - "takoda99/internal/odai"
+            - "takoda99/internal/config"
           deny:
-            - pkg: "textro99/internal/room"
+            - pkg: "takoda99/internal/room"
               desc: "部品はスパイン(駆動)に依存しない。"
-            - pkg: "textro99/internal/matchmaking"
+            - pkg: "takoda99/internal/matchmaking"
               desc: "部品はマッチングに依存しない。"
-            - pkg: "textro99/internal/transport"
+            - pkg: "takoda99/internal/transport"
               desc: "部品は通信層に依存しない。"
 
 # 補足:

@@ -36,14 +36,12 @@ type Outbound struct {
 }
 
 func to(pid PlayerId, msg any) Outbound { return Outbound{To: Recipient{PlayerId: pid}, Msg: msg} }
-func broadcastMsg(msg any) Outbound     { return Outbound{To: Recipient{Broadcast: true}, Msg: msg} }
 
 // customer は客1人の権威状態。属性は試合中不変。
 type customer struct {
 	attribute      proto.CustomerAttribute
-	patienceMaxMs  int
-	patienceLeftMs int
-	orderCount     int
+	patienceMaxMs int
+	orderCount    int
 	keystrokeTotal int
 	assignedStore  *PlayerId
 }
@@ -64,10 +62,8 @@ type storeState struct {
 	buzzBonus      float64
 	evalNormalized float64
 	rank           int
-	served         servedStats
-	alive          bool
-	finalRank      int
-	elimination    string
+	served servedStats
+	alive  bool
 }
 
 // PlayerInit は NewSession に渡す初期店舗情報。
@@ -312,45 +308,6 @@ func (s *Session) rollAttribute() AttributeSpec {
 		r -= a.Weight
 	}
 	return specs[len(specs)-1]
-}
-
-func (s *Session) admitCustomer(cid proto.CustomerId, store PlayerId) (Outbound, bool) {
-	c := s.customers[cid]
-	if c == nil {
-		return Outbound{}, false
-	}
-	s.assignCustomer(cid, store)
-	words := make([]string, 0, c.orderCount)
-	keystrokes := 0
-	for i := 0; i < c.orderCount; i++ {
-		w := s.words.Next(s.wordLevel(), s.rng)
-		words = append(words, w.Text)
-		keystrokes += w.KeystrokeCount
-	}
-	c.keystrokeTotal = keystrokes
-	view := proto.CustomerView{
-		CustomerId:    cid,
-		Attribute:     c.attribute,
-		OrderCount:    c.orderCount,
-		Words:         words,
-		PatienceMaxMs: c.patienceMaxMs,
-	}
-	return to(store, view), true
-}
-
-func (s *Session) wordLevel() int { return 0 }
-
-// ── 客の移動ヘルパ ────────────────────────────────────────────
-
-func (s *Session) assignCustomer(cid proto.CustomerId, store PlayerId) {
-	c := s.customers[cid]
-	if c == nil {
-		return
-	}
-	s.restPool = removeCustomer(s.restPool, cid)
-	s.storeQueues[store] = append(s.storeQueues[store], cid)
-	c.assignedStore = &store
-	c.patienceLeftMs = c.patienceMaxMs
 }
 
 func (s *Session) releaseToRest(cid proto.CustomerId) {
