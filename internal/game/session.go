@@ -3,6 +3,7 @@ package game
 import (
 	"fmt"
 	"math/rand"
+	"sort"
 
 	"takoda99/internal/proto"
 )
@@ -95,6 +96,10 @@ type Session struct {
 	elapsedMs  int64
 	tick       int
 	aliveCount int
+
+	heatLevel        int
+	stormTickCounter int
+	stormWarnSent    bool
 }
 
 // NewSession は WaitingStart 状態の試合を作る。
@@ -244,7 +249,22 @@ func (s *Session) Tick(dtMs int) []Outbound {
 
 // ── 試合ループの各ステップ（no-op stub）────────────────────────
 
-func (s *Session) stepPhase(out []Outbound) []Outbound      { return out }
+func (s *Session) stepPhase(out []Outbound) []Outbound {
+	pp := s.params.Phase
+	switch s.phase {
+	case proto.PhaseEarly:
+		if s.aliveCount <= pp.MidAliveThreshold || s.elapsedMs >= int64(pp.MidTimeMs) {
+			s.phase = proto.PhaseMid
+			out = append(out, broadcastMsg(proto.PhaseChange{Phase: proto.PhaseMid}))
+		}
+	case proto.PhaseMid:
+		if s.aliveCount <= pp.LateAliveThreshold || s.elapsedMs >= int64(pp.LateTimeMs) {
+			s.phase = proto.PhaseLate
+			out = append(out, broadcastMsg(proto.PhaseChange{Phase: proto.PhaseLate}))
+		}
+	}
+	return out
+}
 func (s *Session) stepDistribute(out []Outbound) []Outbound {
 	threshold := s.params.Distribution.QueueRefillThreshold
 
@@ -483,8 +503,141 @@ func (s *Session) stepNormalize(out []Outbound) []Outbound {
 	}
 	return out
 }
-func (s *Session) stepHeat(out []Outbound) []Outbound      { return out }
-func (s *Session) stepStorm(out []Outbound) []Outbound     { return out }
+func (s *Session) stepHeat(out []Outbound) []Outbound {
+	hp := s.params.Heat
+	maxStores := len(s.order)
+
+	newHeat := hp.Base + int(hp.PerAliveDrop*float64(maxStores-s.aliveCount))
+	switch s.phase {
+	case proto.PhaseEarly:
+		newHeat += hp.PhaseEarly
+	case proto.PhaseMid:
+		newHeat += hp.PhaseMid
+	case proto.PhaseLate:
+		newHeat += hp.PhaseLate
+	}
+
+	if newHeat != s.heatLevel {
+		s.heatLevel = newHeat
+		out = append(out, broadcastMsg(proto.DifficultyUpdate{HeatLevel: s.heatLevel}))
+	}
+	return out
+}
+
+func (s *Session) stepStorm(out []Outbound) []Outbound {
+	sp := s.params.Storm
+	if sp.IntervalTicks <= 0 {
+		return out
+	}
+	s.stormTickCounter++
+
+	warnAt := sp.IntervalTicks - sp.WarnTicks
+	if warnAt < 1 {
+		warnAt = 1
+	}
+	if s.stormTickCounter == warnAt && !s.stormWarnSent {
+		s.stormWarnSent = true
+		remaining := sp.IntervalTicks - s.stormTickCounter
+		out = append(out, broadcastMsg(proto.ForcedEliminationWarning{
+			UntilTick:    remaining,
+			ThresholdPct: sp.ThresholdPct,
+		}))
+	}
+
+	if s.stormTickCounter < sp.IntervalTicks {
+		return out
+	}
+
+	s.stormTickCounter = 0
+	s.stormWarnSent = false
+
+	if s.aliveCount <= 1 {
+		return out
+	}
+
+	out = s.executeCull(out)
+	return out
+}
+
+func (s *Session) executeCull(out []Outbound) []Outbound {
+	sp := s.params.Storm
+
+	alive := make([]*storeState, 0, s.aliveCount)
+	for _, sid := range s.order {
+		if s.stores[sid].alive {
+			alive = append(alive, s.stores[sid])
+		}
+	}
+	if len(alive) <= 1 {
+		return out
+	}
+
+	cullCount := int(float64(len(alive))*sp.ThresholdPct + 0.999999)
+	if cullCount < 1 {
+		cullCount = 1
+	}
+	if cullCount >= len(alive) {
+		cullCount = len(alive) - 1
+	}
+
+	sortStoresByWeakest(alive)
+	culled := alive[:cullCount]
+
+	sortCulledForRank(culled)
+
+	for i := 0; i < len(culled); i++ {
+		st := culled[i]
+		st.alive = false
+		s.aliveCount--
+
+		for _, cid := range s.storeQueues[st.id] {
+			c := s.customers[cid]
+			if c != nil {
+				c.assignedStore = nil
+				s.restPool = append(s.restPool, cid)
+			}
+		}
+		s.storeQueues[st.id] = nil
+
+		st.finalRank = s.aliveCount + 1
+		st.elimination = string(proto.ElimCull)
+
+		if i > 0 {
+			prev := culled[i-1]
+			if st.creditLife == prev.creditLife && st.evalNormalized == prev.evalNormalized {
+				st.finalRank = prev.finalRank
+			}
+		}
+
+		out = append(out, broadcastMsg(proto.StoreEliminated{
+			StoreId:   st.id,
+			Reason:    proto.ElimCull,
+			FinalRank: st.finalRank,
+		}))
+	}
+
+	return out
+}
+
+func sortStoresByWeakest(stores []*storeState) {
+	sort.SliceStable(stores, func(i, j int) bool {
+		a, b := stores[i], stores[j]
+		if a.evalNormalized != b.evalNormalized {
+			return a.evalNormalized < b.evalNormalized
+		}
+		return a.creditLife < b.creditLife
+	})
+}
+
+func sortCulledForRank(stores []*storeState) {
+	sort.SliceStable(stores, func(i, j int) bool {
+		a, b := stores[i], stores[j]
+		if a.creditLife != b.creditLife {
+			return a.creditLife < b.creditLife
+		}
+		return a.evalNormalized < b.evalNormalized
+	})
+}
 
 func (s *Session) checkFinish(out []Outbound) []Outbound {
 	if len(s.order) > 1 && s.aliveCount <= 1 {
@@ -557,7 +710,7 @@ func (s *Session) admitCustomer(cid proto.CustomerId, store PlayerId) (Outbound,
 	}), true
 }
 
-func (s *Session) wordLevel() int { return 0 }
+func (s *Session) wordLevel() int { return s.heatLevel }
 
 func (s *Session) assignCustomer(cid proto.CustomerId, store PlayerId) {
 	c := s.customers[cid]

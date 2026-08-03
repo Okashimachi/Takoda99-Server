@@ -630,3 +630,179 @@ func TestStepDistribute_ZeroFloorReproducesSpec(t *testing.T) {
 		t.Fatal("WeightFloor=0 なら最下位店の重みは0で客は来ないはず")
 	}
 }
+
+// ── Plan-04: stepPhase / stepHeat / stepStorm テスト ─────────
+
+func filterMsg[T any](out []Outbound) []T {
+	var result []T
+	for _, o := range out {
+		if msg, ok := o.Msg.(T); ok {
+			result = append(result, msg)
+		}
+	}
+	return result
+}
+
+func TestStepPhase_AliveThreshold(t *testing.T) {
+	s := newTestSession(99)
+	s.Start()
+	s.params.Storm.IntervalTicks = 0
+
+	if s.phase != proto.PhaseEarly {
+		t.Fatalf("初期は Early のはず: %v", s.phase)
+	}
+
+	s.aliveCount = s.params.Phase.MidAliveThreshold
+	out := s.Tick(150)
+	if s.phase != proto.PhaseMid {
+		t.Fatalf("aliveCount=%d で Mid に移行するはず: %v", s.params.Phase.MidAliveThreshold, s.phase)
+	}
+	phaseChanges := filterMsg[proto.PhaseChange](out)
+	if len(phaseChanges) == 0 {
+		t.Fatal("PhaseChange が配信されるはず")
+	}
+	if phaseChanges[0].Phase != proto.PhaseMid {
+		t.Fatalf("PhaseChange.Phase=Mid のはず: %v", phaseChanges[0].Phase)
+	}
+
+	s.aliveCount = s.params.Phase.LateAliveThreshold
+	_ = s.Tick(150)
+	if s.phase != proto.PhaseLate {
+		t.Fatalf("aliveCount=%d で Late に移行するはず: %v", s.params.Phase.LateAliveThreshold, s.phase)
+	}
+}
+
+func TestStepPhase_TimeThreshold(t *testing.T) {
+	s := newTestSession(99)
+	s.Start()
+	s.params.Storm.IntervalTicks = 0
+
+	midMs := s.params.Phase.MidTimeMs
+	s.Tick(midMs)
+	if s.phase != proto.PhaseMid {
+		t.Fatalf("elapsedMs=%d で Mid に移行するはず: %v", midMs, s.phase)
+	}
+
+	lateMs := s.params.Phase.LateTimeMs - midMs
+	s.Tick(lateMs)
+	if s.phase != proto.PhaseLate {
+		t.Fatalf("elapsedMs=%d で Late に移行するはず: %v", s.params.Phase.LateTimeMs, s.phase)
+	}
+}
+
+func TestStepHeat_Calculation(t *testing.T) {
+	s := newTestSession(99)
+	s.Start()
+	s.params.Storm.IntervalTicks = 0
+	hp := s.params.Heat
+
+	s.Tick(150)
+	wantEarly := hp.Base + hp.PhaseEarly
+	if s.heatLevel != wantEarly {
+		t.Fatalf("Early全員生存の fire=%d のはず: %d", wantEarly, s.heatLevel)
+	}
+
+	s.aliveCount = 49
+	s.phase = proto.PhaseMid
+	s.Tick(150)
+	wantMid := hp.Base + int(hp.PerAliveDrop*float64(99-49)) + hp.PhaseMid
+	if s.heatLevel != wantMid {
+		t.Fatalf("Mid, alive=49 の fire=%d のはず: %d", wantMid, s.heatLevel)
+	}
+}
+
+func TestStepStorm_Cull(t *testing.T) {
+	n := 10
+	s := newTestSession(n)
+	s.Start()
+	s.params.Storm = StormParams{IntervalTicks: 5, WarnTicks: 2, ThresholdPct: 0.20}
+	s.phase = proto.PhaseMid
+	s.params.Phase.LateAliveThreshold = 0
+
+	for i, sid := range s.order {
+		s.stores[sid].evalNormalized = float64(i) / float64(n-1)
+	}
+
+	var lastOut []Outbound
+	for i := 0; i < 5; i++ {
+		lastOut = s.Tick(150)
+	}
+
+	culled := filterMsg[proto.StoreEliminated](lastOut)
+	if len(culled) == 0 {
+		t.Fatal("storm で StoreEliminated が出るはず")
+	}
+	if s.aliveCount != n-2 {
+		t.Fatalf("10人中2人が淘汰されて8人残るはず: %d", s.aliveCount)
+	}
+	for _, c := range culled {
+		if c.Reason != proto.ElimCull {
+			t.Fatalf("Reason=Cull のはず: %v", c.Reason)
+		}
+	}
+}
+
+func TestStepStorm_Warning(t *testing.T) {
+	s := newTestSession(10)
+	s.Start()
+	s.params.Storm = StormParams{IntervalTicks: 10, WarnTicks: 3, ThresholdPct: 0.10}
+	s.phase = proto.PhaseMid
+	s.params.Phase.LateAliveThreshold = 0
+
+	for i := 0; i < 6; i++ {
+		out := s.Tick(150)
+		warns := filterMsg[proto.ForcedEliminationWarning](out)
+		if len(warns) > 0 {
+			t.Fatalf("tick %d で警告が出るのは早すぎる", i+1)
+		}
+	}
+
+	out := s.Tick(150)
+	warns := filterMsg[proto.ForcedEliminationWarning](out)
+	if len(warns) == 0 {
+		t.Fatal("tick 7 で ForcedEliminationWarning が出るはず")
+	}
+	if warns[0].UntilTick != 3 {
+		t.Fatalf("UntilTick=3 のはず: %d", warns[0].UntilTick)
+	}
+
+	for i := 8; i <= 9; i++ {
+		out := s.Tick(150)
+		warns := filterMsg[proto.ForcedEliminationWarning](out)
+		if len(warns) > 0 {
+			t.Fatalf("tick %d で警告が重複している", i)
+		}
+	}
+}
+
+func TestStepStorm_Tiebreak(t *testing.T) {
+	s := newTestSession(5)
+	s.Start()
+	s.params.Storm = StormParams{IntervalTicks: 1, WarnTicks: 0, ThresholdPct: 0.40}
+	s.phase = proto.PhaseMid
+	s.params.Phase.LateAliveThreshold = 0
+
+	for _, sid := range s.order {
+		s.stores[sid].evalNormalized = 0
+	}
+	s.stores[s.order[0]].creditLife = 1
+	s.stores[s.order[1]].creditLife = 2
+	s.stores[s.order[2]].creditLife = 3
+	s.stores[s.order[3]].creditLife = 4
+	s.stores[s.order[4]].creditLife = 5
+
+	out := s.Tick(150)
+	culled := filterMsg[proto.StoreEliminated](out)
+
+	if len(culled) < 2 {
+		t.Fatalf("2店が淘汰されるはず: %d", len(culled))
+	}
+
+	if culled[0].StoreId != s.order[0] {
+		t.Fatalf("creditLife=1 の店が最初に脱落するはず: %s", culled[0].StoreId)
+	}
+	if culled[0].FinalRank <= culled[1].FinalRank {
+		t.Fatalf("先に脱落した方が FinalRank が大きいはず: %d vs %d",
+			culled[0].FinalRank, culled[1].FinalRank)
+	}
+}
