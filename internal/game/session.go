@@ -640,10 +640,42 @@ func sortCulledForRank(stores []*storeState) {
 }
 
 func (s *Session) checkFinish(out []Outbound) []Outbound {
-	if len(s.order) > 1 && s.aliveCount <= 1 {
-		s.state = Finished
+	if len(s.order) <= 1 {
+		return out
+	}
+	if s.aliveCount > 1 {
+		return out
+	}
+
+	s.state = Finished
+
+	for _, pid := range s.order {
+		if st := s.stores[pid]; st.alive {
+			st.finalRank = 1
+			st.elimination = ""
+			break
+		}
+	}
+
+	for _, pid := range s.order {
+		st := s.stores[pid]
+		out = append(out, to(pid, proto.MatchEnd{
+			FinalRank: st.finalRank,
+			Stats:     s.buildMatchStats(st),
+		}))
 	}
 	return out
+}
+
+func (s *Session) buildMatchStats(st *storeState) proto.MatchStats {
+	if st.served.count == 0 {
+		return proto.MatchStats{}
+	}
+	return proto.MatchStats{
+		ServedCount:  st.served.count,
+		AvgAccuracy:  st.served.accuracySum / float64(st.served.count),
+		AvgElapsedMs: int(st.served.elapsedSum / int64(st.served.count)),
+	}
 }
 
 // ── 客システム ──────────────────────────────────────────────
@@ -770,3 +802,36 @@ func (s *Session) publicParams() proto.GameParametersPublicSubset {
 		MaxStores:        len(s.order),
 	}
 }
+
+// ── リザルト ──────────────────────────────────────────────
+
+type StoreResult struct {
+	StoreId     PlayerId
+	DisplayName string
+	FinalRank   int
+	Elimination string
+	CreditLife  int
+	EvalRaw     float64
+	Stats       proto.MatchStats
+}
+
+func (s *Session) Results() []StoreResult {
+	results := make([]StoreResult, 0, len(s.order))
+	for _, pid := range s.order {
+		st := s.stores[pid]
+		results = append(results, StoreResult{
+			StoreId:     st.id,
+			DisplayName: st.name,
+			FinalRank:   st.finalRank,
+			Elimination: st.elimination,
+			CreditLife:  st.creditLife,
+			EvalRaw:     st.evalRaw,
+			Stats:       s.buildMatchStats(st),
+		})
+	}
+	return results
+}
+
+func (s *Session) Id() proto.MatchId { return s.id }
+func (s *Session) AliveCount() int   { return s.aliveCount }
+func (s *Session) ElapsedMs() int64  { return s.elapsedMs }
