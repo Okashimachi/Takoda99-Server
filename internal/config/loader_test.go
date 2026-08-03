@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"textro99/internal/game"
+	"takoda99/internal/game"
 )
 
 // DefaultLoader は内蔵デフォルトをそのまま返す。
@@ -35,14 +35,14 @@ func serveJSON(t *testing.T, status int, body string) string {
 // 正常系: 有効な JSON を取得して値を反映する。
 func TestRemoteLoader_Success(t *testing.T) {
 	want := game.DefaultParameters()
-	want.Attack.WarningGraceMs = 999 // 変更が反映されるか確認するための目印
+	want.Heat.MaxLevel = 999 // 変更が反映されるか確認するための目印
 	body, _ := json.Marshal(want)
 
 	got, err := NewRemoteLoader(serveJSON(t, http.StatusOK, string(body))).Load(context.Background())
 	if err != nil {
 		t.Fatalf("正常系で err=%v", err)
 	}
-	if got.Attack.WarningGraceMs != 999 || got != want {
+	if got.Heat.MaxLevel != 999 || got != want {
 		t.Fatalf("取得値が反映されていない: got %+v", got)
 	}
 }
@@ -52,7 +52,7 @@ func TestRemoteLoader_FallsBackToDefaults(t *testing.T) {
 	def := game.DefaultParameters()
 
 	invalid := def
-	invalid.Stack.Limit = 0
+	invalid.Customer.Total = 0 // Validate で弾かれる
 	invalidBody, _ := json.Marshal(invalid)
 
 	cases := []struct {
@@ -61,7 +61,7 @@ func TestRemoteLoader_FallsBackToDefaults(t *testing.T) {
 	}{
 		{"HTTP 500", serveJSON(t, http.StatusInternalServerError, `{}`)},
 		{"壊れたJSON", serveJSON(t, http.StatusOK, `{not json`)},
-		{"必須値が異常(stack.limit=0)", serveJSON(t, http.StatusOK, string(invalidBody))},
+		{"必須値が異常(customer.total=0)", serveJSON(t, http.StatusOK, string(invalidBody))},
 		{"接続不可", "http://127.0.0.1:0"},
 	}
 	for _, c := range cases {

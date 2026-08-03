@@ -31,6 +31,8 @@ linters:
             - "textro99/internal/proto"
             - "textro99/internal/game"
           deny:
+            - pkg: "textro99/internal/targeting"
+              desc: "game は作戦の具体実装を知らない。TargetingStrategy を注入して呼ぶ（DIP）。"
             - pkg: "textro99/internal/odai"
               desc: "game はお題供給の実装を知らない。WordSource を注入して呼ぶ（DIP）。"
             - pkg: "textro99/internal/config"
@@ -88,16 +90,18 @@ linters:
               desc: "configapi は WS 通信層に依存しない。"
 
         # ── ルール3: 層3部品は game/proto へ向かうのみ ──
-        # odai/config は game(ports実装のため)・proto・標準ライブラリだけに依存する。
+        # targeting/odai/config は game(ports実装のため)・proto・標準ライブラリだけに依存する。
         # スパイン(room/matchmaking/transport)への依存は隔離を壊すため禁止。
         modules-implement-ports:
           files:
+            - "**/internal/targeting/**"
             - "**/internal/odai/**"
             - "**/internal/config/**"
           allow:
             - "$gostd"
             - "textro99/internal/game"
             - "textro99/internal/proto"
+            - "textro99/internal/targeting"
             - "textro99/internal/odai"
             - "textro99/internal/config"
           deny:

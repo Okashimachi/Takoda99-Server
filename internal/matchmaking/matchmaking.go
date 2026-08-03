@@ -9,30 +9,55 @@ package matchmaking
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
+	"unicode"
 
-	"textro99/internal/game"
-	"textro99/internal/proto"
-	"textro99/internal/transport"
+	"takoda99/internal/game"
+	"takoda99/internal/proto"
+	"takoda99/internal/transport"
 )
 
 // Player は待機中／開始対象の1名。Conn はサーバー側の接続ハンドル。
+// Name は盤面表示名（サニタイズ済み・空ならフォールバックは試合構築側が決める）。
 type Player struct {
 	Id   game.PlayerId
 	Conn transport.Connection
+	Name string
+}
+
+// MaxDisplayNameLen は表示名の最大文字数（ルーン単位）。
+const MaxDisplayNameLen = 24
+
+// SanitizeDisplayName は受信した表示名を安全化する（#79）。
+// 前後空白を除去し、制御文字（改行・タブ等）を落とし、MaxDisplayNameLen ルーンで切り詰める。
+// 結果が空なら空文字を返す（フォールバック名の割り当ては呼び出し側の責務）。
+func SanitizeDisplayName(raw string) string {
+	cleaned := make([]rune, 0, len(raw))
+	for _, r := range raw {
+		if unicode.IsControl(r) {
+			continue
+		}
+		cleaned = append(cleaned, r)
+	}
+	name := strings.TrimSpace(string(cleaned))
+	rs := []rune(name)
+	if len(rs) > MaxDisplayNameLen {
+		name = strings.TrimSpace(string(rs[:MaxDisplayNameLen]))
+	}
+	return name
 }
 
 // Config は matchmaking の依存と数値。
 type Config struct {
-	Params game.MatchingParams
+	// GetParams は現在のマッチング用パラメータを返す（動的リロード対応）。
+	GetParams func() game.MatchingParams
 	// After は指定時間後に発火するチャネルを返す（本番=time.After、テスト=手動）。
 	After func(time.Duration) <-chan time.Time
 	// Start は集まったプレイヤー（人間＋Bot補完）で試合を開始する（session+room 構築）。
 	Start func(players []Player)
 	// NewBot は Bot 枠を1つ作って返す（nil なら補完しない）。合成ルートが Pipe＋bot起動して返す。
 	NewBot func() Player
-	// MinFill は開始時にこの人数まで Bot で埋める（0 で補完なし）。
-	MinFill int
 }
 
 type eventKind int
@@ -75,8 +100,45 @@ func (m *Matchmaker) Leave(id game.PlayerId) { m.events <- event{kind: evLeave, 
 func (m *Matchmaker) Run(ctx context.Context) {
 	var pool []Player
 	var countdown <-chan time.Time // nil のときカウントダウンなし
-	min := m.cfg.Params.MinPlayers
-	max := m.cfg.Params.MaxPlayers
+	var countdownStart time.Time   // カウントダウン開始時刻（残り時間算出用）
+	var countdownMin int
+	var countdownDurationMs int
+
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	update := func(forceBroadcast bool) {
+		params := m.cfg.GetParams()
+		min := params.MinPlayers
+		max := params.MaxPlayers
+		changed := false
+
+		if max > 0 && len(pool) >= max {
+			m.startMatch(pool, params)
+			pool, countdown = nil, nil
+			return
+		}
+
+		if countdown == nil && len(pool) >= min {
+			countdownMin = min
+			countdownDurationMs = params.StartCountdownMs
+			countdownStart = time.Now()
+			countdown = m.cfg.After(time.Duration(params.StartCountdownMs) * time.Millisecond)
+			changed = true
+		} else if countdown != nil && len(pool) < countdownMin {
+			countdown = nil
+			changed = true
+		}
+
+		if countdown != nil {
+			params.MinPlayers = countdownMin
+			params.StartCountdownMs = countdownDurationMs
+		}
+
+		if forceBroadcast || changed {
+			m.broadcast(pool, countdown != nil, countdownStart, params)
+		}
+	}
 
 	for {
 		select {
@@ -87,33 +149,27 @@ func (m *Matchmaker) Run(ctx context.Context) {
 			switch ev.kind {
 			case evJoin:
 				pool = append(pool, ev.p)
-				if max > 0 && len(pool) >= max {
-					m.startMatch(pool)
-					pool, countdown = nil, nil
-					continue
-				}
-				if countdown == nil && len(pool) >= min {
-					countdown = m.cfg.After(time.Duration(m.cfg.Params.StartCountdownMs) * time.Millisecond)
-				}
 			case evLeave:
 				pool = removePlayer(pool, ev.id)
-				if countdown != nil && len(pool) < min {
-					countdown = nil // minPlayers 割り込み→カウントダウンリセット
-				}
 			}
-			m.broadcast(pool, countdown != nil)
+			update(true)
+			
+		case <-ticker.C:
+			if len(pool) > 0 {
+				update(true)
+			}
 
 		case <-countdown:
-			m.startMatch(pool)
+			m.startMatch(pool, m.cfg.GetParams())
 			pool, countdown = nil, nil
 		}
 	}
 }
 
 // startMatch は Bot 補完してから Start を呼ぶ。
-func (m *Matchmaker) startMatch(pool []Player) {
+func (m *Matchmaker) startMatch(pool []Player, params game.MatchingParams) {
 	players := append([]Player(nil), pool...)
-	for len(players) < m.cfg.MinFill && m.cfg.NewBot != nil {
+	for len(players) < params.MinFill && m.cfg.NewBot != nil {
 		players = append(players, m.cfg.NewBot())
 	}
 	if m.cfg.Start != nil {
@@ -122,14 +178,17 @@ func (m *Matchmaker) startMatch(pool []Player) {
 }
 
 // broadcast は待機者へ現在の MatchmakingStatus を配信する。
-func (m *Matchmaker) broadcast(pool []Player, counting bool) {
+func (m *Matchmaker) broadcast(pool []Player, counting bool, countdownStart time.Time, params game.MatchingParams) {
 	status := proto.MatchmakingStatus{
 		WaitingCount: len(pool),
-		MinPlayers:   m.cfg.Params.MinPlayers,
+		MinPlayers:   params.MinPlayers,
 	}
-	if counting { // カウントダウン中は目安として全体秒数を載せる（クライアントが自前で減算表示）
-		cd := m.cfg.Params.StartCountdownMs
-		status.CountdownMs = &cd
+	if counting {
+		remaining := params.StartCountdownMs - int(time.Since(countdownStart).Milliseconds())
+		if remaining < 0 {
+			remaining = 0
+		}
+		status.CountdownMs = &remaining
 	}
 	data, err := json.Marshal(status)
 	if err != nil {

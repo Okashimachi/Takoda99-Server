@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"textro99/internal/game"
+	"takoda99/internal/game"
 )
 
 // RemoteLoader はリモートの設定エンドポイント（HTTP で GameParameters の JSON を返すもの）から取得する。

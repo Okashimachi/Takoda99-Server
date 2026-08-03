@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"textro99/internal/proto"
+	"takoda99/internal/proto"
 )
 
 func recvWithin(t *testing.T, c Connection, d time.Duration) (proto.Envelope, bool) {

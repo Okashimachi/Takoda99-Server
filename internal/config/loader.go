@@ -8,7 +8,7 @@ package config
 import (
 	"context"
 
-	"textro99/internal/game"
+	"takoda99/internal/game"
 )
 
 // DefaultLoader は常に内蔵デフォルトを返す。--mode solo やオフライン開発、テストで使う。

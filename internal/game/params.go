@@ -1,61 +1,80 @@
-// Package game は【層1・コア】戦闘の権威。純粋な計算のみで、ネットワーク・時間・I/O を持たない。
+// Package game は【層1・コア】試合の権威。純粋な計算のみで、ネットワーク・時間・I/O を持たない。
 //
-// per-player の判定式（combo/attack/offset/stack/difficulty）と、全体を調停する session
-// 状態機械（Tick(dt) で進む）を内包する。game は他の internal 部品/スパインを import しない
-// （proto は契約として参照可）。継ぎ目は ports.go（DIP）。すべての調整値は GameParameters 経由。
+// たこ焼き経営BR の状態機械（Tick(dt) で進む）を内包する。game は他の internal 部品/スパインを
+// import しない（proto は契約として参照可）。継ぎ目は ports.go（DIP）。すべての調整値は
+// GameParameters 経由。
 package game
 
 import (
 	"fmt"
 
-	"textro99/internal/proto"
+	"takoda99/internal/proto"
 )
 
 // GameParameters は数値バランスの全項目。正典は
-// Takoda99-Docs/03_サーバー仕様/04_パラメータ仕様.md。
+// Takoda99-Docs/02_共通仕様/03_パラメータ仕様.md。
 // サーバーが起動時に config(ConfigProvider) 経由で外部取得し、失敗時は DefaultParameters()。
 // クライアントへは MatchStart で公開サブセット（proto側）に絞って配信する。
 type GameParameters struct {
-	Combo      ComboParams      `json:"combo"`
-	Attack     AttackParams     `json:"attack"`
-	Stack      StackParams      `json:"stack"`
-	Difficulty DifficultyParams `json:"difficulty"`
-	Odai       OdaiParams       `json:"odai"`
-	Matching   MatchingParams   `json:"matching"`
-	Session    SessionParams    `json:"session"`
-
-	// たこ焼き版で追加。旧項目(Combo/Attack/Stack/Difficulty/Odai)は tako-K で
-	// 評価/信用/フェーズ/火力の新スキーマへ置換予定。
-	Credit   CreditParams   `json:"credit"`   // tako-B
-	Customer CustomerParams `json:"customer"` // tako-D
-	Eval     EvalParams     `json:"eval"`     // tako-E
+	Session      SessionParams      `json:"session"`
+	Matching     MatchingParams     `json:"matching"`
+	Credit       CreditParams       `json:"credit"`
+	Customer     CustomerParams     `json:"customer"`
+	Eval         EvalParams         `json:"eval"`
+	Phase        PhaseParams        `json:"phase"`
+	Heat         HeatParams         `json:"heat"`
+	Storm        StormParams        `json:"storm"`
+	Distribution DistributionParams `json:"distribution"`
+	Patience     PatienceParams     `json:"patience"`
+	Bot          BotParams          `json:"bot"`
 }
 
-// EvalParams: 提供スコア→評価EMA の調整値（tako-E）。すべて全項目 comparable に保つ（== 比較維持）。
-type EvalParams struct {
-	EmaAlpha        float64 `json:"emaAlpha"`        // 評価EMA の係数（0..1・大きいほど直近重視）
-	WeightAccuracy  float64 `json:"weightAccuracy"`  // 提供スコアの精度重み w_acc
-	WeightSpeed     float64 `json:"weightSpeed"`     // 提供スコアの速度重み w_spd
-	SpeedBaselineMs int     `json:"speedBaselineMs"` // 速度=baseline/elapsed が 1.0 になる基準所要
-	SpeedCap        float64 `json:"speedCap"`        // 速度の上限（速すぎる報告の頭打ち）
-	MinMsPerWord    int     `json:"minMsPerWord"`    // サニティ下限：1語あたり最小所要（elapsed 下限＝×orderCount）
-	BuzzBonus       float64 `json:"buzzBonus"`       // JK(Buzz)満足時の一時加点
-	BuzzDecay       float64 `json:"buzzDecay"`       // 一時加点の毎tick乗算減衰（0..1）
-	BuzzCap         float64 `json:"buzzCap"`         // 一時加点の上限
+// SessionParams: 試合ループの調整値。tick 周期・状態配信間隔もハードコードせずここで持つ。
+type SessionParams struct {
+	TickIntervalMs    int `json:"tickIntervalMs"`
+	PublishIntervalMs int `json:"publishIntervalMs"`
+	MatchTimeLimitMs  int `json:"matchTimeLimitMs"`
+}
+
+// MatchingParams: マッチング（試合前）。minPlayers は当日運用で下げられるよう可変性が重要。
+type MatchingParams struct {
+	MinPlayers       int `json:"minPlayers"`
+	MaxPlayers       int `json:"maxPlayers"`
+	StartCountdownMs int `json:"startCountdownMs"`
+	MinFill          int `json:"minFill"`
+}
+
+// LeaveLoss: 属性別の離脱ペナルティ。
+type LeaveLoss struct {
+	Normal  int `json:"normal"`
+	Bonus   int `json:"bonus"`
+	Claimer int `json:"claimer"`
+	Buzz    int `json:"buzz"`
+}
+
+// For は属性に対応する減少量を返す。
+func (ll LeaveLoss) For(attr proto.CustomerAttribute) int {
+	switch attr {
+	case proto.AttrBonus:
+		return ll.Bonus
+	case proto.AttrClaimer:
+		return ll.Claimer
+	case proto.AttrBuzz:
+		return ll.Buzz
+	default:
+		return ll.Normal
+	}
 }
 
 // CreditParams: 信用（ライフ）。客の離脱でのみ減少・0で自滅脱落。
-// tako-K で leaveLoss(属性別) 等を拡充する。
 type CreditParams struct {
-	InitialLife int `json:"initialLife"` // 初期信用（例:3。約3回の離脱で脱落）
+	InitialLife int       `json:"initialLife"`
+	LeaveLoss   LeaveLoss `json:"leaveLoss"`
 }
 
-// CustomerParams: 客システム（総数・属性ごとの出現率/我慢/注文数）。tako-D。
-// Claimer の中盤解禁など「いつ来店させるか」の制御は分配(tako-G)/フェーズ(tako-H)側が持つ。
-// ここは客の生成定義（何人・どんな客か）のみ。
-// 属性は proto で閉じた4種なので固定フィールドで持つ（GameParameters の == 比較可能性を保つ）。
+// CustomerParams: 客システム（総数・属性ごとの出現率/我慢/注文数）。
 type CustomerParams struct {
-	Total   int           `json:"total"` // 客総数（例:300）
+	Total   int           `json:"total"`
 	Normal  AttributeSpec `json:"normal"`
 	Bonus   AttributeSpec `json:"bonus"`
 	Claimer AttributeSpec `json:"claimer"`
@@ -65,123 +84,108 @@ type CustomerParams struct {
 // AttributeSpec: 1属性分の生成パラメータ。
 type AttributeSpec struct {
 	Attribute      proto.CustomerAttribute `json:"attribute"`
-	Weight         int                     `json:"weight"`         // 出現率の相対重み（Σで正規化）
-	PatienceBaseMs int                     `json:"patienceBaseMs"` // 我慢ゲージ最大の基準
-	OrderCount     int                     `json:"orderCount"`     // 打つ単語数（Buzz は多め）
+	Weight         int                     `json:"weight"`
+	PatienceBaseMs int                     `json:"patienceBaseMs"`
+	OrderCount     int                     `json:"orderCount"`
 }
 
-// ComboParams: コンボの蓄積・減衰・個人難易度連動。
-type ComboParams struct {
-	NoMissBaseGain             int `json:"noMissBaseGain"`
-	NoMissPerCharGain          int `json:"noMissPerCharGain"`
-	MissDecay                  int `json:"missDecay"`
-	PersonalDifficultyStep     int `json:"personalDifficultyStep"`
-	PersonalDifficultyMaxLevel int `json:"personalDifficultyMaxLevel"`
+// EvalParams: 提供スコア→評価EMA の調整値。
+type EvalParams struct {
+	EmaAlpha        float64 `json:"emaAlpha"`
+	WeightAccuracy  float64 `json:"weightAccuracy"`
+	WeightSpeed     float64 `json:"weightSpeed"`
+	SpeedBaselineMs int     `json:"speedBaselineMs"`
+	SpeedCap        float64 `json:"speedCap"`
+	MinMsPerWord    int     `json:"minMsPerWord"`
+	BuzzBonus       float64 `json:"buzzBonus"`
+	BuzzDecay       float64 `json:"buzzDecay"`
+	BuzzCap         float64 `json:"buzzCap"`
 }
 
-// AttackParams: 威力・相殺・撃ち返し。
-type AttackParams struct {
-	ComboToPowerRatio       float64 `json:"comboToPowerRatio"`
-	PowerToDakenRate        float64 `json:"powerToDakenRate"`
-	BadgePowerBonusPerBadge float64 `json:"badgePowerBonusPerBadge"`
-	BadgePowerBonusCap      float64 `json:"badgePowerBonusCap"`
-	WarningGraceMs          int     `json:"warningGraceMs"`
-	MaxReboundChain         int     `json:"maxReboundChain"`
+// PhaseParams: フェーズ遷移（Early → Mid → Late）。
+type PhaseParams struct {
+	MidAliveThreshold  int `json:"midAliveThreshold"`
+	LateAliveThreshold int `json:"lateAliveThreshold"`
+	MidTimeMs          int `json:"midTimeMs"`
+	LateTimeMs         int `json:"lateTimeMs"`
 }
 
-// StackParams: ダケンスタックとトラップ誘発。
-type StackParams struct {
-	Limit               int `json:"limit"`
-	TrapTriggerInterval int `json:"trapTriggerInterval"`
-	TrapMissPenalty     int `json:"trapMissPenalty"`
+// HeatParams: 火力（お題難易度の全体上昇）。
+type HeatParams struct {
+	Base         int     `json:"base"`
+	PerAliveDrop float64 `json:"perAliveDrop"`
+	PhaseEarly   int     `json:"phaseEarly"`
+	PhaseMid     int     `json:"phaseMid"`
+	PhaseLate    int     `json:"phaseLate"`
+	MaxLevel     int     `json:"maxLevel"`
 }
 
-// DifficultyParams: 全体難易度。
-type DifficultyParams struct {
-	GlobalIntervalMs int `json:"globalIntervalMs"`
-	MaxLevel         int `json:"maxLevel"`
+// StormParams: 下位淘汰（定期的に下位%を強制脱落）。
+type StormParams struct {
+	IntervalTicks int     `json:"intervalTicks"`
+	WarnTicks     int     `json:"warnTicks"`
+	ThresholdPct  float64 `json:"thresholdPct"`
 }
 
-// OdaiParams: ダケン個別制限時間。
-type OdaiParams struct {
-	BaseTimeLimitMs     int `json:"baseTimeLimitMs"`
-	PerLevelReductionMs int `json:"perLevelReductionMs"`
-	MinTimeLimitMs      int `json:"minTimeLimitMs"`
+// DistributionParams: 客の分配（restPool→店の行列）。
+type DistributionParams struct {
+	QueueRefillThreshold int     `json:"queueRefillThreshold"`
+	WeightFloor          float64 `json:"weightFloor"`
 }
 
-// MatchingParams: マッチング（試合前）。minPlayers は当日運用で下げられるよう可変性が重要。
-type MatchingParams struct {
-	MinPlayers       int `json:"minPlayers"`
-	MaxPlayers       int `json:"maxPlayers"`
-	StartCountdownMs int `json:"startCountdownMs"`
+// PatienceParams: 我慢ゲージの調整。
+type PatienceParams struct {
+	LateMul float64 `json:"lateMul"`
+	AlertMs int     `json:"alertMs"`
 }
 
-// SessionParams: 試合ループの調整値。tick 周期・状態配信間隔もハードコードせずここで持つ（決定4）。
-type SessionParams struct {
-	TickIntervalMs    int `json:"tickIntervalMs"`
-	PublishIntervalMs int `json:"publishIntervalMs"` // 99人ミニ盤面の配信間隔（tickより低頻度で帯域を抑える）
-	MatchTimeLimitMs  int `json:"matchTimeLimitMs"`  // 試合の制限時間。0=無効（solo/dev の idle 継続用）。tako-C の終了条件が参照
+// BotParams: CPU（Bot）の強さ。
+type BotParams struct {
+	ServeIntervalMs int     `json:"serveIntervalMs"`
+	MissRate        float64 `json:"missRate"`
 }
 
-// Validate は破綻値を弾く最小限の検証。config 取得（RemoteLoader / DB / config-front POST）で
-// 共通に使う。コア game が GameParameters の不変条件を所有する（検証ロジックの単一ソース）。
+// Validate は破綻値を弾く最小限の検証。
 func (gp GameParameters) Validate() error {
-	if gp.Stack.Limit <= 0 {
-		return fmt.Errorf("stack.limit は正である必要 (got %d)", gp.Stack.Limit)
-	}
-	if gp.Difficulty.MaxLevel <= 0 {
-		return fmt.Errorf("difficulty.maxLevel は正である必要 (got %d)", gp.Difficulty.MaxLevel)
-	}
 	if gp.Customer.Total <= 0 {
 		return fmt.Errorf("customer.total は正である必要 (got %d)", gp.Customer.Total)
+	}
+	if gp.Credit.InitialLife <= 0 {
+		return fmt.Errorf("credit.initialLife は正である必要 (got %d)", gp.Credit.InitialLife)
+	}
+	if gp.Session.TickIntervalMs <= 0 {
+		return fmt.Errorf("session.tickIntervalMs は正である必要 (got %d)", gp.Session.TickIntervalMs)
+	}
+	if gp.Bot.ServeIntervalMs <= 0 {
+		return fmt.Errorf("bot.serveIntervalMs は正である必要 (got %d)", gp.Bot.ServeIntervalMs)
+	}
+	if gp.Bot.MissRate < 0 || gp.Bot.MissRate > 1 {
+		return fmt.Errorf("bot.missRate は 0..1 である必要 (got %v)", gp.Bot.MissRate)
+	}
+	if gp.Heat.MaxLevel <= 0 {
+		return fmt.Errorf("heat.maxLevel は正である必要 (got %d)", gp.Heat.MaxLevel)
 	}
 	return nil
 }
 
 // DefaultParameters はリモートコンフィグ取得失敗時のフォールバック内蔵デフォルト。
-// 値は 04_パラメータ仕様.md の初期仮値（すべて実測調整前のサンプル）。
 func DefaultParameters() GameParameters {
 	return GameParameters{
-		Combo: ComboParams{
-			NoMissBaseGain:             10,
-			NoMissPerCharGain:          1,
-			MissDecay:                  3,
-			PersonalDifficultyStep:     20,
-			PersonalDifficultyMaxLevel: 5,
-		},
-		Attack: AttackParams{
-			ComboToPowerRatio:       1.0,
-			PowerToDakenRate:        0.1,
-			BadgePowerBonusPerBadge: 0.1,
-			BadgePowerBonusCap:      1.0,
-			WarningGraceMs:          1500,
-			MaxReboundChain:         3,
-		},
-		Stack: StackParams{
-			Limit:               20,
-			TrapTriggerInterval: 5,
-			TrapMissPenalty:     3,
-		},
-		Difficulty: DifficultyParams{
-			GlobalIntervalMs: 30000,
-			MaxLevel:         10,
-		},
-		Odai: OdaiParams{
-			BaseTimeLimitMs:     5000,
-			PerLevelReductionMs: 300,
-			MinTimeLimitMs:      2000,
+		Session: SessionParams{
+			TickIntervalMs:    150,
+			PublishIntervalMs: 250,
+			MatchTimeLimitMs:  0,
 		},
 		Matching: MatchingParams{
 			MinPlayers:       20,
 			MaxPlayers:       99,
 			StartCountdownMs: 15000,
+			MinFill:          99,
 		},
-		Session: SessionParams{
-			TickIntervalMs:    150,
-			PublishIntervalMs: 250,    // 約4Hz。即時イベントとは別に、盤面は低頻度スナップ
-			MatchTimeLimitMs:  180000, // 3分（実測調整前のサンプル）。0 で無効＝solo/dev の idle 継続
+		Credit: CreditParams{
+			InitialLife: 3,
+			LeaveLoss:   LeaveLoss{Normal: 1, Bonus: 1, Claimer: 1, Buzz: 2},
 		},
-		Credit: CreditParams{InitialLife: 3},
 		Customer: CustomerParams{
 			Total:   300,
 			Normal:  AttributeSpec{Attribute: proto.AttrNormal, Weight: 70, PatienceBaseMs: 8000, OrderCount: 2},
@@ -199,6 +203,37 @@ func DefaultParameters() GameParameters {
 			BuzzBonus:       0.2,
 			BuzzDecay:       0.98,
 			BuzzCap:         0.5,
+		},
+		Phase: PhaseParams{
+			MidAliveThreshold:  70,
+			LateAliveThreshold: 30,
+			MidTimeMs:          30000,
+			LateTimeMs:         90000,
+		},
+		Heat: HeatParams{
+			Base:         0,
+			PerAliveDrop: 0.1,
+			PhaseEarly:   0,
+			PhaseMid:     3,
+			PhaseLate:    8,
+			MaxLevel:     20,
+		},
+		Storm: StormParams{
+			IntervalTicks: 40,
+			WarnTicks:     10,
+			ThresholdPct:  0.10,
+		},
+		Distribution: DistributionParams{
+			QueueRefillThreshold: 3,
+			WeightFloor:          0.25,
+		},
+		Patience: PatienceParams{
+			LateMul: 0.6,
+			AlertMs: 2000,
+		},
+		Bot: BotParams{
+			ServeIntervalMs: 800,
+			MissRate:        0.05,
 		},
 	}
 }

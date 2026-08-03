@@ -41,16 +41,3 @@ func TestPlaceholderWords_AllLevelsCovered(t *testing.T) {
 		}
 	}
 }
-
-// トラップは3個以上、各打鍵数が正。
-func TestPlaceholderTraps(t *testing.T) {
-	traps := placeholderTraps()
-	if len(traps) < 3 {
-		t.Fatalf("トラップは3個以上必要: %d", len(traps))
-	}
-	for _, w := range traps {
-		if w.Text == "" || w.KeystrokeCount <= 0 {
-			t.Fatalf("不正なトラップ: %+v", w)
-		}
-	}
-}

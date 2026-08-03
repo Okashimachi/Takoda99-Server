@@ -6,14 +6,14 @@ import (
 	"testing"
 	"time"
 
-	"textro99/internal/game"
+	"takoda99/internal/game"
 )
 
 // TestConfigStore_RoundTrip は実 Postgres に対する統合テスト。
 // TEST_DATABASE_URL が未設定ならスキップする（CI では DB を用意しないので通常スキップ）。
 // ローカルで実行するには:
 //
-//	TEST_DATABASE_URL='postgres://user:pass@localhost:5432/textro99?sslmode=disable' go test ./internal/db/ -run RoundTrip -v
+//	TEST_DATABASE_URL='postgres://user:pass@localhost:5432/takoda99?sslmode=disable' go test ./internal/db/ -run RoundTrip -v
 func TestConfigStore_RoundTrip(t *testing.T) {
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
@@ -48,14 +48,14 @@ func TestConfigStore_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load(seed後): %v", err)
 	}
-	if got.Stack.Limit != game.DefaultParameters().Stack.Limit {
-		t.Fatalf("seed 値が既定と違う: got stack.limit=%d", got.Stack.Limit)
+	if got.Credit.InitialLife != game.DefaultParameters().Credit.InitialLife {
+		t.Fatalf("seed 値が既定と違う: got credit.initialLife=%d", got.Credit.InitialLife)
 	}
 
 	// Save→Load で往復。値を変えて反映されること。
 	edited := game.DefaultParameters()
-	edited.Stack.Limit = 7
-	edited.Difficulty.MaxLevel = 12
+	edited.Credit.InitialLife = 7
+	edited.Heat.MaxLevel = 12
 	if err := s.Save(ctx, edited); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -63,21 +63,38 @@ func TestConfigStore_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load(Save後): %v", err)
 	}
-	if got.Stack.Limit != 7 || got.Difficulty.MaxLevel != 12 {
-		t.Fatalf("Save が反映されていない: got stack.limit=%d maxLevel=%d", got.Stack.Limit, got.Difficulty.MaxLevel)
+	if got.Credit.InitialLife != 7 || got.Heat.MaxLevel != 12 {
+		t.Fatalf("Save が反映されていない: got credit.initialLife=%d maxLevel=%d", got.Credit.InitialLife, got.Heat.MaxLevel)
 	}
 
 	// 破綻値は Save で弾かれ、DB は前の値のまま。
 	bad := game.DefaultParameters()
-	bad.Stack.Limit = 0
+	bad.Customer.Total = 0 // Validate で弾かれる
 	if err := s.Save(ctx, bad); err == nil {
-		t.Fatal("stack.limit=0 の Save はエラーになるべき")
+		t.Fatal("customer.total=0 の Save はエラーになるべき")
 	}
 	got, err = s.Load(ctx)
 	if err != nil {
 		t.Fatalf("Load(不正Save後): %v", err)
 	}
-	if got.Stack.Limit != 7 {
-		t.Fatalf("不正Saveで値が壊れた: got stack.limit=%d", got.Stack.Limit)
+	if got.Credit.InitialLife != 7 {
+		t.Fatalf("不正Saveで値が壊れた: got credit.initialLife=%d", got.Credit.InitialLife)
+	}
+
+	// 回帰: bot セクション追加前に保存された行（JSON に "bot" キーが無い）でも Load が
+	// 失敗しない（本番incident: config-front の GET /api/params が 500 になった原因）。
+	legacy := `{"credit":{"initialLife":7},"heat":{"maxLevel":12}}`
+	if _, err := pool.Exec(ctx, `UPDATE game_config SET params = $1 WHERE id = 1`, legacy); err != nil {
+		t.Fatalf("legacy行のセット: %v", err)
+	}
+	got, err = s.Load(ctx)
+	if err != nil {
+		t.Fatalf("一部キー無しの旧データで Load が失敗した（後方互換バグ）: %v", err)
+	}
+	if got.Bot != game.DefaultParameters().Bot {
+		t.Fatalf("bot が既定値で補完されていない: %+v", got.Bot)
+	}
+	if got.Credit.InitialLife != 7 {
+		t.Fatalf("旧データの既存値が保持されていない: got credit.initialLife=%d", got.Credit.InitialLife)
 	}
 }

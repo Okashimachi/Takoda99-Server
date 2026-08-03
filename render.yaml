@@ -1,10 +1,6 @@
 # Render Blueprint。Render ダッシュボードで「New > Blueprint」からこのリポジトリを指定すると
 # 下記のサービスが作成される（Dockerfile でビルド）。
-# ※ free プランはスリープあり。本番前に Starter 以上へ（#41）。
-#
-# ⚠ name を変えると Render は「別サービス」として扱い、新しい URL が払い出されて
-#   既存サービスは取り残される（env var も再設定が要る）。takoda99-server への改称は
-#   URL 差し替えとセットで行うこと。手順は docs/plan/plan-10_デプロイ戦略.md。
+# ※ free プランはスリープあり。本番前に Starter 以上へ（#72）。
 services:
   - type: web
     name: textro99-server
@@ -13,21 +9,12 @@ services:
     plan: free
     healthCheckPath: /healthz
     autoDeploy: true
-    # 【一時】Webフロント単独結合テスト用に solo モードで起動（#36）。
+    # 【一時】Webフロント単独結合テスト用に solo モードで起動（#56）。
     # solo = /ws 接続ごとに「人間1＋Bot」で即試合開始 → 単独で MatchStart 以降を検証できる。
-    # ★本番（99店）前に必ずこの行を削除 or --mode match に戻す（#37）。
+    # ★本番（99人）前に必ずこの行を削除 or --mode match に戻す（#57）。
     dockerCommand: /server --mode solo --bots 5
     # （本番の既定は Dockerfile の CMD = --mode match）
-    #
-    # 本番で設定する env（値はダッシュボードで入れる。詳細は docs/deploy.md）:
+    # 調整値をリモート取得する場合は config-front の URL を渡す:
     # envVars:
-    #   - key: DATABASE_URL          # config・お題・試合結果の Postgres
-    #     sync: false
-    #   - key: CONFIG_ADMIN_TOKEN    # POST /api/params の共有トークン
-    #     sync: false
-    #   - key: CONFIG_FRONT_ORIGIN   # config-front のオリジン（CORS）
-    #     sync: false
-    #   - key: ALLOWED_ORIGINS       # /ws を許可するクライアントのオリジン
-    #     sync: false
-    #   - key: GOGC                  # スパイク対策（docs/plan/plan-09）
-    #     value: "200"
+    #   - key: CONFIG_URL
+    #     sync: false   # ダッシュボードで値を設定
