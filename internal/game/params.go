@@ -165,6 +165,15 @@ func (gp GameParameters) Validate() error {
 	if gp.Heat.MaxLevel <= 0 {
 		return fmt.Errorf("heat.maxLevel は正である必要 (got %d)", gp.Heat.MaxLevel)
 	}
+	if gp.Storm.IntervalTicks < 0 {
+		return fmt.Errorf("storm.intervalTicks は非負である必要 (got %d)", gp.Storm.IntervalTicks)
+	}
+	if gp.Storm.ThresholdPct < 0 || gp.Storm.ThresholdPct > 1 {
+		return fmt.Errorf("storm.thresholdPct は 0..1 の範囲である必要 (got %f)", gp.Storm.ThresholdPct)
+	}
+	if gp.Phase.MidAliveThreshold < 0 {
+		return fmt.Errorf("phase.midAliveThreshold は非負である必要 (got %d)", gp.Phase.MidAliveThreshold)
+	}
 	return nil
 }
 
