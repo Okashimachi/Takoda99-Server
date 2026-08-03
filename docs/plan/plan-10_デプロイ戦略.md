@@ -22,7 +22,7 @@
 
 サーバーは `loadDeps()` をマッチ生成のたびに呼ぶ設計になっている（`cmd/server/main.go` L49-59）:
 
-- **戦闘パラメータ**（combo/eval/customer 等）: config-front で編集すると**次の試合から**再起動なしで反映
+- **試合系パラメータ**（credit/customer/eval/phase/heat/storm/distribution/patience）: config-front で編集すると**次の試合から**再起動なしで反映
 - **マッチングパラメータ**（minPlayers/maxPlayers/startCountdownMs）: 起動時のスナップショットを使用。**変更には再起動が必要**
   - ただし config-front で minPlayers を変更 → Render 手動デプロイで即反映できる
 - **環境変数の変更**: Render ダッシュボードで変更後に手動デプロイが必要
