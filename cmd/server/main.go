@@ -24,6 +24,7 @@ import (
 	"takoda99/internal/db"
 	"takoda99/internal/game"
 	"takoda99/internal/matchmaking"
+	"takoda99/internal/odai"
 	"takoda99/internal/proto"
 	"takoda99/internal/transport"
 )
@@ -37,7 +38,7 @@ func main() {
 
 	ctx := context.Background()
 
-	provider := chooseProvider(ctx, *configURL)
+	provider, wordStore := chooseProvider(ctx, *configURL)
 
 	_, err := provider.Load(ctx)
 	if err != nil {
@@ -52,6 +53,14 @@ func main() {
 			log.Printf("config: マッチ用取得失敗のためデフォルトで継続: %v", err)
 		}
 		d.Params = p
+		if wordStore != nil {
+			entries, err := wordStore.LoadAll(ctx)
+			if err != nil {
+				log.Printf("odai: DB取得失敗。フォールバック語彙で続行: %v", err)
+			} else {
+				d.Words = odai.NewConfigurablePool(entries)
+			}
+		}
 		return d
 	}
 
@@ -130,7 +139,16 @@ func main() {
 	if cs, ok := provider.(*db.ConfigStore); ok {
 		cfgStore = cs
 	}
-	http.Handle("/api/params", configapi.NewHandler(cfgStore, os.Getenv("CONFIG_ADMIN_TOKEN"), parseCSV(os.Getenv("CONFIG_FRONT_ORIGIN"))))
+	adminToken := os.Getenv("CONFIG_ADMIN_TOKEN")
+	frontOrigins := parseCSV(os.Getenv("CONFIG_FRONT_ORIGIN"))
+	http.Handle("/api/params", configapi.NewHandler(cfgStore, adminToken, frontOrigins))
+
+	var wStore configapi.WordStore
+	if wordStore != nil {
+		wStore = wordStore
+	}
+	http.Handle("/api/words", configapi.NewWordsHandler(wStore, adminToken, frontOrigins))
+	http.Handle("/api/words/", configapi.NewWordsHandler(wStore, adminToken, frontOrigins))
 
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -143,20 +161,24 @@ func main() {
 	}
 }
 
-func chooseProvider(ctx context.Context, configURL string) game.ConfigProvider {
+func chooseProvider(ctx context.Context, configURL string) (game.ConfigProvider, *db.WordStore) {
 	if dsn := os.Getenv("DATABASE_URL"); dsn != "" {
 		pool, err := db.NewPool(ctx, dsn)
 		if err != nil {
 			log.Printf("config: DB接続失敗のため設定は内蔵デフォルト: %v", err)
-			return config.DefaultLoader{}
+			return config.DefaultLoader{}, nil
 		}
 		cs := db.NewConfigStore(pool)
 		if err := cs.Migrate(ctx); err != nil {
 			log.Printf("config: DBマイグレーション失敗のため設定は内蔵デフォルト: %v", err)
-			return config.DefaultLoader{}
+			return config.DefaultLoader{}, nil
+		}
+		ws := db.NewWordStore(pool)
+		if err := ws.Migrate(ctx); err != nil {
+			log.Printf("odai: words テーブルマイグレーション失敗: %v", err)
 		}
 		log.Printf("config: Postgres から取得（DATABASE_URL）")
-		return cs
+		return cs, ws
 	}
 	u := configURL
 	if u == "" {
@@ -164,10 +186,10 @@ func chooseProvider(ctx context.Context, configURL string) game.ConfigProvider {
 	}
 	if u != "" {
 		log.Printf("config: HTTP から取得（%s）", u)
-		return config.NewRemoteLoader(u)
+		return config.NewRemoteLoader(u), nil
 	}
 	log.Printf("config: 内蔵デフォルトで起動")
-	return config.DefaultLoader{}
+	return config.DefaultLoader{}, nil
 }
 
 func parseCSV(s string) []string {
