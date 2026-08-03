@@ -366,3 +366,267 @@ func TestLeaveLoss_For(t *testing.T) {
 		}
 	}
 }
+
+// ── Plan-03: stepDistribute / stepNormalize テスト ─────────────
+
+func TestStepDistribute_EvenInitial(t *testing.T) {
+	s := newTestSession(3)
+	s.state = Running
+	s.params.Distribution = DistributionParams{QueueRefillThreshold: 5, WeightFloor: 0.25}
+
+	for i := 0; i < 9; i++ {
+		cid := proto.CustomerId(fmt.Sprintf("d-%d", i))
+		s.customers[cid] = &customer{
+			attribute:     proto.AttrNormal,
+			patienceMaxMs: 5000,
+			orderCount:    1,
+		}
+		s.restPool = append(s.restPool, cid)
+	}
+
+	for _, sid := range s.order {
+		s.stores[sid].evalNormalized = 0
+	}
+
+	out := s.stepDistribute(nil)
+	if len(out) != 9 {
+		t.Fatalf("9件の CustomerArrived のはず: %d", len(out))
+	}
+
+	for _, sid := range s.order {
+		ql := len(s.storeQueues[sid])
+		if ql == 0 {
+			t.Fatalf("店 %s に1人も分配されていない", sid)
+		}
+	}
+
+	if len(s.restPool) != 0 {
+		t.Fatalf("restPool が空のはず: %d", len(s.restPool))
+	}
+}
+
+func TestStepDistribute_WeightedByEval(t *testing.T) {
+	s := newTestSession(2)
+	s.state = Running
+	s.params.Distribution = DistributionParams{QueueRefillThreshold: 100, WeightFloor: 0.25}
+
+	storeA := s.order[0]
+	storeB := s.order[1]
+	s.stores[storeA].evalNormalized = 1.0
+	s.stores[storeB].evalNormalized = 0.01
+
+	for i := 0; i < 100; i++ {
+		cid := proto.CustomerId(fmt.Sprintf("w-%d", i))
+		s.customers[cid] = &customer{
+			attribute:     proto.AttrNormal,
+			patienceMaxMs: 5000,
+			orderCount:    1,
+		}
+		s.restPool = append(s.restPool, cid)
+	}
+
+	s.stepDistribute(nil)
+
+	qA := len(s.storeQueues[storeA])
+	qB := len(s.storeQueues[storeB])
+
+	if qA <= qB {
+		t.Fatalf("eval の高い店A(%d) が店B(%d) より多く来客するはず", qA, qB)
+	}
+}
+
+func TestStepDistribute_QueueLengthSuppression(t *testing.T) {
+	s := newTestSession(2)
+	s.state = Running
+	s.params.Distribution = DistributionParams{QueueRefillThreshold: 10, WeightFloor: 0.25}
+
+	storeA := s.order[0]
+	storeB := s.order[1]
+	s.stores[storeA].evalNormalized = 0.5
+	s.stores[storeB].evalNormalized = 0.5
+
+	for i := 0; i < 5; i++ {
+		cid := proto.CustomerId(fmt.Sprintf("pre-%d", i))
+		s.customers[cid] = &customer{
+			attribute:     proto.AttrNormal,
+			patienceMaxMs: 5000,
+			orderCount:    1,
+		}
+		s.restPool = append(s.restPool, cid)
+		s.assignCustomer(cid, storeA)
+	}
+
+	for i := 0; i < 20; i++ {
+		cid := proto.CustomerId(fmt.Sprintf("q-%d", i))
+		s.customers[cid] = &customer{
+			attribute:     proto.AttrNormal,
+			patienceMaxMs: 5000,
+			orderCount:    1,
+		}
+		s.restPool = append(s.restPool, cid)
+	}
+
+	s.stepDistribute(nil)
+
+	qA := len(s.storeQueues[storeA])
+	qB := len(s.storeQueues[storeB])
+
+	newA := qA - 5
+	if newA >= qB {
+		t.Fatalf("行列が短い店B(%d) のほうが多く分配されるはず (店Aの新規=%d)", qB, newA)
+	}
+}
+
+func TestStepDistribute_ClaimerBlockedInEarly(t *testing.T) {
+	s := newTestSession(2)
+	s.state = Running
+	s.phase = proto.PhaseEarly
+	s.params.Distribution = DistributionParams{QueueRefillThreshold: 5, WeightFloor: 0.25}
+
+	for i := 0; i < 5; i++ {
+		cid := proto.CustomerId(fmt.Sprintf("cl-%d", i))
+		s.customers[cid] = &customer{
+			attribute:     proto.AttrClaimer,
+			patienceMaxMs: 5000,
+			orderCount:    1,
+		}
+		s.restPool = append(s.restPool, cid)
+	}
+
+	out := s.stepDistribute(nil)
+
+	if len(out) != 0 {
+		t.Fatalf("Early で Claimer は分配されないはず: %d 件出力", len(out))
+	}
+	if len(s.restPool) != 5 {
+		t.Fatalf("restPool に5人残るはず: %d", len(s.restPool))
+	}
+
+	s.phase = proto.PhaseMid
+	out = s.stepDistribute(nil)
+	if len(out) != 5 {
+		t.Fatalf("Mid では Claimer が分配されるはず: %d 件出力", len(out))
+	}
+}
+
+func TestStepDistribute_EmptyRestPool(t *testing.T) {
+	s := newTestSession(3)
+	s.state = Running
+	s.params.Distribution = DistributionParams{QueueRefillThreshold: 3, WeightFloor: 0.25}
+
+	out := s.stepDistribute(nil)
+	if out != nil {
+		t.Fatalf("空 restPool で出力なしのはず: %v", out)
+	}
+}
+
+func TestStepNormalize_ThreeStores(t *testing.T) {
+	s := newTestSession(3)
+	s.state = Running
+	s.aliveCount = 3
+
+	s.stores[s.order[0]].evalRaw = 1.0
+	s.stores[s.order[1]].evalRaw = 2.0
+	s.stores[s.order[2]].evalRaw = 3.0
+
+	out := s.stepNormalize(nil)
+
+	if len(out) != 3 {
+		t.Fatalf("3件の EvaluationUpdate のはず: %d", len(out))
+	}
+
+	st0 := s.stores[s.order[0]]
+	st1 := s.stores[s.order[1]]
+	st2 := s.stores[s.order[2]]
+
+	if st0.evalNormalized != 0.0 {
+		t.Fatalf("最下位の normalized=0.0 のはず: %v", st0.evalNormalized)
+	}
+	if st1.evalNormalized != 0.5 {
+		t.Fatalf("中間の normalized=0.5 のはず: %v", st1.evalNormalized)
+	}
+	if st2.evalNormalized != 1.0 {
+		t.Fatalf("最上位の normalized=1.0 のはず: %v", st2.evalNormalized)
+	}
+
+	if st0.rank != 3 {
+		t.Fatalf("最下位の rank=3 のはず: %d", st0.rank)
+	}
+	if st1.rank != 2 {
+		t.Fatalf("中間の rank=2 のはず: %d", st1.rank)
+	}
+	if st2.rank != 1 {
+		t.Fatalf("最上位の rank=1 のはず: %d", st2.rank)
+	}
+
+	for _, o := range out {
+		ev, ok := o.Msg.(proto.EvaluationUpdate)
+		if !ok {
+			t.Fatalf("EvaluationUpdate でない: %T", o.Msg)
+		}
+		if ev.AliveCount != 3 {
+			t.Fatalf("AliveCount=3 のはず: %d", ev.AliveCount)
+		}
+	}
+}
+
+func TestStepNormalize_SingleStore(t *testing.T) {
+	s := newTestSession(3)
+	s.state = Running
+	s.stores[s.order[0]].alive = true
+	s.stores[s.order[0]].evalRaw = 5.0
+	s.stores[s.order[1]].alive = false
+	s.stores[s.order[2]].alive = false
+	s.aliveCount = 1
+
+	out := s.stepNormalize(nil)
+	if len(out) != 1 {
+		t.Fatalf("1件の EvaluationUpdate のはず: %d", len(out))
+	}
+
+	st := s.stores[s.order[0]]
+	if st.evalNormalized != 1.0 {
+		t.Fatalf("単独店の normalized=1.0 のはず: %v", st.evalNormalized)
+	}
+	if st.rank != 1 {
+		t.Fatalf("単独店の rank=1 のはず: %d", st.rank)
+	}
+}
+
+func TestStepDistribute_BottomStoreStillGetsCustomers(t *testing.T) {
+	s := newTestSession(3)
+	s.Start()
+	s.params.Distribution = DistributionParams{QueueRefillThreshold: 5, WeightFloor: 0.25}
+
+	bottom := s.order[0]
+	s.stores[bottom].evalNormalized = 0.0
+	s.stores[s.order[1]].evalNormalized = 0.5
+	s.stores[s.order[2]].evalNormalized = 1.0
+
+	got := 0
+	for i := 0; i < 200 && got == 0; i++ {
+		s.stepDistribute(nil)
+		got = len(s.storeQueues[bottom])
+	}
+	if got == 0 {
+		t.Fatal("WeightFloor があるので最下位店にも客が来るはず（死のスパイラル回帰）")
+	}
+}
+
+func TestStepDistribute_ZeroFloorReproducesSpec(t *testing.T) {
+	s := newTestSession(3)
+	s.Start()
+	s.params.Distribution = DistributionParams{QueueRefillThreshold: 5, WeightFloor: 0}
+
+	bottom := s.order[0]
+	s.stores[bottom].evalNormalized = 0.0
+	s.stores[s.order[1]].evalNormalized = 0.5
+	s.stores[s.order[2]].evalNormalized = 1.0
+
+	for i := 0; i < 100; i++ {
+		s.stepDistribute(nil)
+	}
+	if len(s.storeQueues[bottom]) != 0 {
+		t.Fatal("WeightFloor=0 なら最下位店の重みは0で客は来ないはず")
+	}
+}

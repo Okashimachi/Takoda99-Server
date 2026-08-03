@@ -245,7 +245,109 @@ func (s *Session) Tick(dtMs int) []Outbound {
 // ── 試合ループの各ステップ（no-op stub）────────────────────────
 
 func (s *Session) stepPhase(out []Outbound) []Outbound      { return out }
-func (s *Session) stepDistribute(out []Outbound) []Outbound  { return out }
+func (s *Session) stepDistribute(out []Outbound) []Outbound {
+	threshold := s.params.Distribution.QueueRefillThreshold
+
+	type candidate struct {
+		id       PlayerId
+		queueLen int
+	}
+	candidates := make([]candidate, 0, len(s.order))
+	for _, sid := range s.order {
+		st := s.stores[sid]
+		if !st.alive {
+			continue
+		}
+		ql := len(s.storeQueues[sid])
+		if ql < threshold {
+			candidates = append(candidates, candidate{id: sid, queueLen: ql})
+		}
+	}
+	if len(candidates) == 0 {
+		return out
+	}
+
+	distributable := make([]proto.CustomerId, 0, len(s.restPool))
+	for _, cid := range s.restPool {
+		c := s.customers[cid]
+		if c == nil {
+			continue
+		}
+		if s.phase == proto.PhaseEarly && c.attribute == proto.AttrClaimer {
+			continue
+		}
+		distributable = append(distributable, cid)
+	}
+	if len(distributable) == 0 {
+		return out
+	}
+
+	allZero := true
+	for _, sid := range s.order {
+		st := s.stores[sid]
+		if st.alive && st.evalNormalized != 0 {
+			allZero = false
+			break
+		}
+	}
+
+	for _, cid := range distributable {
+		if len(candidates) == 0 {
+			break
+		}
+		weights := make([]float64, len(candidates))
+		floor := s.params.Distribution.WeightFloor
+		for i, cd := range candidates {
+			if allZero {
+				weights[i] = 1.0 / float64(cd.queueLen+1)
+			} else {
+				weights[i] = (floor + s.stores[cd.id].evalNormalized) / float64(cd.queueLen+1)
+			}
+		}
+		totalW := 0.0
+		for _, w := range weights {
+			totalW += w
+		}
+		if totalW <= 0 {
+			break
+		}
+		idx := s.weightedSelect(weights)
+		chosen := &candidates[idx]
+
+		ob, ok := s.admitCustomer(cid, chosen.id)
+		if ok {
+			out = append(out, ob)
+		}
+
+		chosen.queueLen++
+		if chosen.queueLen >= threshold {
+			candidates = append(candidates[:idx], candidates[idx+1:]...)
+		}
+	}
+	return out
+}
+
+func (s *Session) weightedSelect(weights []float64) int {
+	total := 0.0
+	for _, w := range weights {
+		if w > 0 {
+			total += w
+		}
+	}
+	if total <= 0 {
+		return s.rng.Intn(len(weights))
+	}
+	r := s.rng.Float64() * total
+	for i, w := range weights {
+		if w > 0 {
+			r -= w
+			if r <= 0 {
+				return i
+			}
+		}
+	}
+	return len(weights) - 1
+}
 func (s *Session) stepPatience(dtMs int, out []Outbound) []Outbound {
 	effectiveDt := dtMs
 	if s.phase == proto.PhaseLate && s.params.Patience.LateMul > 0 {
@@ -334,7 +436,53 @@ func (s *Session) stepEvaluate(out []Outbound) []Outbound {
 	return out
 }
 
-func (s *Session) stepNormalize(out []Outbound) []Outbound { return out }
+func (s *Session) stepNormalize(out []Outbound) []Outbound {
+	type entry struct {
+		store *storeState
+		score float64
+	}
+	alive := make([]entry, 0, s.aliveCount)
+	for _, sid := range s.order {
+		st := s.stores[sid]
+		if st.alive {
+			alive = append(alive, entry{store: st, score: s.evalScore(st)})
+		}
+	}
+	n := len(alive)
+	if n == 0 {
+		return out
+	}
+
+	for i := 1; i < n; i++ {
+		key := alive[i]
+		j := i - 1
+		for j >= 0 && alive[j].score > key.score {
+			alive[j+1] = alive[j]
+			j--
+		}
+		alive[j+1] = key
+	}
+
+	for i, e := range alive {
+		if n <= 1 {
+			e.store.evalNormalized = 1.0
+			e.store.rank = 1
+		} else {
+			e.store.evalNormalized = float64(i) / float64(n-1)
+			e.store.rank = n - i
+		}
+	}
+
+	for _, e := range alive {
+		out = append(out, to(e.store.id, proto.EvaluationUpdate{
+			EvalRaw:    s.evalScore(e.store),
+			Normalized: e.store.evalNormalized,
+			Rank:       e.store.rank,
+			AliveCount: s.aliveCount,
+		}))
+	}
+	return out
+}
 func (s *Session) stepHeat(out []Outbound) []Outbound      { return out }
 func (s *Session) stepStorm(out []Outbound) []Outbound     { return out }
 
@@ -384,6 +532,42 @@ func (s *Session) rollAttribute() AttributeSpec {
 		r -= a.Weight
 	}
 	return specs[len(specs)-1]
+}
+
+func (s *Session) admitCustomer(cid proto.CustomerId, store PlayerId) (Outbound, bool) {
+	c := s.customers[cid]
+	if c == nil {
+		return Outbound{}, false
+	}
+	s.assignCustomer(cid, store)
+	words := make([]string, 0, c.orderCount)
+	keystrokes := 0
+	for i := 0; i < c.orderCount; i++ {
+		w := s.words.Next(s.wordLevel(), s.rng)
+		words = append(words, w.Text)
+		keystrokes += w.KeystrokeCount
+	}
+	c.keystrokeTotal = keystrokes
+	return to(store, proto.CustomerView{
+		CustomerId:    cid,
+		Attribute:     c.attribute,
+		OrderCount:    c.orderCount,
+		Words:         words,
+		PatienceMaxMs: c.patienceMaxMs,
+	}), true
+}
+
+func (s *Session) wordLevel() int { return 0 }
+
+func (s *Session) assignCustomer(cid proto.CustomerId, store PlayerId) {
+	c := s.customers[cid]
+	if c == nil {
+		return
+	}
+	s.restPool = removeCustomer(s.restPool, cid)
+	s.storeQueues[store] = append(s.storeQueues[store], cid)
+	c.assignedStore = &store
+	c.patienceLeftMs = c.patienceMaxMs
 }
 
 func (s *Session) releaseToRest(cid proto.CustomerId) {
