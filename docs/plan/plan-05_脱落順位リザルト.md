@@ -29,21 +29,21 @@
 
 ## 1. 現状のコード
 
-### checkFinish（session.go:308–316）
+### checkFinish（Plan-01 の骨組み状態）
 
 ```go
 func (s *Session) checkFinish(out []Outbound) []Outbound {
-	limit := s.params.Session.MatchTimeLimitMs
-	timeUp := limit > 0 && s.elapsedMs >= int64(limit)
-	lastAlive := len(s.order) > 1 && s.aliveCount <= 1
-	if timeUp || lastAlive {
+	if len(s.order) > 1 && s.aliveCount <= 1 {
 		s.state = Finished
 	}
 	return out
 }
 ```
 
-現在は `Finished` に遷移するだけで **MatchEnd を配信しない**。
+`Finished` に遷移するだけで **MatchEnd を配信しない**。順位も確定しない。
+
+> Plan-01 未適用の現行コードには `MatchTimeLimitMs` による時間切れ判定が残っているが、
+> 制限時間は廃止済み（proto v0.3.0 / #33）なので Plan-01 で除去される。
 
 ### Proto 型（Takoda99-Proto/proto/messages.go）
 
@@ -112,29 +112,25 @@ case proto.MatchEnd:
 
 ## 2. 実装手順
 
-### Step 1: storeState に finalRank フィールドを追加
+### Step 1: storeState のフィールド確認（追加不要）
 
-`internal/game/session.go` の storeState に追加:
+`finalRank` / `elimination` は **Plan-01 の骨組みで追加済み**。存在を確認するだけ。
 
 ```go
 type storeState struct {
-	id             PlayerId
-	name           string
-	creditLife     int
-	evalRaw        float64
-	buzzBonus      float64
-	evalNormalized float64
-	rank           int
-	served         servedStats
-	alive          bool
-	finalRank      int    // 脱落時に確定（0=未確定=まだ生存中）
-	elimination    string // "SelfCollapse" / "Cull" / ""（優勝者）
+	// ...既存...
+	alive       bool
+	finalRank   int    // 最終順位。0=未確定（生存中）。1=優勝
+	elimination string // "SelfCollapse" / "Cull" / ""（優勝者・未脱落）
 }
 ```
 
-### Step 2: 脱落時の finalRank 付与（Plan-02/04 との接続）
+書き込みは Plan-02（自滅）・Plan-04（下位淘汰）・本プラン（優勝者）の3箇所。
 
-Plan-02 の selfCollapse と Plan-04 の stepStorm で脱落処理をするとき、以下を行う:
+### Step 2: 脱落時の finalRank 付与（Plan-02/04 で実装済み・確認のみ）
+
+脱落時の書き込みは Plan-02 / Plan-04 の実装に含まれている。本プランに入る前に
+両方が済んでいることを確認する:
 
 ```go
 // selfCollapse 内（Plan-02）
@@ -150,25 +146,16 @@ st.finalRank = s.aliveCount + 1
 st.elimination = string(proto.ElimCull)
 ```
 
-> **注意**: Plan-02/04 で既にこの処理が入っている場合は、finalRank/elimination フィールドへの書き込みを追加するだけ。
+**確認方法**: `grep -n "st.finalRank = " internal/game/session.go` で2箇所ヒットすること。
+0箇所なら Plan-02/04 が未完了。ここが埋まっていないと `Results()` が全店 rank=0 を返す。
 
-### Step 3: 同時脱落のタイブレーク
+### Step 3: 同時脱落のタイブレーク（Plan-04 に実装済み・確認のみ）
 
-同一 tick 内で複数店が脱落する場合、`aliveCount` の減算順で rank が決まる。
-より弱い店（creditLife が少ない / evalNormalized が低い）を先に脱落処理することで、弱い店がより下位の rank を取る。
+同一 tick 内で複数店が脱落する場合の順位は、Plan-04 の `sortCulledForRank` が決める。
+設計文書のタイブレーク規則（**信用ライフ残 → 正規化評価**、試合進行仕様 §10）に従い、
+弱い店から順に脱落処理することで弱い店ほど低順位（大きい finalRank）になる。
 
-Plan-04 の stepStorm では cull 対象を sort して処理する:
-
-```go
-// stepStorm 内のカル処理の前に、対象を弱い順にソート
-sort.SliceStable(cullTargets, func(i, j int) bool {
-	a, b := cullTargets[i], cullTargets[j]
-	if a.creditLife != b.creditLife {
-		return a.creditLife < b.creditLife // 信用が少ない = 弱い = 先に処理 = 下位
-	}
-	return a.evalNormalized < b.evalNormalized
-})
-```
+本プランで追加実装するものはない。`sortCulledForRank` が存在することだけ確認する。
 
 ### Step 4: checkFinish を実装
 
@@ -188,17 +175,20 @@ func (s *Session) checkFinish(out []Outbound) []Outbound {
 
 	s.state = Finished
 
-	// 最後の生存者に rank=1 を付与
-	for _, st := range s.stores {
-		if st.alive {
+	// 最後の生存者に rank=1 を付与。
+	// alive は true のまま残す（優勝者は「脱落していない」）。false にすると
+	// summaries()/Snapshot() が優勝者を脱落表示にしてしまう。
+	// 走査は map ではなく s.order（決定的な順序）で行う。
+	for _, pid := range s.order {
+		if st := s.stores[pid]; st.alive {
 			st.finalRank = 1
-			st.alive = false
+			st.elimination = "" // 優勝者は脱落理由なし
 			break
 		}
 	}
 
-	// 全員が同時脱落した場合（aliveCount==0 で Finished）
-	// → 全員に finalRank が既に付いている（脱落処理で付与済み）
+	// aliveCount==0（全員同時脱落）の場合は上のループが空振りし、
+	// 全店とも脱落処理で finalRank が付与済みなのでそのまま配信に進む。
 
 	// 全参加者に MatchEnd を配信
 	for _, pid := range s.order {
@@ -230,20 +220,18 @@ func (s *Session) buildMatchStats(st *storeState) proto.MatchStats {
 }
 ```
 
-### Step 6: 制限時間の無効化
+### Step 6: 制限時間の無効化（Plan-01 で対応済み・確認のみ）
 
-`SessionParams.MatchTimeLimitMs` を 0 にして制限時間を廃止する。
-`DefaultParameters()` で:
+`SessionParams.MatchTimeLimitMs` の既定値は Plan-01 で `0` になっており、
+checkFinish の時間切れ判定も Plan-01 の骨組みで除去済み。ここでの追加作業はない。
 
-```go
-Session: SessionParams{
-	TickIntervalMs:    150,
-	PublishIntervalMs: 250,
-	MatchTimeLimitMs:  0, // 制限時間廃止。storm が決着を保証する
-},
+```bash
+grep -n "MatchTimeLimitMs" internal/game/params.go   # 既定値が 0 であること
+grep -n "MatchTimeLimitMs" internal/game/session.go  # checkFinish で参照していないこと
 ```
 
-checkFinish から timeUp 判定を削除済み（Step 4 で差し替え）。
+なお `publicParams()` は MatchTimeLimitMs をクライアントへ送り続ける（0 が送られる）。
+proto の公開サブセットからフィールドを消すのは Proto 変更（要承認）なのでここでは触らない。
 
 ### Step 7: Session.Results() を公開（room/app 向け）
 
@@ -280,26 +268,29 @@ type StoreResult struct {
 }
 ```
 
+あわせて、room/app 層が試合の状態を読むための getter も**ここでまとめて**追加する
+（Plan-08 の結果永続化と Plan-12 のログが使う。**各プランで重複定義しないこと**）:
+
+```go
+// Id は試合IDを返す。
+func (s *Session) Id() proto.MatchId { return s.id }
+
+// AliveCount は現在の生存店数を返す。
+func (s *Session) AliveCount() int { return s.aliveCount }
+
+// ElapsedMs は試合経過時間（ms）を返す。
+func (s *Session) ElapsedMs() int64 { return s.elapsedMs }
+```
+
 ---
 
 ## 3. 実装するコード（session.go への追加・変更の全体）
 
-### storeState 変更（既存フィールドに追加）
+### storeState（Plan-01 で定義済み・変更不要）
 
 ```go
-type storeState struct {
-	id             PlayerId
-	name           string
-	creditLife     int
-	evalRaw        float64
-	buzzBonus      float64
-	evalNormalized float64
-	rank           int
-	served         servedStats
-	alive          bool
-	finalRank      int    // 脱落時に確定。0=未確定（生存中）
-	elimination    string // "SelfCollapse" / "Cull" / ""（優勝者）
-}
+	finalRank   int    // 最終順位。0=未確定（生存中）。1=優勝
+	elimination string // "SelfCollapse" / "Cull" / ""（優勝者・未脱落）
 ```
 
 ### checkFinish（既存を置換）
@@ -315,10 +306,11 @@ func (s *Session) checkFinish(out []Outbound) []Outbound {
 
 	s.state = Finished
 
-	for _, st := range s.stores {
-		if st.alive {
+	// 優勝者は alive=true のまま（脱落していない）。順序は s.order で決定的に。
+	for _, pid := range s.order {
+		if st := s.stores[pid]; st.alive {
 			st.finalRank = 1
-			st.alive = false
+			st.elimination = ""
 			break
 		}
 	}
@@ -386,42 +378,36 @@ func (s *Session) Results() []StoreResult {
 
 ファイル: `internal/game/session_test.go` に追加。
 
-### テストヘルパー（既存または追加）
+### テストヘルパー（**新規定義しない**）
+
+`internal/game/session_test.go` には既に以下が定義されている。**同名で再定義すると
+コンパイルエラー（duplicate declaration）になる**ので、そのまま使うこと。
 
 ```go
-// newTestSession は指定人数の Session を作り、Start 済みで返す。
-func newTestSession(n int) *Session {
-	params := DefaultParameters()
-	params.Customer.Total = 10 // テスト用に少数
-	params.Credit.InitialLife = 3
+// 既存（session_test.go:12-16）— WordSource のテスト実装
+type fakeWords struct{}
+func (fakeWords) Next(int, *rand.Rand) Word { return Word{Text: "たこ", KeystrokeCount: 4} }
 
-	inits := make([]PlayerInit, n)
-	for i := range inits {
-		inits[i] = PlayerInit{
-			Id:          PlayerId(fmt.Sprintf("p-%d", i+1)),
-			DisplayName: fmt.Sprintf("Store%d", i+1),
-		}
-	}
-	ws := &stubWordSource{}
-	sess := NewSession("test-match", params, ws, rand.New(rand.NewSource(42)), inits)
-	sess.Start()
-	return sess
-}
+// 既存（session_test.go:19-26）— n店の Session を作る
+// 注1: 店IDは "s-1", "s-2", ... （"p-N" ではない）
+// 注2: Start() は呼ばれない。試合を進める場合はテスト側で s.Start() する
+func newTestSession(n int) *Session
 
-type stubWordSource struct{}
-
-func (s *stubWordSource) Next(level int, rng *rand.Rand) Word {
-	return Word{Text: "テスト", KeystrokeCount: 4}
-}
+// 既存（session_test.go:305-314）— 指定属性の客を行列に直接配置
+func placeAssigned(s *Session, cid proto.CustomerId, store PlayerId,
+                   attr proto.CustomerAttribute, orderCount, keystrokes int)
 ```
+
+以下のテストはこの既存ヘルパ前提で書く。`checkFinish` は `s.state` を見ないため
+`Start()` を呼ばずに状態を直接組み立ててよい（ただし `state` は明示的に `Running` にする）。
 
 ### TestCheckFinish_LastOneStanding
 
 ```go
 func TestCheckFinish_LastOneStanding(t *testing.T) {
 	sess := newTestSession(2)
-	p1 := PlayerId("p-1")
-	p2 := PlayerId("p-2")
+	p1 := PlayerId("s-1")
+	p2 := PlayerId("s-2")
 
 	// p2 を脱落させる（creditLife を 0 にして selfCollapse 相当）
 	st2 := sess.stores[p2]
@@ -451,10 +437,10 @@ func TestCheckFinish_LastOneStanding(t *testing.T) {
 		}
 		pid := o.To.PlayerId
 		if pid == p1 && me.FinalRank != 1 {
-			t.Errorf("p1 rank=%d, want 1", me.FinalRank)
+			t.Errorf("s-1 rank=%d, want 1", me.FinalRank)
 		}
 		if pid == p2 && me.FinalRank != 2 {
-			t.Errorf("p2 rank=%d, want 2", me.FinalRank)
+			t.Errorf("s-2 rank=%d, want 2", me.FinalRank)
 		}
 	}
 }
@@ -467,14 +453,14 @@ func TestCheckFinish_ThreePlayerRankOrder(t *testing.T) {
 	sess := newTestSession(3)
 
 	// p1 が最初に脱落 → rank=3
-	sess.stores[PlayerId("p-1")].alive = false
-	sess.stores[PlayerId("p-1")].finalRank = 3
-	sess.stores[PlayerId("p-1")].elimination = "SelfCollapse"
+	sess.stores[PlayerId("s-1")].alive = false
+	sess.stores[PlayerId("s-1")].finalRank = 3
+	sess.stores[PlayerId("s-1")].elimination = "SelfCollapse"
 
 	// p3 が次に脱落 → rank=2
-	sess.stores[PlayerId("p-3")].alive = false
-	sess.stores[PlayerId("p-3")].finalRank = 2
-	sess.stores[PlayerId("p-3")].elimination = "Cull"
+	sess.stores[PlayerId("s-3")].alive = false
+	sess.stores[PlayerId("s-3")].finalRank = 2
+	sess.stores[PlayerId("s-3")].elimination = "Cull"
 
 	sess.aliveCount = 1
 
@@ -489,9 +475,9 @@ func TestCheckFinish_ThreePlayerRankOrder(t *testing.T) {
 		me := o.Msg.(proto.MatchEnd)
 		ranks[o.To.PlayerId] = me.FinalRank
 	}
-	if ranks[PlayerId("p-1")] != 3 { t.Errorf("p-1 rank=%d want 3", ranks[PlayerId("p-1")]) }
-	if ranks[PlayerId("p-2")] != 1 { t.Errorf("p-2 rank=%d want 1", ranks[PlayerId("p-2")]) }
-	if ranks[PlayerId("p-3")] != 2 { t.Errorf("p-3 rank=%d want 2", ranks[PlayerId("p-3")]) }
+	if ranks[PlayerId("s-1")] != 3 { t.Errorf("p-1 rank=%d want 3", ranks[PlayerId("s-1")]) }
+	if ranks[PlayerId("s-2")] != 1 { t.Errorf("p-2 rank=%d want 1", ranks[PlayerId("s-2")]) }
+	if ranks[PlayerId("s-3")] != 2 { t.Errorf("p-3 rank=%d want 2", ranks[PlayerId("s-3")]) }
 }
 ```
 
@@ -500,7 +486,7 @@ func TestCheckFinish_ThreePlayerRankOrder(t *testing.T) {
 ```go
 func TestCheckFinish_StatsCalculation(t *testing.T) {
 	sess := newTestSession(2)
-	p1 := PlayerId("p-1")
+	p1 := PlayerId("s-1")
 
 	// p1 に提供実績を設定
 	sess.stores[p1].served = servedStats{
@@ -510,8 +496,8 @@ func TestCheckFinish_StatsCalculation(t *testing.T) {
 	}
 
 	// p2 を脱落させる
-	sess.stores[PlayerId("p-2")].alive = false
-	sess.stores[PlayerId("p-2")].finalRank = 2
+	sess.stores[PlayerId("s-2")].alive = false
+	sess.stores[PlayerId("s-2")].finalRank = 2
 	sess.aliveCount = 1
 
 	out := sess.checkFinish(nil)
@@ -542,8 +528,8 @@ func TestCheckFinish_ZeroServed(t *testing.T) {
 	sess := newTestSession(2)
 
 	// served は初期値（count=0）のまま
-	sess.stores[PlayerId("p-2")].alive = false
-	sess.stores[PlayerId("p-2")].finalRank = 2
+	sess.stores[PlayerId("s-2")].alive = false
+	sess.stores[PlayerId("s-2")].finalRank = 2
 	sess.aliveCount = 1
 
 	out := sess.checkFinish(nil)
@@ -552,7 +538,7 @@ func TestCheckFinish_ZeroServed(t *testing.T) {
 	}
 
 	for _, o := range out {
-		if o.To.PlayerId != PlayerId("p-2") {
+		if o.To.PlayerId != PlayerId("s-2") {
 			continue
 		}
 		me := o.Msg.(proto.MatchEnd)
@@ -637,7 +623,7 @@ go run ./cmd/server --mode solo --bots 2
 - [ ] 優勝者は `FinalRank=1`
 - [ ] `MatchStats` が `servedStats` から正しく集計される（count/avgAccuracy/avgElapsedMs）
 - [ ] count=0（1度も提供せず脱落）の場合は Stats がゼロ値で panic しない
-- [ ] `Results()` メソッドが公開され、room/app 層から呼べる
+- [ ] `Results()` / `Id()` / `AliveCount()` / `ElapsedMs()` が公開され、room/app 層から呼べる
 - [ ] 制限時間の条件が削除されている（MatchTimeLimitMs=0 がデフォルト）
 - [ ] `go test ./internal/game/ -v -run "TestCheckFinish"` が全件パス
 - [ ] `go build ./...` が通る

@@ -22,10 +22,49 @@
 ### キーコンセプト
 
 **重み付き分配 (weighted distribution)**
-客を店に割り当てる際、均等ではなく各店の「重み」に比例した確率で選ぶ。重みは `evalNormalized / (queueLen + 1)` で計算する。評価が高い店ほど客が来やすく（正のフィードバック）、行列が長い店ほど来にくい（負のフィードバック = 独走抑制）。初期状態（全店 evalNormalized = 0）では均等分配にフォールバックする。
+客を店に割り当てる際、均等ではなく各店の「重み」に比例した確率で選ぶ。評価が高い店ほど客が来やすく（正のフィードバック）、行列が長い店ほど来にくい（負のフィードバック = 独走抑制）。初期状態（全店 evalNormalized = 0）では均等分配にフォールバックする。
+
+重みの式は設計文書（試合進行仕様 §6）では `正規化評価 ÷ (行列長 + 1)` だが、**本プランでは
+下駄 `WeightFloor` を足した式を使う**（理由は §2.5）:
+
+```
+重み = (WeightFloor + evalNormalized) / (queueLen + 1)
+```
 
 **パーセンタイル正規化 (percentile normalization)**
 生存店の `evalScore` を昇順ソートし、順位位置を `[0, 1]` に線形写像する。最下位 = 0、最上位 = 1。これにより evalRaw の絶対値に依存せず、相対的な立ち位置で分配重みが決まる。
+
+
+### 2.5 仕様上の穴と対処（WeightFloor）
+
+**問題**: パーセンタイル正規化は最下位店に必ず `evalNormalized = 0.0` を与える
+（`i/(n-1)` で i=0 のとき 0）。設計文書どおり重みを `evalNormalized / (queueLen+1)` にすると、
+最下位店の重みは常に **0** になる。
+
+その結果:
+
+1. 最下位店には客が1人も来ない
+2. 客が来ない → 提供できない → `evalRaw` が更新されない
+3. 評価が上がらない → 最下位のまま → 永久に客が来ない
+4. storm の下位淘汰で確実に脱落する
+
+つまり**一度最下位になると復帰不能**で、プレイヤーは何もできないまま脱落を待つことになる。
+企画書の「終盤まで逆転の余地がある」設計意図に反する。
+
+**対処**: 重みに下駄 `WeightFloor` を足す。
+
+```
+重み = (WeightFloor + evalNormalized) / (queueLen + 1)
+```
+
+`WeightFloor = 0.25` のとき、最下位店（norm=0）の重みは `0.25`、最上位店（norm=1）は `1.25`。
+最下位でも最上位の約20%の来店率を保ち、挽回の余地が残る。相対的な優劣（上位ほど客が多い）は維持される。
+
+`WeightFloor = 0` にすれば設計文書どおりの挙動に戻せる（config-front から変更可能）。
+バランス調整で「独走を許容して差をつけたい」場合は小さく、「逆転を起きやすくしたい」場合は大きくする。
+
+> **要確認**: この下駄は Takoda99-Docs の試合進行仕様 §6 の式からの意図的な逸脱。
+> ハッカソン後に Docs 側の式も更新するか、下駄を廃止するか判断すること。
 
 ---
 
@@ -128,7 +167,8 @@ type EvaluationUpdate struct {
 ```go
 // DistributionParams: 客分配の調整値（tako-G）。
 type DistributionParams struct {
-	QueueRefillThreshold int `json:"queueRefillThreshold"` // 行列がこの数未満の店を分配対象にする
+	QueueRefillThreshold int     `json:"queueRefillThreshold"` // 行列がこの数未満の店を分配対象にする
+	WeightFloor          float64 `json:"weightFloor"`          // 重みの下駄（最下位店の客ゼロを防ぐ・§2.5 参照）
 }
 ```
 
@@ -146,6 +186,7 @@ DefaultParameters() に追加:
 ```go
 Distribution: DistributionParams{
 	QueueRefillThreshold: 3,
+	WeightFloor:          0.25, // 最下位店でも最上位店の 0.25/1.25 = 20% の来店率を確保
 },
 ```
 
@@ -212,11 +253,14 @@ func (s *Session) stepDistribute(out []Outbound) []Outbound {
 		}
 		// 重み算出
 		weights := make([]float64, len(candidates))
+		floor := s.params.Distribution.WeightFloor
 		for i, cd := range candidates {
 			if allZero {
 				weights[i] = 1.0 / float64(cd.queueLen+1)
 			} else {
-				weights[i] = s.stores[cd.id].evalNormalized / float64(cd.queueLen+1)
+				// 下駄(WeightFloor)を足す。パーセンタイル正規化では最下位店が必ず
+				// evalNormalized=0 になり、素の式だと重み0＝客が永久に来なくなるため（§2.5）。
+				weights[i] = (floor + s.stores[cd.id].evalNormalized) / float64(cd.queueLen+1)
 			}
 		}
 		idx := s.weightedSelect(weights)
@@ -635,6 +679,59 @@ func TestStepNormalize_SingleStore(t *testing.T) {
 	}
 	if st.rank != 1 {
 		t.Fatalf("単独店の rank=1 のはず: %d", st.rank)
+	}
+}
+```
+
+---
+
+### TestStepDistribute_BottomStoreStillGetsCustomers
+
+最下位店（evalNormalized=0）にも客が来ることを確認する（§2.5 の死のスパイラル回帰テスト）。
+
+```go
+func TestStepDistribute_BottomStoreStillGetsCustomers(t *testing.T) {
+	s := newTestSession(3)
+	s.Start()
+	s.params.Distribution = DistributionParams{QueueRefillThreshold: 5, WeightFloor: 0.25}
+
+	bottom := s.order[0]
+	s.stores[bottom].evalNormalized = 0.0 // 最下位
+	s.stores[s.order[1]].evalNormalized = 0.5
+	s.stores[s.order[2]].evalNormalized = 1.0
+
+	// 十分な回数まわして最下位店にも客が来ることを確認
+	got := 0
+	for i := 0; i < 200 && got == 0; i++ {
+		s.stepDistribute(nil)
+		got = len(s.storeQueues[bottom])
+	}
+	if got == 0 {
+		t.Fatal("WeightFloor があるので最下位店にも客が来るはず（死のスパイラル回帰）")
+	}
+}
+```
+
+### TestStepDistribute_ZeroFloorReproducesSpec
+
+`WeightFloor = 0` で設計文書どおり（最下位店の重み0）に戻ることを確認する。
+
+```go
+func TestStepDistribute_ZeroFloorReproducesSpec(t *testing.T) {
+	s := newTestSession(3)
+	s.Start()
+	s.params.Distribution = DistributionParams{QueueRefillThreshold: 5, WeightFloor: 0}
+
+	bottom := s.order[0]
+	s.stores[bottom].evalNormalized = 0.0
+	s.stores[s.order[1]].evalNormalized = 0.5
+	s.stores[s.order[2]].evalNormalized = 1.0
+
+	for i := 0; i < 100; i++ {
+		s.stepDistribute(nil)
+	}
+	if len(s.storeQueues[bottom]) != 0 {
+		t.Fatal("WeightFloor=0 なら最下位店の重みは0で客は来ないはず")
 	}
 }
 ```

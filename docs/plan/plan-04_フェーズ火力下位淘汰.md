@@ -97,7 +97,17 @@ type StoreEliminated struct {
 
 ### broadcastMsg ヘルパ
 
-session.go には `to(pid, msg)` で1店宛の Outbound を作るヘルパがあるが、全店ブロードキャスト用のヘルパがない。`Recipient` には `Broadcast bool` フィールドがあるが、明示的に全 order をループするヘルパを用意する（room 側の Broadcast 対応と独立して動くため安全）。
+session.go には `to(pid, msg)`（1店宛）と `broadcastMsg(msg)`（全員宛）の2つのヘルパが
+Plan-01 の骨組みで定義されている。
+
+```go
+func to(pid PlayerId, msg any) Outbound { return Outbound{To: Recipient{PlayerId: pid}, Msg: msg} }
+func broadcastMsg(msg any) Outbound     { return Outbound{To: Recipient{Broadcast: true}, Msg: msg} }
+```
+
+`broadcastMsg` は Outbound を**1つ**返す。実際のファンアウトは `room.dispatch` が
+`o.To.Broadcast` を見て全接続へ送ることで行う（`internal/room/room.go` の dispatch 参照）。
+game 側で `s.order` をループして展開すると **二重配信**になるのでしないこと。
 
 ### GameParameters（params.go）
 
@@ -228,18 +238,19 @@ Storm: StormParams{
 },
 ```
 
-### 3-e. broadcastMsg ヘルパを追加（session.go）
+### 3-e. broadcastMsg ヘルパの確認（session.go）
+
+**新規追加は不要**。Plan-01 の骨組みで `to()` の隣に定義済み:
 
 ```go
-// broadcastMsg は全参加者（生存＋脱落の観戦者）へ同じメッセージを配る。
-// out(accumulator) へ append して返す。
-func (s *Session) broadcastMsg(out []Outbound, msg any) []Outbound {
-    for _, sid := range s.order {
-        out = append(out, to(sid, msg))
-    }
-    return out
-}
+// broadcastMsg は全員宛の Outbound を1つ返す。ファンアウトは room.dispatch の
+// Broadcast 分岐が行う（Envelope の marshal も1回で済む）。
+func broadcastMsg(msg any) Outbound { return Outbound{To: Recipient{Broadcast: true}, Msg: msg} }
 ```
+
+使い方は `out = append(out, broadcastMsg(msg))`。
+`s.order` を game 側でループして店舗数ぶんの Outbound に展開してはいけない
+（room.dispatch が Broadcast=true を見て全接続へ配るため二重配信になる）。
 
 全 `s.order` を回す（alive に関わらず）。脱落した店も観戦者として受信する。
 
@@ -255,12 +266,12 @@ func (s *Session) stepPhase(out []Outbound) []Outbound {
     case proto.PhaseEarly:
         if s.aliveCount <= pp.MidAliveThreshold || s.elapsedMs >= int64(pp.MidTimeMs) {
             s.phase = proto.PhaseMid
-            out = s.broadcastMsg(out, proto.PhaseChange{Phase: proto.PhaseMid})
+            out = append(out, broadcastMsg(proto.PhaseChange{Phase: proto.PhaseMid}))
         }
     case proto.PhaseMid:
         if s.aliveCount <= pp.LateAliveThreshold || s.elapsedMs >= int64(pp.LateTimeMs) {
             s.phase = proto.PhaseLate
-            out = s.broadcastMsg(out, proto.PhaseChange{Phase: proto.PhaseLate})
+            out = append(out, broadcastMsg(proto.PhaseChange{Phase: proto.PhaseLate}))
         }
     }
     // PhaseLate は最終フェーズ — 遷移なし。
@@ -296,7 +307,7 @@ func (s *Session) stepHeat(out []Outbound) []Outbound {
 
     if newHeat != s.heatLevel {
         s.heatLevel = newHeat
-        out = s.broadcastMsg(out, proto.DifficultyUpdate{HeatLevel: s.heatLevel})
+        out = append(out, broadcastMsg(proto.DifficultyUpdate{HeatLevel: s.heatLevel}))
     }
     return out
 }
@@ -339,10 +350,10 @@ func (s *Session) stepStorm(out []Outbound) []Outbound {
     if s.stormTickCounter == warnAt && !s.stormWarnSent {
         s.stormWarnSent = true
         remaining := sp.IntervalTicks - s.stormTickCounter
-        out = s.broadcastMsg(out, proto.ForcedEliminationWarning{
+        out = append(out, broadcastMsg(proto.ForcedEliminationWarning{
             UntilTick:    remaining,
             ThresholdPct: sp.ThresholdPct,
-        })
+        }))
     }
 
     // ── 実行 ──
@@ -389,15 +400,20 @@ func (s *Session) executeCull(out []Outbound) []Outbound {
         cullCount = len(alive) - 1
     }
 
-    // evalNormalized 昇順ソート（下位が先頭）。
-    // 同値のタイブレーク: creditLife 昇順 → evalNormalized 昇順（弱い方が先＝先に脱落＝低順位）。
+    // ① 淘汰対象の「選定」は evalNormalized 昇順（storm は評価下位%を刈る規則）。
     sortStoresByWeakest(alive)
+    culled := alive[:cullCount]
 
-    // 先頭から cullCount 店を脱落させる。
+    // ② 淘汰対象内の「順位付け」は設計文書のタイブレーク規則に従う:
+    //    信用ライフ残 → 正規化評価（試合進行仕様 §10 / 用語集 §タイブレーク）。
+    //    選定基準(評価)と順位基準(信用→評価)は別物なので、ここで並べ直す。
+    sortCulledForRank(culled)
+
+    // 先頭から順に脱落させる（弱い方が先＝より大きい finalRank＝低順位）。
     // 同時脱落の順位: 弱い方から順に脱落処理し、脱落時点の aliveCount+1 を finalRank とする。
     // ただし完全同値（creditLife も evalNormalized も一致）は同着扱い: 同じ finalRank を付ける。
-    for i := 0; i < cullCount; i++ {
-        st := alive[i]
+    for i := 0; i < len(culled); i++ {
+        st := culled[i]
         st.alive = false
         s.aliveCount--
 
@@ -407,24 +423,25 @@ func (s *Session) executeCull(out []Outbound) []Outbound {
         }
         s.storeQueues[st.id] = nil
 
-        finalRank := s.aliveCount + 1
+        // 最終順位を storeState に確定保存（Plan-05 の Results()/MatchEnd がここを読む）。
+        st.finalRank = s.aliveCount + 1
+        st.elimination = string(proto.ElimCull)
 
-        // 同着判定: 直前の脱落店と creditLife, evalNormalized が完全一致なら同じ rank
+        // 同着判定: 直前の脱落店と creditLife/evalNormalized が完全一致なら同じ rank を付ける。
+        // prev の rank は storeState に保存済みなので、逆算せずそのまま読む
+        // （3店以上の同着でも正しく連鎖する）。
         if i > 0 {
-            prev := alive[i-1]
+            prev := culled[i-1]
             if st.creditLife == prev.creditLife && st.evalNormalized == prev.evalNormalized {
-                // prev は直前のループで rank を受けている。ただし prev の rank は
-                // ブロードキャスト済みの FinalRank から逆算する必要がある。
-                // ここでは同着分だけ rank を繰り上げる（aliveCount+1 ではなく prev と同じ値）。
-                finalRank = s.aliveCount + 2 // prev 脱落時の aliveCount+1 と同値
+                st.finalRank = prev.finalRank
             }
         }
 
-        out = s.broadcastMsg(out, proto.StoreEliminated{
+        out = append(out, broadcastMsg(proto.StoreEliminated{
             StoreId:   st.id,
             Reason:    proto.ElimCull,
-            FinalRank: finalRank,
-        })
+            FinalRank: st.finalRank,
+        }))
     }
 
     return out
@@ -449,7 +466,7 @@ func (s *Session) releaseQueuedToRest(cid proto.CustomerId, store PlayerId) {
 - 予告は `IntervalTicks - WarnTicks` の瞬間に1回だけ送る（`stormWarnSent` で重複防止）
 - 実行後にカウンタ＝0、warnSent=false でリセット → 次サイクルへ
 - 淘汰対象数は切り上げで最低1店。ただし全滅防止で `len(alive)-1` が上限
-- ソートは弱い順（evalNormalized 昇順→ creditLife 昇順）。先頭から脱落させると「弱い方が先に脱落＝より大きい finalRank（低順位）」になる
+- ソートは2段階: **選定**は evalNormalized 昇順（storm の規則）、**順位付け**は信用ライフ残→正規化評価（設計文書のタイブレーク規則）。先頭から脱落させると「弱い方が先に脱落＝より大きい finalRank（低順位）」になる
 - 行列客の回収は `releaseQueuedToRest` で assignedStore クリア + restPool 追加のみ行い、storeQueues は一括 nil 化（releaseToRest だと removeCustomer が O(N) の線形探索を行列長回やるため非効率）
 
 ### 3-j. sortStoresByWeakest（session.go）
@@ -457,16 +474,28 @@ func (s *Session) releaseQueuedToRest(cid proto.CustomerId, store PlayerId) {
 ```go
 import "sort"
 
-// sortStoresByWeakest は storeState スライスを「弱い順」にソートする。
-// 弱い = evalNormalized が低い。同値なら creditLife が少ない方が弱い。
-// storm の淘汰対象選定とタイブレーク順位で使用。
+// sortStoresByWeakest は storm の「淘汰対象を選ぶ」ためのソート。
+// storm は評価下位%を刈る規則なので evalNormalized 昇順が主キー。
 func sortStoresByWeakest(stores []*storeState) {
     sort.SliceStable(stores, func(i, j int) bool {
         a, b := stores[i], stores[j]
         if a.evalNormalized != b.evalNormalized {
-            return a.evalNormalized < b.evalNormalized // 低い方が先（弱い）
+            return a.evalNormalized < b.evalNormalized // 低い方が先（淘汰対象）
         }
-        return a.creditLife < b.creditLife // 信用が少ない方が先（弱い）
+        return a.creditLife < b.creditLife
+    })
+}
+
+// sortCulledForRank は同時脱落した店の「順位を決める」ためのソート。
+// 設計文書のタイブレーク規則（信用ライフ残 → 正規化評価）に従う。
+// 弱い方を先頭にし、先頭から脱落処理することで弱い店ほど低順位（大きい finalRank）になる。
+func sortCulledForRank(stores []*storeState) {
+    sort.SliceStable(stores, func(i, j int) bool {
+        a, b := stores[i], stores[j]
+        if a.creditLife != b.creditLife {
+            return a.creditLife < b.creditLife // 信用が少ない方が先（弱い＝低順位）
+        }
+        return a.evalNormalized < b.evalNormalized
     })
 }
 ```
@@ -580,7 +609,7 @@ import (
     "math/rand"
     "sort"
 
-    "textro99/internal/proto"
+    "takoda99/internal/proto"  // Plan-01 でモジュール名を takoda99 へ変更済み
 )
 ```
 
@@ -613,16 +642,10 @@ type Session struct {
 }
 ```
 
-**3. broadcastMsg ヘルパ追加**
+**3. broadcastMsg ヘルパ（Plan-01 で定義済み・追加不要）**
 
 ```go
-// broadcastMsg は全参加者（生存＋脱落観戦者）へ msg を配る。
-func (s *Session) broadcastMsg(out []Outbound, msg any) []Outbound {
-    for _, sid := range s.order {
-        out = append(out, to(sid, msg))
-    }
-    return out
-}
+func broadcastMsg(msg any) Outbound { return Outbound{To: Recipient{Broadcast: true}, Msg: msg} }
 ```
 
 **4. stepPhase 実装（スタブを置換）**
@@ -635,12 +658,12 @@ func (s *Session) stepPhase(out []Outbound) []Outbound {
     case proto.PhaseEarly:
         if s.aliveCount <= pp.MidAliveThreshold || s.elapsedMs >= int64(pp.MidTimeMs) {
             s.phase = proto.PhaseMid
-            out = s.broadcastMsg(out, proto.PhaseChange{Phase: proto.PhaseMid})
+            out = append(out, broadcastMsg(proto.PhaseChange{Phase: proto.PhaseMid}))
         }
     case proto.PhaseMid:
         if s.aliveCount <= pp.LateAliveThreshold || s.elapsedMs >= int64(pp.LateTimeMs) {
             s.phase = proto.PhaseLate
-            out = s.broadcastMsg(out, proto.PhaseChange{Phase: proto.PhaseLate})
+            out = append(out, broadcastMsg(proto.PhaseChange{Phase: proto.PhaseLate}))
         }
     }
     return out
@@ -667,7 +690,7 @@ func (s *Session) stepHeat(out []Outbound) []Outbound {
 
     if newHeat != s.heatLevel {
         s.heatLevel = newHeat
-        out = s.broadcastMsg(out, proto.DifficultyUpdate{HeatLevel: s.heatLevel})
+        out = append(out, broadcastMsg(proto.DifficultyUpdate{HeatLevel: s.heatLevel}))
     }
     return out
 }
@@ -699,10 +722,10 @@ func (s *Session) stepStorm(out []Outbound) []Outbound {
     if s.stormTickCounter == warnAt && !s.stormWarnSent {
         s.stormWarnSent = true
         remaining := sp.IntervalTicks - s.stormTickCounter
-        out = s.broadcastMsg(out, proto.ForcedEliminationWarning{
+        out = append(out, broadcastMsg(proto.ForcedEliminationWarning{
             UntilTick:    remaining,
             ThresholdPct: sp.ThresholdPct,
-        })
+        }))
     }
 
     // 実行タイミングでなければ終了
@@ -747,12 +770,16 @@ func (s *Session) executeCull(out []Outbound) []Outbound {
         cullCount = len(alive) - 1
     }
 
-    // 弱い順にソート
+    // ① 淘汰対象の選定は evalNormalized 昇順（storm の規則）
     sortStoresByWeakest(alive)
+    culled := alive[:cullCount]
 
-    // 先頭から cullCount 店を脱落
-    for i := 0; i < cullCount; i++ {
-        st := alive[i]
+    // ② 淘汰対象内の順位付けは信用ライフ残 → 正規化評価（設計文書のタイブレーク規則）
+    sortCulledForRank(culled)
+
+    // 先頭から順に脱落
+    for i := 0; i < len(culled); i++ {
+        st := culled[i]
         st.alive = false
         s.aliveCount--
 
@@ -766,28 +793,30 @@ func (s *Session) executeCull(out []Outbound) []Outbound {
         }
         s.storeQueues[st.id] = nil
 
-        finalRank := s.aliveCount + 1
+        // 最終順位を storeState に確定保存（Plan-05 の Results()/MatchEnd がここを読む）
+        st.finalRank = s.aliveCount + 1
+        st.elimination = string(proto.ElimCull)
 
-        // 同着判定: 直前の脱落店と完全同値なら同じ rank
+        // 同着判定: 直前の脱落店と完全同値なら同じ rank。
+        // prev.finalRank をそのまま読むので3店以上の同着でも正しく連鎖する。
         if i > 0 {
-            prev := alive[i-1]
+            prev := culled[i-1]
             if st.creditLife == prev.creditLife && st.evalNormalized == prev.evalNormalized {
-                finalRank = s.aliveCount + 2 // prev と同じ rank 値
+                st.finalRank = prev.finalRank
             }
         }
 
-        out = s.broadcastMsg(out, proto.StoreEliminated{
+        out = append(out, broadcastMsg(proto.StoreEliminated{
             StoreId:   st.id,
             Reason:    proto.ElimCull,
-            FinalRank: finalRank,
-        })
+            FinalRank: st.finalRank,
+        }))
     }
 
     return out
 }
 
-// sortStoresByWeakest は弱い順（下位淘汰の対象順）にソートする。
-// evalNormalized 昇順 → creditLife 昇順。完全同値は元の順序を保持。
+// sortStoresByWeakest は storm の「淘汰対象を選ぶ」ソート（evalNormalized 昇順）。
 func sortStoresByWeakest(stores []*storeState) {
     sort.SliceStable(stores, func(i, j int) bool {
         a, b := stores[i], stores[j]
@@ -795,6 +824,18 @@ func sortStoresByWeakest(stores []*storeState) {
             return a.evalNormalized < b.evalNormalized
         }
         return a.creditLife < b.creditLife
+    })
+}
+
+// sortCulledForRank は同時脱落店の「順位を決める」ソート。
+// 設計文書のタイブレーク規則（信用ライフ残 → 正規化評価）に従う。
+func sortCulledForRank(stores []*storeState) {
+    sort.SliceStable(stores, func(i, j int) bool {
+        a, b := stores[i], stores[j]
+        if a.creditLife != b.creditLife {
+            return a.creditLife < b.creditLife
+        }
+        return a.evalNormalized < b.evalNormalized
     })
 }
 ```
@@ -1046,7 +1087,7 @@ go test ./...
 
 - [ ] Session に `heatLevel`, `stormTickCounter`, `stormWarnSent` フィールドが追加されている
 - [ ] params.go に `PhaseParams`, `HeatParams`, `StormParams` が追加され、DefaultParameters に初期値がある
-- [ ] `broadcastMsg` ヘルパが実装されている
+- [ ] `broadcastMsg`（Plan-01 定義の自由関数）を使って全員配信している（`s.order` ループで展開していない）
 - [ ] `stepPhase` がフェーズを判定し `PhaseChange` を全店配信する
 - [ ] `stepHeat` が火力を計算し、変化時に `DifficultyUpdate` を全店配信する
 - [ ] `wordLevel()` が `s.heatLevel` を返す

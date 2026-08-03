@@ -20,14 +20,15 @@ game/ports.go:
   type Word struct { Text string; KeystrokeCount int }
   type WordSource interface {
       Next(effectiveLevel int, rng *rand.Rand) Word
-      NextTrap(rng *rand.Rand) Word
+      // 注: NextTrap は Plan-01 で削除済み（たこ焼き版にトラップ機構はない）。
+      //     このプランは Next のみを実装する。
   }
 
 odai/pool.go:
-  type StaticPool struct { wordsByLevel map[int][]game.Word; traps []game.Word }
-  func NewStaticPool() *StaticPool  // data.go の placeholderWords()/Traps() を積む
+  type StaticPool struct { wordsByLevel map[int][]game.Word }
+  func NewStaticPool() *StaticPool  // data.go の語彙を積む
   func (p *StaticPool) Next(effectiveLevel int, rng *rand.Rand) game.Word
-  func (p *StaticPool) NextTrap(rng *rand.Rand) game.Word
+  // 注: traps フィールドと NextTrap は Plan-01 で削除済み
 
 odai/data.go:
   var rawWords = map[int][]string{
@@ -60,13 +61,9 @@ var rawWords = map[int][]string{
     1:  {"さくら", "ひかり", "みどり", "ことり", "はなび"},   // 5語
     // ... level 2〜10 各5語（計55語）
 }
-var rawTraps = []string{
-    "そんなたいぷそくどでかてるとおもってるんですか",
-    // ... 計3語
-}
+// 注: rawTraps（旧 Textro の煽り長文トラップ）は Plan-01 で削除済み。
 
 func placeholderWords() map[int][]game.Word  // rawWords → keystrokes 算出付きの Word
-func placeholderTraps() []game.Word          // rawTraps → 同上
 ```
 
 ### `internal/odai/pool.go`
@@ -74,7 +71,6 @@ func placeholderTraps() []game.Word          // rawTraps → 同上
 ```go
 type StaticPool struct {
     wordsByLevel map[int][]game.Word
-    traps        []game.Word
 }
 
 func (p *StaticPool) Next(effectiveLevel int, rng *rand.Rand) game.Word {
@@ -187,18 +183,16 @@ X-Admin-Token: <token>
 // DB取得失敗時はフォールバック(StaticPool)に委譲する。
 type ConfigurablePool struct {
     wordsByLevel map[int][]game.Word
-    traps        []game.Word
     fallback     *StaticPool  // DB が空/取得失敗時のフォールバック
 }
 
 // NewConfigurablePool は DB の語彙リストから構築する。
 // entries が空ならフォールバック(StaticPool)のみで動く。
-func NewConfigurablePool(entries []WordEntry, traps []game.Word) *ConfigurablePool {
+func NewConfigurablePool(entries []WordEntry) *ConfigurablePool {
     fb := NewStaticPool()
     if len(entries) == 0 {
         return &ConfigurablePool{
             wordsByLevel: fb.wordsByLevel,
-            traps:        fb.traps,
             fallback:     fb,
         }
     }
@@ -209,7 +203,6 @@ func NewConfigurablePool(entries []WordEntry, traps []game.Word) *ConfigurablePo
     }
     return &ConfigurablePool{
         wordsByLevel: byLevel,
-        traps:        traps,
         fallback:     fb,
     }
 }
@@ -226,12 +219,6 @@ func (p *ConfigurablePool) Next(effectiveLevel int, rng *rand.Rand) game.Word {
     return list[rng.Intn(len(list))]
 }
 
-func (p *ConfigurablePool) NextTrap(rng *rand.Rand) game.Word {
-    if len(p.traps) == 0 {
-        return p.fallback.NextTrap(rng)
-    }
-    return p.traps[rng.Intn(len(p.traps))]
-}
 ```
 
 ### WordEntry
@@ -490,4 +477,4 @@ curl -X DELETE http://localhost:8080/api/words/1 -H "X-Admin-Token: devtoken"
 - [ ] config-front の「お題管理」ページで単語の一覧表示/追加/編集/削除ができる
 - [ ] CSV インポートで一括登録ができる
 - [ ] 語彙の変更が次のマッチから反映される（再起動不要）
-- [ ] テスト: ConfigurablePool の Next/NextTrap がレベルフォールバック含めて正しく動く
+- [ ] テスト: ConfigurablePool の Next がレベルフォールバック含めて正しく動く

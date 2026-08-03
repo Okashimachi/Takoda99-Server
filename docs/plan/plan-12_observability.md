@@ -2,7 +2,7 @@
 
 > **目的**: ハッカソン当日のトラブルシュートと、試合進行の可視化のための最低限のログ・メトリクスを入れる。
 > **対応issue**: 新規（#48）
-> **依存**: Plan-01（基盤移行）。インクリメンタルに追加可。
+> **依存**: Plan-01（基盤移行）。試合進行ログ（§2.3）は Plan-05 の公開 getter が前提。
 > **参照**: なし（新規）
 
 ---
@@ -146,7 +146,7 @@ func (r *Room) logEvent(o game.Outbound) {
 }
 ```
 
-> **注**: `r.session.Id()` / `r.session.AliveCount()` / `r.session.ElapsedMs()` は Session に公開メソッドを追加する必要がある（下記 Step 参照）。
+> **注**: `r.session.Id()` / `AliveCount()` / `ElapsedMs()` は **Plan-05 で追加済み**の公開 getter（§3 参照）。ここで再定義しないこと。
 
 出力例:
 ```json
@@ -173,20 +173,23 @@ slog.Error("result_save_failed",
 
 ---
 
-## 3. Session に公開メソッドを追加
+## 3. Session の公開 getter（Plan-05 で追加済み・再定義しないこと）
 
-`internal/game/session.go` に追加（ログ用。純粋な getter なので game コアの純粋性は維持）:
+ログで使う `Id()` / `AliveCount()` / `ElapsedMs()` は **Plan-05 で追加済み**
+（`Results()` と同じ箇所）。ここで再定義すると duplicate method のコンパイルエラーになる。
 
 ```go
-// Id は試合IDを返す。
 func (s *Session) Id() proto.MatchId { return s.id }
-
-// AliveCount は現在の生存店数を返す。
-func (s *Session) AliveCount() int { return s.aliveCount }
-
-// ElapsedMs は試合経過時間（ms）を返す。
-func (s *Session) ElapsedMs() int64 { return s.elapsedMs }
+func (s *Session) AliveCount() int   { return s.aliveCount }
+func (s *Session) ElapsedMs() int64  { return s.elapsedMs }
 ```
+
+確認:
+```bash
+grep -n "func (s \*Session) \(Id\|AliveCount\|ElapsedMs\)" internal/game/session.go
+```
+
+いずれも純粋な getter なので game コアの純粋性（I/O・ログを持たない）は維持される。
 
 ---
 

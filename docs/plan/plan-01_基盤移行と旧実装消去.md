@@ -435,13 +435,33 @@ type MatchingParams struct {
 	MinFill          int `json:"minFill"`
 }
 
-// CreditParams: 信用（ライフ）。客の離脱でのみ減少・0で自滅脱落。
+// LeaveLoss: 属性別の離脱ペナルティ。map ではなく固定フィールドにして
+// GameParameters の == 比較可能性を保つ。
+type LeaveLoss struct {
+	Normal  int `json:"normal"`
+	Bonus   int `json:"bonus"`
+	Claimer int `json:"claimer"`
+	Buzz    int `json:"buzz"`
+}
+
+// For は属性に対応する減少量を返す。
+func (ll LeaveLoss) For(attr proto.CustomerAttribute) int {
+	switch attr {
+	case proto.AttrBonus:
+		return ll.Bonus
+	case proto.AttrClaimer:
+		return ll.Claimer
+	case proto.AttrBuzz:
+		return ll.Buzz
+	default:
+		return ll.Normal
+	}
+}
+
+// CreditParams: 信用（ライフ）。客の離脱でのみ減少・0で自滅脱落。詳細は Plan-02。
 type CreditParams struct {
-	InitialLife       int `json:"initialLife"`       // 初期信用（例:3）
-	NormalLeaveLoss   int `json:"normalLeaveLoss"`   // Normal 客離脱時の減少量
-	BonusLeaveLoss    int `json:"bonusLeaveLoss"`    // Bonus 客離脱時の減少量
-	ClaimerLeaveLoss  int `json:"claimerLeaveLoss"`  // Claimer 客離脱時の減少量
-	BuzzLeaveLoss     int `json:"buzzLeaveLoss"`     // Buzz 客離脱時の減少量
+	InitialLife int       `json:"initialLife"` // 初期信用（例:3）
+	LeaveLoss   LeaveLoss `json:"leaveLoss"`   // 属性別の離脱ペナルティ
 }
 
 // CustomerParams: 客システム（総数・属性ごとの出現率/我慢/注文数）。
@@ -475,43 +495,47 @@ type EvalParams struct {
 	BuzzCap         float64 `json:"buzzCap"`         // 一時加点の上限
 }
 
-// PhaseParams: フェーズ遷移（Early → Mid → Late）。
+// PhaseParams: フェーズ遷移（Early → Mid → Late）。詳細は Plan-04。
+// 生存「数」の閾値で持つ（比率ではない。実装が aliveCount と直接比較できるため）。
 type PhaseParams struct {
-	MidAliveRatio  float64 `json:"midAliveRatio"`  // 生存率がこの値以下で Mid（例:0.7）
-	LateAliveRatio float64 `json:"lateAliveRatio"` // 生存率がこの値以下で Late（例:0.3）
-	MidTimeMs      int     `json:"midTimeMs"`      // 経過時間がこれ以上で Mid（生存率と OR）
-	LateTimeMs     int     `json:"lateTimeMs"`     // 経過時間がこれ以上で Late
+	MidAliveThreshold  int `json:"midAliveThreshold"`  // 生存数がこれ以下で Mid
+	LateAliveThreshold int `json:"lateAliveThreshold"` // 生存数がこれ以下で Late
+	MidTimeMs          int `json:"midTimeMs"`          // 経過時間がこれ以上で Mid（生存数と OR）
+	LateTimeMs         int `json:"lateTimeMs"`         // 経過時間がこれ以上で Late
 }
 
-// HeatParams: 火力（お題難易度の全体上昇）。
+// HeatParams: 火力（お題難易度の全体上昇）。詳細は Plan-04。
+// heatLevel = Base + int(PerAliveDrop*(maxStores-alive)) + PhaseXxx
+// ※ フェーズ別加算を []int（スライス）にすると GameParameters の == 比較が壊れるため
+//    個別フィールドで持つ（params.go 冒頭の comparable 制約）。
 type HeatParams struct {
-	BaseLevel           int     `json:"baseLevel"`           // 初期火力レベル
-	MaxLevel            int     `json:"maxLevel"`            // 最大火力レベル
-	AliveDecreaseStep   float64 `json:"aliveDecreaseStep"`   // 生存減少1人あたりの加算
-	PhaseBonus          []int   `json:"phaseBonus"`          // フェーズ別追加 [Early, Mid, Late]
-	IntervalMs          int     `json:"intervalMs"`          // 火力再計算間隔
+	Base         int     `json:"base"`         // 火力基礎値
+	PerAliveDrop float64 `json:"perAliveDrop"` // 生存1人減るごとの加算量
+	PhaseEarly   int     `json:"phaseEarly"`   // Early の火力加算
+	PhaseMid     int     `json:"phaseMid"`     // Mid の火力加算
+	PhaseLate    int     `json:"phaseLate"`    // Late の火力加算
 }
 
-// StormParams: 下位淘汰（定期的に最下位を強制脱落）。
+// StormParams: 下位淘汰（定期的に下位%を強制脱落）。詳細は Plan-04。
+// 周期は tick 数で持つ（session は時計を持たず tick 駆動のため）。
 type StormParams struct {
-	IntervalMs          int     `json:"intervalMs"`          // 淘汰間隔（例:30000ms=30秒ごと）
-	WarningMs           int     `json:"warningMs"`           // 淘汰予告の猶予（例:5000ms）
-	ThresholdRatio      float64 `json:"thresholdRatio"`      // 正規化評価がこの値未満の店を淘汰候補
-	FirstStormDelayMs   int     `json:"firstStormDelayMs"`   // 試合開始からの初回淘汰猶予
-	MinAliveForStorm    int     `json:"minAliveForStorm"`    // この人数以下では淘汰停止（2人では発動しない等）
+	IntervalTicks int     `json:"intervalTicks"` // 実行間隔（tick数。例:40≒6秒 @150ms）
+	WarnTicks     int     `json:"warnTicks"`     // 実行の何tick前に予告するか
+	ThresholdPct  float64 `json:"thresholdPct"`  // 下位何%を強制脱落（0.0〜1.0）
 }
 
-// DistributionParams: 客の分配（restPool→店の行列）。
+// DistributionParams: 客の分配（restPool→店の行列）。詳細は Plan-03。
+// 重み = (WeightFloor + evalNormalized) / (行列長+1)
 type DistributionParams struct {
-	QueueRefillThreshold int     `json:"queueRefillThreshold"` // 行列長がこの値以下で補充対象
-	DistributePerTick    int     `json:"distributePerTick"`     // 1tickに分配する最大客数
-	EvalWeightFactor     float64 `json:"evalWeightFactor"`     // 高評価店に多く客を送る重み係数
+	QueueRefillThreshold int     `json:"queueRefillThreshold"` // 行列がこの数未満の店を分配対象にする
+	WeightFloor          float64 `json:"weightFloor"`          // 重みの下駄（最下位店の客ゼロを防ぐ）
 }
 
-// PatienceParams: 我慢ゲージの調整。
+// PatienceParams: 我慢ゲージの調整。詳細は Plan-02。
+// Late では effectiveDt = dtMs / LateMul で実効経過を拡大する（LateMul<1.0 で速く減る）。
 type PatienceParams struct {
-	LateMultiplier  float64 `json:"lateMultiplier"`  // Late フェーズの我慢減算倍率（例:1.5=速く減る）
-	AlertThreshold  float64 `json:"alertThreshold"`  // 残り割合がこの値未満でアラート（例:0.3）
+	LateMul float64 `json:"lateMul"` // 終盤の我慢ゲージ短縮倍率（0<x<1.0 で速く減る）
+	AlertMs int     `json:"alertMs"` // 離脱アラート閾値ms（表示用）
 }
 
 // BotParams: CPU（Bot）の強さ。合成ルートが bot.Config へ写して各Botに渡す。
@@ -551,7 +575,9 @@ func DefaultParameters() GameParameters {
 		Session: SessionParams{
 			TickIntervalMs:    150,
 			PublishIntervalMs: 250,    // 約4Hz
-			MatchTimeLimitMs:  180000, // 3分
+			// 制限時間は廃止（proto v0.3.0 / #33）。決着保証は下位淘汰(storm)が担う。
+			// 0=無効。Plan-05 で checkFinish から時間切れ判定そのものを削除する。
+			MatchTimeLimitMs:  0,
 		},
 		Matching: MatchingParams{
 			MinPlayers:       20,
@@ -560,11 +586,8 @@ func DefaultParameters() GameParameters {
 			MinFill:          99,
 		},
 		Credit: CreditParams{
-			InitialLife:       3,
-			NormalLeaveLoss:   1,
-			BonusLeaveLoss:    1,
-			ClaimerLeaveLoss:  2,
-			BuzzLeaveLoss:     1,
+			InitialLife: 3,
+			LeaveLoss:   LeaveLoss{Normal: 1, Bonus: 1, Claimer: 1, Buzz: 2},
 		},
 		Customer: CustomerParams{
 			Total:   300,
@@ -585,33 +608,30 @@ func DefaultParameters() GameParameters {
 			BuzzCap:         0.5,
 		},
 		Phase: PhaseParams{
-			MidAliveRatio:  0.7,
-			LateAliveRatio: 0.3,
-			MidTimeMs:      60000,  // 1分
-			LateTimeMs:     120000, // 2分
+			MidAliveThreshold:  70,    // 99人→残り70人以下で中盤
+			LateAliveThreshold: 30,    // 残り30人以下で終盤
+			MidTimeMs:          30000, // 30秒経過でも中盤
+			LateTimeMs:         90000, // 90秒経過でも終盤
 		},
 		Heat: HeatParams{
-			BaseLevel:         0,
-			MaxLevel:          10,
-			AliveDecreaseStep: 0.1,
-			PhaseBonus:        []int{0, 2, 5},
-			IntervalMs:        10000, // 10秒ごとに再計算
+			Base:         0,
+			PerAliveDrop: 0.1,
+			PhaseEarly:   0,
+			PhaseMid:     3,
+			PhaseLate:    8,
 		},
 		Storm: StormParams{
-			IntervalMs:        30000,  // 30秒ごと
-			WarningMs:         5000,   // 5秒前に予告
-			ThresholdRatio:    0.2,    // 正規化評価 0.2 未満が対象
-			FirstStormDelayMs: 30000,  // 開始30秒は猶予
-			MinAliveForStorm:  3,      // 3人以下では淘汰停止
+			IntervalTicks: 40,   // 40tick≒6秒（TickIntervalMs=150）
+			WarnTicks:     10,   // 10tick≒1.5秒前に予告
+			ThresholdPct:  0.10, // 下位10%を強制脱落
 		},
 		Distribution: DistributionParams{
-			QueueRefillThreshold: 1,
-			DistributePerTick:    5,
-			EvalWeightFactor:     0.5,
+			QueueRefillThreshold: 3,
+			WeightFloor:          0.25, // 最下位店の客ゼロを防ぐ（Plan-03 §2.5）
 		},
 		Patience: PatienceParams{
-			LateMultiplier: 1.5,
-			AlertThreshold: 0.3,
+			LateMul: 0.6,  // Late で実質1.67倍速
+			AlertMs: 2000, // 残り2秒で警告色
 		},
 		Bot: BotParams{
 			ServeIntervalMs: 800,  // 旧 ClearIntervalMs 相当
@@ -692,6 +712,11 @@ type storeState struct {
 	rank           int     // 生存店内の評価順位
 	served         servedStats
 	alive          bool
+
+	// 脱落確定時に書き込む（Plan-02 の自滅／Plan-04 の下位淘汰／Plan-05 の優勝者確定）。
+	// Plan-05 の Results()/MatchEnd がここを読むので、脱落処理は必ずこの2つを埋めること。
+	finalRank   int    // 最終順位。0=未確定（生存中）。1=優勝
+	elimination string // "SelfCollapse" / "Cull" / ""（優勝者・未脱落）
 }
 
 // PlayerInit は NewSession に渡す初期店舗情報。
@@ -897,13 +922,11 @@ func (s *Session) stepNormalize(out []Outbound) []Outbound { return out }
 func (s *Session) stepHeat(out []Outbound) []Outbound      { return out }
 func (s *Session) stepStorm(out []Outbound) []Outbound     { return out }
 
-// checkFinish は終了条件を判定する。
-// 生存1（BR勝者確定）と時間切れの2条件。
+// checkFinish は終了条件を判定する。骨組みでは生存1で Finished にするだけ。
+// 順位確定・MatchEnd 配信は Plan-05 でここを差し替えて実装する。
+// ※ 制限時間（MatchTimeLimitMs）は廃止済みのため判定に使わない（既定値0・storm が決着を保証）。
 func (s *Session) checkFinish(out []Outbound) []Outbound {
-	limit := s.params.Session.MatchTimeLimitMs
-	timeUp := limit > 0 && s.elapsedMs >= int64(limit)
-	lastAlive := len(s.order) > 1 && s.aliveCount <= 1
-	if timeUp || lastAlive {
+	if len(s.order) > 1 && s.aliveCount <= 1 {
 		s.state = Finished
 	}
 	return out
@@ -1375,4 +1398,4 @@ go run ./cmd/server --mode solo --bots 3
 | proto の再輸出ラッパで型の漏れ | コンパイルエラー | Takoda99-Proto の型を全列挙して再輸出。未追加は "undefined" で即検知 |
 | odai の WordSource が NextTrap を実装している | interface 不一致でコンパイルエラー | Phase 6-6 で確認。NextTrap メソッドがあれば削除 |
 | `go.work` でローカルの Proto を参照している場合 | module 解決がローカルに引きずられる | `go.work` のエントリが Takoda99-Proto を指していることを確認 |
-| `HeatParams.PhaseBonus` が `[]int`（スライス）で GameParameters の `==` 比較が不可 | config 比較ロジックがある場合にパニック | `reflect.DeepEqual` を使うか、PhaseBonus を fixed-size array `[3]int` に変える |
+| パラメータ型に slice/map を入れると GameParameters の `==` 比較が壊れる | config の差分検出・backfill（Plan-06）が破綻 | 全型を comparable に保つ。フェーズ別加算は `PhaseEarly/Mid/Late` の個別フィールド、属性別損失は `LeaveLoss` struct（本プランで対応済み） |

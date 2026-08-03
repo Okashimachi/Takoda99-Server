@@ -386,14 +386,16 @@ func NewBotPlayer(ctx context.Context, id game.PlayerId, cfg bot.Config) matchma
 }
 ```
 
-### Step 7: Session に ElapsedMs() を公開
+### Step 7: Session の公開 getter を確認（追加不要）
 
-`internal/game/session.go` に追加:
+`ElapsedMs()` は **Plan-05 で追加済み**（`Results()` と同じ箇所）。ここで再定義すると
+duplicate method のコンパイルエラーになる。存在だけ確認する:
 
-```go
-// ElapsedMs は試合経過時間（ms）を返す。
-func (s *Session) ElapsedMs() int64 { return s.elapsedMs }
+```bash
+grep -n "func (s \*Session) ElapsedMs" internal/game/session.go
 ```
+
+ヒットしなければ Plan-05 が未完了。
 
 ### Step 8: cmd/server/main.go で PostgresStore を配線
 

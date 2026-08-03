@@ -70,12 +70,12 @@ import (
 	"runtime"
 	"time"
 
-	"textro99/internal/app"
-	"textro99/internal/bot"
-	"textro99/internal/game"
-	"textro99/internal/matchmaking"
-	"textro99/internal/room"
-	"textro99/internal/transport"
+	"takoda99/internal/app"
+	"takoda99/internal/bot"
+	"takoda99/internal/game"
+	"takoda99/internal/matchmaking"
+	"takoda99/internal/room"
+	"takoda99/internal/transport"
 )
 
 func main() {
@@ -197,8 +197,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"textro99/internal/proto"
-	"textro99/internal/transport"
+	"takoda99/internal/proto"
+	"takoda99/internal/transport"
 )
 
 func main() {

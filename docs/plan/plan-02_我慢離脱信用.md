@@ -70,6 +70,8 @@ type storeState struct {
     rank           int
     served         servedStats
     alive          bool
+    finalRank      int         // 脱落時に確定（Plan-01 で追加済み）。0=生存中
+    elimination    string      // "SelfCollapse" / "Cull" / ""（Plan-01 で追加済み）
 }
 ```
 
@@ -216,13 +218,14 @@ Credit: CreditParams{
 全店にメッセージを配信する汎用ヘルパ。`s.order` を走査して各店に送る。
 
 ```go
-func (s *Session) broadcastMsg(msg any, out []Outbound) []Outbound {
-    for _, pid := range s.order {
-        out = append(out, to(pid, msg))
-    }
-    return out
-}
+// broadcastMsg は全員宛の Outbound を1つ返す（Plan-01 で session.go に追加済み）。
+// 実際のファンアウトは room.dispatch の Broadcast 分岐が行うため、
+// ここで店舗数ぶんの Outbound に展開しない（Envelope の marshal も1回で済む）。
+func broadcastMsg(msg any) Outbound { return Outbound{To: Recipient{Broadcast: true}, Msg: msg} }
 ```
+
+> **注**: このヘルパは Plan-01 の骨組みで既に `to()` の隣に定義されている。
+> Plan-02 で新規追加するのではなく、**存在を確認して使う**だけ。
 
 ### 手順e: `stepPatience` の実装（`session.go`）
 
@@ -311,15 +314,17 @@ func (s *Session) selfCollapse(store PlayerId, out []Outbound) []Outbound {
         s.releaseToRest(cid)
     }
 
-    // 3. 最終順位（脱落順：現在の生存数+1 = この店の順位）
-    finalRank := s.aliveCount + 1
+    // 3. 最終順位を storeState に確定保存（脱落順：現在の生存数+1 = この店の順位）。
+    //    ローカル変数ではなく st に書くこと。Plan-05 の Results()/MatchEnd がここを読む。
+    st.finalRank = s.aliveCount + 1
+    st.elimination = string(proto.ElimSelfCollapse)
 
     // 4. StoreEliminated を全店ブロードキャスト
-    out = s.broadcastMsg(proto.StoreEliminated{
+    out = append(out, broadcastMsg(proto.StoreEliminated{
         StoreId:   store,
         Reason:    proto.ElimSelfCollapse,
-        FinalRank: finalRank,
-    }, out)
+        FinalRank: st.finalRank,
+    }))
 
     return out
 }
@@ -434,13 +439,9 @@ Patience: PatienceParams{
 #### `broadcastMsg` ヘルパ（`summaries()` の直前に追加）
 
 ```go
-// broadcastMsg は全店へ msg を配信する。
-func (s *Session) broadcastMsg(msg any, out []Outbound) []Outbound {
-	for _, pid := range s.order {
-		out = append(out, to(pid, msg))
-	}
-	return out
-}
+// broadcastMsg は Plan-01 で session.go に定義済み（to() の隣）。
+// Plan-02 では新規追加せず、そのまま使う。
+func broadcastMsg(msg any) Outbound { return Outbound{To: Recipient{Broadcast: true}, Msg: msg} }
 ```
 
 #### `stepPatience` の差し替え（既存276行目のスタブを置換）
@@ -534,15 +535,17 @@ func (s *Session) selfCollapse(store PlayerId, out []Outbound) []Outbound {
 		s.releaseToRest(cid)
 	}
 
-	// 3. 最終順位（脱落順：現在の生存数+1 がこの店の順位）
-	finalRank := s.aliveCount + 1
+	// 3. 最終順位を storeState に確定保存（脱落順：現在の生存数+1 がこの店の順位）。
+	//    ローカル変数ではなく st に書くこと。Plan-05 の Results()/MatchEnd がここを読む。
+	st.finalRank = s.aliveCount + 1
+	st.elimination = string(proto.ElimSelfCollapse)
 
 	// 4. StoreEliminated を全店へブロードキャスト
-	out = s.broadcastMsg(proto.StoreEliminated{
+	out = append(out, broadcastMsg(proto.StoreEliminated{
 		StoreId:   store,
 		Reason:    proto.ElimSelfCollapse,
-		FinalRank: finalRank,
-	}, out)
+		FinalRank: st.finalRank,
+	}))
 
 	return out
 }
@@ -931,25 +934,18 @@ func TestStepPatience_DeadStoreSkipped(t *testing.T) {
 broadcastMsg が全店に配信されることを確認。
 
 ```go
-// broadcastMsg は全店（order の全員）に配信する。
+// broadcastMsg は Broadcast=true の Outbound を1つ返す（ファンアウトは room が行う）。
 func TestBroadcastMsg(t *testing.T) {
-	s := newTestSession(4)
 	msg := proto.StoreEliminated{StoreId: "test", Reason: proto.ElimSelfCollapse, FinalRank: 4}
-	out := s.broadcastMsg(msg, nil)
-	if len(out) != 4 {
-		t.Fatalf("4店にブロードキャストのはず: %d件", len(out))
+	o := broadcastMsg(msg)
+	if !o.To.Broadcast {
+		t.Fatal("Broadcast=true のはず")
 	}
-	sent := make(map[PlayerId]bool)
-	for _, o := range out {
-		sent[o.To.PlayerId] = true
-		if _, ok := o.Msg.(proto.StoreEliminated); !ok {
-			t.Fatalf("StoreEliminated でない: %T", o.Msg)
-		}
+	if o.To.PlayerId != "" {
+		t.Fatalf("Broadcast 時 PlayerId は空のはず: %q", o.To.PlayerId)
 	}
-	for _, sid := range s.order {
-		if !sent[sid] {
-			t.Fatalf("店 %s に送られていない", sid)
-		}
+	if _, ok := o.Msg.(proto.StoreEliminated); !ok {
+		t.Fatalf("StoreEliminated でない: %T", o.Msg)
 	}
 }
 ```

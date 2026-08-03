@@ -2,7 +2,10 @@
 
 > **目的**: Takoda99専用のPostgres DBをセットアップし、config-front を別URLでデプロイする。GameParameters をたこ焼き版のフルスキーマへ差し替え、config-front の params.ts と同期させる。
 > **対応issue**: #11(tako-K) + 新規issue
-> **依存**: Plan-01（基盤移行後）。コアゲーム(Plan-02〜05)と並行可。
+> **依存**: Plan-01（基盤移行後）。
+> DB/Vercel の配線（Step 1・5・7）は Plan-02〜05 と並行して進められるが、
+> **パラメータのフルスキーマ確定（Step 2〜4・6）は Plan-02/03/04 の型定義が正典**なので、
+> それらの完了後に写しを作る。先に config-front を作ると型がズレる。
 > **参照**: パラメータ仕様, config-front 運用メモ, Textro99 での BackfillLegacyDefaults 教訓
 
 ---
@@ -147,41 +150,65 @@ type GameParameters struct {
 
 旧フィールド（`Combo`, `Attack`, `Stack`, `Difficulty`, `Odai`）は**全削除**。これらの型定義・デフォルト値・バリデーションも削除する。
 
-新セクションのパラメータ型（例）:
+新セクションのパラメータ型。**これらの定義の正典は各実装プラン**であり、
+本プランで別案を作らないこと（config-front はこのスキーマの写しにすぎない）:
+
+| 型 | 正典プラン | 備考 |
+|---|---|---|
+| `CreditParams`(+`LeaveLoss`) | Plan-02 | 信用・属性別の離脱ペナルティ |
+| `PatienceParams` | Plan-02 | 我慢ゲージ |
+| `DistributionParams` | Plan-03 | 客分配 |
+| `PhaseParams` / `HeatParams` / `StormParams` | Plan-04 | フェーズ・火力・下位淘汰 |
+| `BotParams` | 本プラン（新規） | Bot の強さ調整 |
 
 ```go
-type PhaseParams struct {
-    MidStartMs  int `json:"midStartMs"`  // EarlyからMidへの遷移タイミング(ms)
-    LateStartMs int `json:"lateStartMs"` // MidからLateへの遷移タイミング(ms)
+// ── Plan-02 が定義 ──────────────────────────────
+type LeaveLoss struct {
+    Normal  int `json:"normal"`
+    Bonus   int `json:"bonus"`
+    Claimer int `json:"claimer"`
+    Buzz    int `json:"buzz"`
 }
 
-type HeatParams struct {
-    InitialLevel   int `json:"initialLevel"`   // 初期火力レベル
-    MaxLevel       int `json:"maxLevel"`       // 最大火力レベル
-    IntervalMs     int `json:"intervalMs"`     // 火力上昇間隔(ms)
-    LevelsPerStep  int `json:"levelsPerStep"`  // 1回の上昇幅
-}
-
-type StormParams struct {
-    Enabled         bool `json:"enabled"`         // 下位淘汰の有効/無効
-    IntervalMs      int  `json:"intervalMs"`      // 淘汰判定間隔(ms)
-    WarningMs       int  `json:"warningMs"`       // 予告から実行までの猶予(ms)
-    CullCount       int  `json:"cullCount"`       // 1回の淘汰人数
-    MinAliveToStart int  `json:"minAliveToStart"` // 淘汰開始の最低生存数
-}
-
-type DistributionParams struct {
-    QueueCapacity       int `json:"queueCapacity"`       // 1店の行列最大長
-    RefillThreshold     int `json:"refillThreshold"`     // 補充が発火する行列長の閾値
-    DistributePerTick   int `json:"distributePerTick"`   // 1tickで分配する最大客数
-    ClaimerUnlockPhase  int `json:"claimerUnlockPhase"`  // Claimerが出現するフェーズ(0=Early)
+type CreditParams struct {
+    InitialLife int       `json:"initialLife"` // 初期信用
+    LeaveLoss   LeaveLoss `json:"leaveLoss"`   // 属性別の離脱ペナルティ
 }
 
 type PatienceParams struct {
-    DecayMultiplierMid  float64 `json:"decayMultiplierMid"`  // Mid の我慢減衰倍率
-    DecayMultiplierLate float64 `json:"decayMultiplierLate"` // Late の我慢減衰倍率
+    LateMul float64 `json:"lateMul"` // 終盤の我慢ゲージ短縮倍率（<1.0 で速く減る）
+    AlertMs int     `json:"alertMs"` // 離脱アラート閾値（表示用）
 }
 
+// ── Plan-03 が定義 ──────────────────────────────
+type DistributionParams struct {
+    QueueRefillThreshold int     `json:"queueRefillThreshold"` // 行列がこの数未満の店を分配対象にする
+    WeightFloor          float64 `json:"weightFloor"`          // 重みの下駄（最下位店の客ゼロを防ぐ）
+}
+
+// ── Plan-04 が定義 ──────────────────────────────
+type PhaseParams struct {
+    MidAliveThreshold  int `json:"midAliveThreshold"`  // Early→Mid の生存数閾値
+    LateAliveThreshold int `json:"lateAliveThreshold"` // Mid→Late の生存数閾値
+    MidTimeMs          int `json:"midTimeMs"`          // Early→Mid の経過時間閾値
+    LateTimeMs         int `json:"lateTimeMs"`         // Mid→Late の経過時間閾値
+}
+
+type HeatParams struct {
+    Base         int     `json:"base"`         // 火力基礎値
+    PerAliveDrop float64 `json:"perAliveDrop"` // 生存1人減るごとの加算量
+    PhaseEarly   int     `json:"phaseEarly"`   // Early の火力加算
+    PhaseMid     int     `json:"phaseMid"`     // Mid の火力加算
+    PhaseLate    int     `json:"phaseLate"`    // Late の火力加算
+}
+
+type StormParams struct {
+    IntervalTicks int     `json:"intervalTicks"` // 実行間隔（tick数）
+    WarnTicks     int     `json:"warnTicks"`     // 何tick前に予告するか
+    ThresholdPct  float64 `json:"thresholdPct"`  // 下位何%を強制脱落（0.0〜1.0）
+}
+
+// ── 本プランで新規追加 ──────────────────────────
 type BotParams struct {
     BaseAccuracy    float64 `json:"baseAccuracy"`    // Bot の基準精度
     BaseElapsedMs   int     `json:"baseElapsedMs"`   // Bot の基準所要ms
@@ -190,7 +217,12 @@ type BotParams struct {
 }
 ```
 
-各型の具体フィールドは企画・仕様の確定に依存するため、実装時に調整する。上記はたたき台。
+**全型が `==` 比較可能（comparable）であること**が制約。`map` や slice をフィールドに
+使わない（既存 params.go のコメント「すべて全項目 comparable に保つ」を踏襲）。
+そのため `LeaveLoss` は属性→値の map ではなく固定4フィールドの struct、
+`HeatParams` のフェーズ別加算も map ではなく個別フィールドにしている。
+
+
 
 ### Step 3: DefaultParameters() と Validate() の更新
 
@@ -207,14 +239,23 @@ func DefaultParameters() GameParameters {
             MaxPlayers:       99,
             StartCountdownMs: 15000,
         },
-        Credit:       CreditParams{InitialLife: 3},
-        Customer:     CustomerParams{ /* 既存のまま */ },
-        Eval:         EvalParams{ /* 既存のまま */ },
-        Phase:        PhaseParams{MidStartMs: 60000, LateStartMs: 120000},
-        Heat:         HeatParams{InitialLevel: 0, MaxLevel: 4, IntervalMs: 30000, LevelsPerStep: 1},
-        Storm:        StormParams{Enabled: true, IntervalMs: 30000, WarningMs: 5000, CullCount: 1, MinAliveToStart: 10},
-        Distribution: DistributionParams{QueueCapacity: 3, RefillThreshold: 1, DistributePerTick: 5, ClaimerUnlockPhase: 1},
-        Patience:     PatienceParams{DecayMultiplierMid: 1.2, DecayMultiplierLate: 1.5},
+        Credit: CreditParams{
+            InitialLife: 3,
+            LeaveLoss:   LeaveLoss{Normal: 1, Bonus: 1, Claimer: 1, Buzz: 2},
+        },
+        Customer: CustomerParams{ /* 既存のまま */ },
+        Eval:     EvalParams{ /* 既存のまま */ },
+        Phase: PhaseParams{
+            MidAliveThreshold: 70, LateAliveThreshold: 30,
+            MidTimeMs: 30000, LateTimeMs: 90000,
+        },
+        Heat: HeatParams{
+            Base: 0, PerAliveDrop: 0.1,
+            PhaseEarly: 0, PhaseMid: 3, PhaseLate: 8,
+        },
+        Storm:        StormParams{IntervalTicks: 40, WarnTicks: 10, ThresholdPct: 0.10},
+        Distribution: DistributionParams{QueueRefillThreshold: 3, WeightFloor: 0.25},
+        Patience:     PatienceParams{LateMul: 0.6, AlertMs: 2000},
         Bot:          BotParams{BaseAccuracy: 0.85, BaseElapsedMs: 3000, AccuracyJitter: 0.1, ElapsedJitterMs: 500},
     }
 }
@@ -227,11 +268,14 @@ func (gp GameParameters) Validate() error {
     if gp.Credit.InitialLife <= 0 {
         return fmt.Errorf("credit.initialLife は正である必要 (got %d)", gp.Credit.InitialLife)
     }
-    if gp.Heat.MaxLevel <= 0 {
-        return fmt.Errorf("heat.maxLevel は正である必要 (got %d)", gp.Heat.MaxLevel)
+    if gp.Distribution.QueueRefillThreshold <= 0 {
+        return fmt.Errorf("distribution.queueRefillThreshold は正である必要 (got %d)", gp.Distribution.QueueRefillThreshold)
     }
-    if gp.Distribution.QueueCapacity <= 0 {
-        return fmt.Errorf("distribution.queueCapacity は正である必要 (got %d)", gp.Distribution.QueueCapacity)
+    if gp.Storm.ThresholdPct < 0 || gp.Storm.ThresholdPct > 1 {
+        return fmt.Errorf("storm.thresholdPct は 0..1 の範囲である必要 (got %f)", gp.Storm.ThresholdPct)
+    }
+    if gp.Patience.LateMul <= 0 {
+        return fmt.Errorf("patience.lateMul は正である必要 (got %f)", gp.Patience.LateMul)
     }
     return nil
 }
@@ -263,8 +307,25 @@ func backfillDefaults(gp *game.GameParameters, def game.GameParameters) {
     if gp.Heat == (game.HeatParams{}) {
         gp.Heat = def.Heat
     }
-    // ... 他の新セクションも同様 ...
+    if gp.Storm == (game.StormParams{}) {
+        gp.Storm = def.Storm
+    }
+    if gp.Distribution == (game.DistributionParams{}) {
+        gp.Distribution = def.Distribution
+    }
+    if gp.Patience == (game.PatienceParams{}) {
+        gp.Patience = def.Patience
+    }
+    if gp.Bot == (game.BotParams{}) {
+        gp.Bot = def.Bot
+    }
+    if gp.Credit.LeaveLoss == (game.LeaveLoss{}) {
+        gp.Credit.LeaveLoss = def.Credit.LeaveLoss
+    }
 }
+
+// ※ この `==` 比較が使えるのは全パラメータ型が comparable だから。
+//    map や slice をフィールドに入れるとこのパターンが壊れる。
 ```
 
 Plan-01 で DB を空から始めるため初回はこの問題に当たらないが、**今後のセクション追加に備えてパターンを入れておく**。
@@ -308,13 +369,54 @@ export interface GameParameters {
   bot: BotParams;
 }
 
-// 各セクションの interface を Go 側と一致させる
-export interface PhaseParams {
-  midStartMs: number;
-  lateStartMs: number;
+// 各セクションの interface は Go 側のフィールド名（json タグ）と1対1で一致させる
+export interface CreditParams {
+  initialLife: number;
+  leaveLoss: { normal: number; bonus: number; claimer: number; buzz: number };
 }
-// ... 以下同様
+
+export interface PatienceParams {
+  lateMul: number;
+  alertMs: number;
+}
+
+export interface DistributionParams {
+  queueRefillThreshold: number;
+  weightFloor: number;
+}
+
+export interface PhaseParams {
+  midAliveThreshold: number;
+  lateAliveThreshold: number;
+  midTimeMs: number;
+  lateTimeMs: number;
+}
+
+export interface HeatParams {
+  base: number;
+  perAliveDrop: number;
+  phaseEarly: number;
+  phaseMid: number;
+  phaseLate: number;
+}
+
+export interface StormParams {
+  intervalTicks: number;
+  warnTicks: number;
+  thresholdPct: number;
+}
+
+export interface BotParams {
+  baseAccuracy: number;
+  baseElapsedMs: number;
+  accuracyJitter: number;
+  elapsedJitterMs: number;
+}
 ```
+
+> **同期のルール**: Go 側の型を変えたらこの TS も必ず同時に直す。
+> フィールド名は Go の `json:"..."` タグと完全一致（camelCase）。
+> ズレると config-front の保存が Validate で弾かれるか、ゼロ値で上書きされる。
 
 デフォルト値オブジェクトも Go の `DefaultParameters()` と完全一致させる。フォーム UI は各セクションをアコーディオン/タブで区切り、日本語ラベルを付ける。
 
