@@ -806,3 +806,162 @@ func TestStepStorm_Tiebreak(t *testing.T) {
 			culled[0].FinalRank, culled[1].FinalRank)
 	}
 }
+
+// ── Plan-05: checkFinish / Results テスト ─────────────────────
+
+func TestCheckFinish_LastOneStanding(t *testing.T) {
+	sess := newTestSession(2)
+	p1 := PlayerId("s-1")
+	p2 := PlayerId("s-2")
+
+	st2 := sess.stores[p2]
+	st2.alive = false
+	st2.finalRank = 2
+	st2.elimination = "SelfCollapse"
+	sess.aliveCount = 1
+
+	out := sess.checkFinish(nil)
+
+	if sess.state != Finished {
+		t.Fatalf("state=%v, want Finished", sess.state)
+	}
+	if len(out) != 2 {
+		t.Fatalf("outbound count=%d, want 2", len(out))
+	}
+
+	for _, o := range out {
+		me, ok := o.Msg.(proto.MatchEnd)
+		if !ok {
+			t.Fatalf("unexpected msg type: %T", o.Msg)
+		}
+		pid := o.To.PlayerId
+		if pid == p1 && me.FinalRank != 1 {
+			t.Errorf("s-1 rank=%d, want 1", me.FinalRank)
+		}
+		if pid == p2 && me.FinalRank != 2 {
+			t.Errorf("s-2 rank=%d, want 2", me.FinalRank)
+		}
+	}
+}
+
+func TestCheckFinish_ThreePlayerRankOrder(t *testing.T) {
+	sess := newTestSession(3)
+
+	sess.stores[PlayerId("s-1")].alive = false
+	sess.stores[PlayerId("s-1")].finalRank = 3
+	sess.stores[PlayerId("s-1")].elimination = "SelfCollapse"
+
+	sess.stores[PlayerId("s-3")].alive = false
+	sess.stores[PlayerId("s-3")].finalRank = 2
+	sess.stores[PlayerId("s-3")].elimination = "Cull"
+
+	sess.aliveCount = 1
+
+	out := sess.checkFinish(nil)
+
+	if sess.state != Finished {
+		t.Fatal("should be Finished")
+	}
+
+	ranks := map[PlayerId]int{}
+	for _, o := range out {
+		me := o.Msg.(proto.MatchEnd)
+		ranks[o.To.PlayerId] = me.FinalRank
+	}
+	if ranks[PlayerId("s-1")] != 3 {
+		t.Errorf("s-1 rank=%d want 3", ranks[PlayerId("s-1")])
+	}
+	if ranks[PlayerId("s-2")] != 1 {
+		t.Errorf("s-2 rank=%d want 1", ranks[PlayerId("s-2")])
+	}
+	if ranks[PlayerId("s-3")] != 2 {
+		t.Errorf("s-3 rank=%d want 2", ranks[PlayerId("s-3")])
+	}
+}
+
+func TestCheckFinish_StatsCalculation(t *testing.T) {
+	sess := newTestSession(2)
+	p1 := PlayerId("s-1")
+
+	sess.stores[p1].served = servedStats{
+		count:       3,
+		accuracySum: 0.9 + 0.8 + 0.7,
+		elapsedSum:  3000 + 4000 + 5000,
+	}
+
+	sess.stores[PlayerId("s-2")].alive = false
+	sess.stores[PlayerId("s-2")].finalRank = 2
+	sess.aliveCount = 1
+
+	out := sess.checkFinish(nil)
+
+	for _, o := range out {
+		if o.To.PlayerId != p1 {
+			continue
+		}
+		me := o.Msg.(proto.MatchEnd)
+		if me.Stats.ServedCount != 3 {
+			t.Errorf("ServedCount=%d want 3", me.Stats.ServedCount)
+		}
+		wantAcc := 2.4 / 3.0
+		if diff := me.Stats.AvgAccuracy - wantAcc; diff > 0.001 || diff < -0.001 {
+			t.Errorf("AvgAccuracy=%.4f want %.4f", me.Stats.AvgAccuracy, wantAcc)
+		}
+		if me.Stats.AvgElapsedMs != 4000 {
+			t.Errorf("AvgElapsedMs=%d want 4000", me.Stats.AvgElapsedMs)
+		}
+	}
+}
+
+func TestCheckFinish_ZeroServed(t *testing.T) {
+	sess := newTestSession(2)
+
+	sess.stores[PlayerId("s-2")].alive = false
+	sess.stores[PlayerId("s-2")].finalRank = 2
+	sess.aliveCount = 1
+
+	out := sess.checkFinish(nil)
+	if len(out) != 2 {
+		t.Fatalf("out=%d want 2", len(out))
+	}
+
+	for _, o := range out {
+		if o.To.PlayerId != PlayerId("s-2") {
+			continue
+		}
+		me := o.Msg.(proto.MatchEnd)
+		if me.Stats.ServedCount != 0 || me.Stats.AvgAccuracy != 0 || me.Stats.AvgElapsedMs != 0 {
+			t.Errorf("zero-served stats should be all zeros, got %+v", me.Stats)
+		}
+	}
+}
+
+func TestCheckFinish_SoloDoesNotEnd(t *testing.T) {
+	sess := newTestSession(1)
+	out := sess.checkFinish(nil)
+	if sess.state == Finished {
+		t.Fatal("solo session should not finish")
+	}
+	if len(out) != 0 {
+		t.Fatalf("solo should produce no outbound, got %d", len(out))
+	}
+}
+
+func TestCheckFinish_AllEliminatedSimultaneously(t *testing.T) {
+	sess := newTestSession(2)
+
+	for _, pid := range sess.order {
+		st := sess.stores[pid]
+		st.alive = false
+		st.finalRank = 1
+	}
+	sess.aliveCount = 0
+
+	out := sess.checkFinish(nil)
+	if sess.state != Finished {
+		t.Fatal("should be Finished when aliveCount=0")
+	}
+	if len(out) != 2 {
+		t.Fatalf("out=%d want 2", len(out))
+	}
+}
