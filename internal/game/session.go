@@ -374,6 +374,11 @@ func (s *Session) stepPatience(dtMs int, out []Outbound) []Outbound {
 		effectiveDt = int(float64(dtMs) / s.params.Patience.LateMul)
 	}
 
+	// 同一tickで信用が尽きた店をいったん溜める。
+	// ここで即座に脱落させると、順位が s.order（店IDの並び）で決まってしまい、
+	// 「同時に落ちた店の優劣」が実力と無関係になる。
+	var collapsed []*storeState
+
 	for _, sid := range s.order {
 		st := s.stores[sid]
 		if !st.alive {
@@ -386,13 +391,45 @@ func (s *Session) stepPatience(dtMs int, out []Outbound) []Outbound {
 		head := s.customers[q[0]]
 		head.patienceLeftMs -= effectiveDt
 		if head.patienceLeftMs <= 0 {
-			out = s.processLeave(sid, q[0], out)
+			var died bool
+			out, died = s.processLeave(sid, q[0], out)
+			if died {
+				collapsed = append(collapsed, st)
+			}
 		}
+	}
+
+	return s.resolveCollapses(collapsed, out)
+}
+
+// resolveCollapses は同一tickで信用が尽きた店をまとめて脱落させる。
+//
+// 総合判定（weakerForRank）で弱い順に並べ、弱い店から先に落とす＝下位の順位を与える。
+// バトルロイヤルなので**全員が同時に倒れても優勝者は必ず1店残す**。
+// その場合、いちばん強い店は脱落させずに生存させ、checkFinish が正規の優勝者として扱う
+// （「優勝者なのに脱落理由が付く」状態を作らない）。
+func (s *Session) resolveCollapses(collapsed []*storeState, out []Outbound) []Outbound {
+	if len(collapsed) == 0 {
+		return out
+	}
+
+	sortWeakestFirst(collapsed)
+
+	// 生存店が全滅する場合は、最強の1店を残す（勝者不在にしない）。
+	if len(collapsed) == s.aliveCount {
+		collapsed = collapsed[:len(collapsed)-1]
+	}
+
+	for _, st := range collapsed {
+		out = s.selfCollapse(st.id, out)
 	}
 	return out
 }
 
-func (s *Session) processLeave(store PlayerId, cid proto.CustomerId, out []Outbound) []Outbound {
+// processLeave は客の離脱を確定し信用を減らす。
+// 信用が尽きた場合は died=true を返すだけで、脱落の確定は呼び出し側
+// （resolveCollapses）が同一tick分をまとめて総合判定してから行う。
+func (s *Session) processLeave(store PlayerId, cid proto.CustomerId, out []Outbound) ([]Outbound, bool) {
 	c := s.customers[cid]
 
 	out = append(out, to(store, proto.CustomerLeft{
@@ -412,11 +449,7 @@ func (s *Session) processLeave(store PlayerId, cid proto.CustomerId, out []Outbo
 		Reason: proto.CreditCustomerLeft,
 	}))
 
-	if st.creditLife <= 0 {
-		out = s.selfCollapse(store, out)
-	}
-
-	return out
+	return out, st.creditLife <= 0
 }
 
 func (s *Session) selfCollapse(store PlayerId, out []Outbound) []Outbound {
@@ -583,7 +616,8 @@ func (s *Session) executeCull(out []Outbound) []Outbound {
 	sortStoresByWeakest(alive)
 	culled := alive[:cullCount]
 
-	sortCulledForRank(culled)
+	// 淘汰対象の中での順位も、自滅と同じ総合判定で決める。
+	sortWeakestFirst(culled)
 
 	for i := 0; i < len(culled); i++ {
 		st := culled[i]
@@ -601,13 +635,6 @@ func (s *Session) executeCull(out []Outbound) []Outbound {
 
 		st.finalRank = s.aliveCount + 1
 		st.elimination = string(proto.ElimCull)
-
-		if i > 0 {
-			prev := culled[i-1]
-			if st.creditLife == prev.creditLife && st.evalNormalized == prev.evalNormalized {
-				st.finalRank = prev.finalRank
-			}
-		}
 
 		out = append(out, broadcastMsg(proto.StoreEliminated{
 			StoreId:   st.id,
@@ -629,14 +656,44 @@ func sortStoresByWeakest(stores []*storeState) {
 	})
 }
 
-func sortCulledForRank(stores []*storeState) {
-	sort.SliceStable(stores, func(i, j int) bool {
-		a, b := stores[i], stores[j]
-		if a.creditLife != b.creditLife {
-			return a.creditLife < b.creditLife
-		}
+// avgAccuracy は平均精度（提供実績が無ければ0）。
+func (st *storeState) avgAccuracy() float64 {
+	if st.served.count == 0 {
+		return 0
+	}
+	return st.served.accuracySum / float64(st.served.count)
+}
+
+// weakerForRank は「同時に脱落した店同士の総合的な優劣」を返す（a の方が下位なら true）。
+//
+// 最終順位は脱落順で決まるが、同一tickで複数店が同時に落ちた分は順序が付かない。
+// そこを店IDの並び順のような無意味な基準で決めないための総合判定
+// （AGENTS「評価は順位計算に使わない。同時脱落のタイブレークにのみ使う」）。
+//
+// 比較順: 残信用 → 正規化評価 → 生評価 → 提供数 → 平均精度 → id
+// 最後に id を見るのは、全部同値でも順序が揺れないようにするため（決定的なリプレイのため）。
+func weakerForRank(a, b *storeState) bool {
+	if a.creditLife != b.creditLife {
+		return a.creditLife < b.creditLife
+	}
+	if a.evalNormalized != b.evalNormalized {
 		return a.evalNormalized < b.evalNormalized
-	})
+	}
+	if a.evalRaw != b.evalRaw {
+		return a.evalRaw < b.evalRaw
+	}
+	if a.served.count != b.served.count {
+		return a.served.count < b.served.count
+	}
+	if aa, ba := a.avgAccuracy(), b.avgAccuracy(); aa != ba {
+		return aa < ba
+	}
+	return a.id > b.id
+}
+
+// sortWeakestFirst は弱い順に並べる（先頭ほど下位＝先に脱落扱い）。
+func sortWeakestFirst(stores []*storeState) {
+	sort.SliceStable(stores, func(i, j int) bool { return weakerForRank(stores[i], stores[j]) })
 }
 
 func (s *Session) checkFinish(out []Outbound) []Outbound {
