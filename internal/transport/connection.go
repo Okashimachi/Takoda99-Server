@@ -35,19 +35,34 @@ type Connection interface {
 type wsConnection struct {
 	conn      *websocket.Conn
 	recv      chan proto.Envelope
+	send      chan proto.Envelope
 	ctx       context.Context
 	cancel    context.CancelFunc
-	writeMu   sync.Mutex // coder/websocket は同時Write非対応。送信を直列化する
+	drain     chan struct{} // Close が閉じる。writeLoop へ「残りを吐いて終われ」の合図
+	writeDone chan struct{} // writeLoop の終了通知（Close が drain 完了を待つのに使う）
 	closeOnce sync.Once
 }
 
 // recvBuffer は受信チャネルのバッファ。読み手（room）が一時的に詰まっても数件は吸収する。
 const recvBuffer = 16
 
+// sendBuffer は送信キューの深さ。一時的に遅いクライアントを吸収しつつ、これを超えて滞留したら
+// 「配信に追従できていない」とみなして接続を切る（slow-consumer eviction）。
+const sendBuffer = 64
+
 func newWSConnection(conn *websocket.Conn) *wsConnection {
 	ctx, cancel := context.WithCancel(context.Background())
-	c := &wsConnection{conn: conn, recv: make(chan proto.Envelope, recvBuffer), ctx: ctx, cancel: cancel}
+	c := &wsConnection{
+		conn:      conn,
+		recv:      make(chan proto.Envelope, recvBuffer),
+		send:      make(chan proto.Envelope, sendBuffer),
+		ctx:       ctx,
+		cancel:    cancel,
+		drain:     make(chan struct{}),
+		writeDone: make(chan struct{}),
+	}
 	go c.readLoop()
+	go c.writeLoop()
 	return c
 }
 
@@ -71,23 +86,90 @@ func (c *wsConnection) readLoop() {
 	}
 }
 
-func (c *wsConnection) Send(env proto.Envelope) error {
+// writeLoop は送信キューを実WSへ書き出す唯一の goroutine。
+// coder/websocket は同時Write非対応だが、書き手をここ1本に集約することで直列化される。
+func (c *wsConnection) writeLoop() {
+	defer close(c.writeDone)
+	for {
+		select {
+		case env := <-c.send:
+			if !c.write(env) {
+				return
+			}
+		case <-c.drain:
+			// Close 経路。キューに残っているぶんを吐き切ってから終わる
+			// （試合終了直後の MatchEnd を落とさないため）。
+			for {
+				select {
+				case env := <-c.send:
+					if !c.write(env) {
+						return
+					}
+				default:
+					return
+				}
+			}
+		case <-c.ctx.Done():
+			return
+		}
+	}
+}
+
+// write は1件を実WSへ書く。書き込み不能なら false を返し、切断を全体へ伝播させる。
+func (c *wsConnection) write(env proto.Envelope) bool {
 	data, err := json.Marshal(env)
 	if err != nil {
-		return err
+		return true // 壊れたメッセージは捨てる（接続は生かす）
 	}
 	ctx, cancel := context.WithTimeout(c.ctx, writeTimeout)
-	defer cancel()
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	return c.conn.Write(ctx, websocket.MessageText, data)
+	err = c.conn.Write(ctx, websocket.MessageText, data)
+	cancel()
+	if err != nil {
+		// 書き込み不能＝実質切断。cancel で readLoop も止め recv を閉じ、room に切断を伝える。
+		// ここで Close() を呼ぶと drain 待ちで自分自身とデッドロックするため cancel のみ。
+		c.cancel()
+		return false
+	}
+	return true
+}
+
+// Send は送信キューへ積むだけで、実際の書き込みは writeLoop が行う。
+//
+// room は単一 goroutine から全接続へ順に Send する（broadcast）。ここで実 I/O をすると、
+// 半開接続（FIN が来ないまま応答しないクライアント＝モバイル回線切断の典型）1つで
+// Write が writeTimeout まで固まり、**試合全体が停止する**。それを防ぐための非同期化。
+//
+// キューが埋まっている＝そのクライアントは配信に追従できていないので、接続を切る。
+// 以降は自然減衰（客の我慢切れ→信用減→SelfCollapse）で脱落する（#40）。
+func (c *wsConnection) Send(env proto.Envelope) error {
+	select {
+	case <-c.ctx.Done():
+		return ErrConnClosed
+	default:
+	}
+	select {
+	case c.send <- env:
+		return nil
+	default:
+		// Close() は drain 完了を待つため、Send から呼ぶとここがブロックしてしまう。
+		// 追従不能なクライアントは cancel で切り離すだけにする（readLoop 側が recv を閉じる）。
+		c.cancel()
+		return ErrConnClosed
+	}
 }
 
 func (c *wsConnection) Receive() <-chan proto.Envelope { return c.recv }
 
+// Close は接続を閉じる（冪等）。送信キューに残っているぶんは writeLoop に吐かせてから閉じる
+// （room は MatchEnd を dispatch した直後に closeConns するので、drain しないと最終メッセージを落とす）。
 func (c *wsConnection) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
+		close(c.drain)
+		select {
+		case <-c.writeDone:
+		case <-time.After(writeTimeout): // 吐き切れないクライアントは待ち続けない
+		}
 		c.cancel()
 		err = c.conn.Close(websocket.StatusNormalClosure, "")
 	})
