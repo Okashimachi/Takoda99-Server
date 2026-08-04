@@ -26,6 +26,7 @@ import (
 	"takoda99/internal/matchmaking"
 	"takoda99/internal/odai"
 	"takoda99/internal/proto"
+	"takoda99/internal/store"
 	"takoda99/internal/transport"
 )
 
@@ -38,7 +39,7 @@ func main() {
 
 	ctx := context.Background()
 
-	provider, wordStore := chooseProvider(ctx, *configURL)
+	provider, wordStore, resultStore := chooseProvider(ctx, *configURL)
 
 	_, err := provider.Load(ctx)
 	if err != nil {
@@ -53,6 +54,7 @@ func main() {
 			log.Printf("config: マッチ用取得失敗のためデフォルトで継続: %v", err)
 		}
 		d.Params = p
+		d.Store = resultStore
 		if wordStore != nil {
 			entries, err := wordStore.LoadAll(ctx)
 			if err != nil {
@@ -161,24 +163,28 @@ func main() {
 	}
 }
 
-func chooseProvider(ctx context.Context, configURL string) (game.ConfigProvider, *db.WordStore) {
+func chooseProvider(ctx context.Context, configURL string) (game.ConfigProvider, *db.WordStore, store.ResultStore) {
 	if dsn := os.Getenv("DATABASE_URL"); dsn != "" {
 		pool, err := db.NewPool(ctx, dsn)
 		if err != nil {
 			log.Printf("config: DB接続失敗のため設定は内蔵デフォルト: %v", err)
-			return config.DefaultLoader{}, nil
+			return config.DefaultLoader{}, nil, store.Noop{}
 		}
 		cs := db.NewConfigStore(pool)
 		if err := cs.Migrate(ctx); err != nil {
 			log.Printf("config: DBマイグレーション失敗のため設定は内蔵デフォルト: %v", err)
-			return config.DefaultLoader{}, nil
+			return config.DefaultLoader{}, nil, store.Noop{}
 		}
 		ws := db.NewWordStore(pool)
 		if err := ws.Migrate(ctx); err != nil {
 			log.Printf("odai: words テーブルマイグレーション失敗: %v", err)
 		}
+		rs := db.NewResultStore(pool)
+		if err := rs.Migrate(ctx); err != nil {
+			log.Printf("result: マイグレーション失敗: %v", err)
+		}
 		log.Printf("config: Postgres から取得（DATABASE_URL）")
-		return cs, ws
+		return cs, ws, rs
 	}
 	u := configURL
 	if u == "" {
@@ -186,10 +192,10 @@ func chooseProvider(ctx context.Context, configURL string) (game.ConfigProvider,
 	}
 	if u != "" {
 		log.Printf("config: HTTP から取得（%s）", u)
-		return config.NewRemoteLoader(u), nil
+		return config.NewRemoteLoader(u), nil, store.Noop{}
 	}
 	log.Printf("config: 内蔵デフォルトで起動")
-	return config.DefaultLoader{}, nil
+	return config.DefaultLoader{}, nil, store.Noop{}
 }
 
 func parseCSV(s string) []string {

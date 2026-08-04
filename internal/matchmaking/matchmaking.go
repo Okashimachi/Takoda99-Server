@@ -21,9 +21,10 @@ import (
 // Player は待機中／開始対象の1名。Conn はサーバー側の接続ハンドル。
 // Name は盤面表示名（サニタイズ済み・空ならフォールバックは試合構築側が決める）。
 type Player struct {
-	Id   game.PlayerId
-	Conn transport.Connection
-	Name string
+	Id    game.PlayerId
+	Conn  transport.Connection
+	Name  string
+	IsBot bool
 }
 
 // MaxDisplayNameLen は表示名の最大文字数（ルーン単位）。

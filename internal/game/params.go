@@ -6,10 +6,19 @@
 package game
 
 import (
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 
 	"takoda99/internal/proto"
 )
+
+// ConfigHash は GameParameters の JSON を SHA256 して先頭8文字を返す。
+func (gp GameParameters) ConfigHash() string {
+	b, _ := json.Marshal(gp)
+	h := sha256.Sum256(b)
+	return fmt.Sprintf("%x", h[:4])
+}
 
 // GameParameters は数値バランスの全項目。正典は
 // Takoda99-Docs/02_共通仕様/03_パラメータ仕様.md。

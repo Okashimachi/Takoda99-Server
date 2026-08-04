@@ -6,6 +6,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"log"
 	"math/rand"
 	"sync/atomic"
 	"time"
@@ -51,6 +52,7 @@ func nextMatchID() string { return fmt.Sprintf("m-%d", matchSeq.Add(1)) }
 func RunMatch(ctx context.Context, d Deps, players []matchmaking.Player) {
 	inits := make([]game.PlayerInit, 0, len(players))
 	conns := make(map[game.PlayerId]transport.Connection, len(players))
+	botIds := make(map[game.PlayerId]bool)
 	for _, p := range players {
 		name := p.Name
 		if name == "" {
@@ -58,11 +60,66 @@ func RunMatch(ctx context.Context, d Deps, players []matchmaking.Player) {
 		}
 		inits = append(inits, game.PlayerInit{Id: p.Id, DisplayName: name})
 		conns[p.Id] = p.Conn
+		if p.IsBot {
+			botIds[p.Id] = true
+		}
 	}
-	sess := game.NewSession(nextMatchID(), d.Params, d.Words, newRng(), inits)
+	matchId := nextMatchID()
+	sess := game.NewSession(matchId, d.Params, d.Words, newRng(), inits)
 	pub := transport.NewFullPublisher(d.Params.Session.PublishIntervalMs)
 	rm := room.New(sess, conns, d.Params.Session.TickIntervalMs, d.Clock, pub)
 	rm.Run(ctx)
+
+	saveResults(ctx, d, sess, matchId, botIds)
+}
+
+func saveResults(ctx context.Context, d Deps, sess *game.Session, matchId string, botIds map[game.PlayerId]bool) {
+	results := sess.Results()
+	if len(results) == 0 {
+		return
+	}
+
+	humanCount, botCount := 0, 0
+	storeResults := make([]store.Result, 0, len(results))
+	var winnerId string
+
+	for _, r := range results {
+		isBot := botIds[r.StoreId]
+		if isBot {
+			botCount++
+		} else {
+			humanCount++
+		}
+		if r.FinalRank == 1 {
+			winnerId = string(r.StoreId)
+		}
+		storeResults = append(storeResults, store.Result{
+			StoreId:      string(r.StoreId),
+			DisplayName:  r.DisplayName,
+			FinalRank:    r.FinalRank,
+			Elimination:  r.Elimination,
+			CreditLife:   r.CreditLife,
+			EvalRaw:      r.EvalRaw,
+			ServedCount:  r.Stats.ServedCount,
+			AvgAccuracy:  r.Stats.AvgAccuracy,
+			AvgElapsedMs: r.Stats.AvgElapsedMs,
+			IsBot:        isBot,
+		})
+	}
+
+	mr := store.MatchResult{
+		MatchId:    matchId,
+		DurationMs: sess.ElapsedMs(),
+		HumanCount: humanCount,
+		BotCount:   botCount,
+		WinnerId:   winnerId,
+		ConfigHash: d.Params.ConfigHash(),
+		Results:    storeResults,
+	}
+
+	if err := d.Store.SaveMatch(ctx, mr); err != nil {
+		log.Printf("result: 保存失敗（試合は正常終了済み）: %v", err)
+	}
 }
 
 // NewBotPlayer は Bot 枠を1つ作る。
@@ -70,5 +127,5 @@ func NewBotPlayer(ctx context.Context, id game.PlayerId, cfg bot.Config) matchma
 	srv, cli := transport.Pipe()
 	b := bot.New(cli, cfg, newRng())
 	go b.Run(ctx)
-	return matchmaking.Player{Id: id, Conn: srv, Name: "BOT " + string(id)}
+	return matchmaking.Player{Id: id, Conn: srv, Name: "BOT " + string(id), IsBot: true}
 }

@@ -57,3 +57,20 @@ func TestGameParameters_Validate(t *testing.T) {
 		}
 	})
 }
+
+func TestConfigHash(t *testing.T) {
+	p := DefaultParameters()
+	h := p.ConfigHash()
+	if len(h) != 8 {
+		t.Errorf("hash length=%d want 8", len(h))
+	}
+	h2 := p.ConfigHash()
+	if h != h2 {
+		t.Errorf("hash not deterministic: %s != %s", h, h2)
+	}
+	p.Credit.InitialLife = 999
+	h3 := p.ConfigHash()
+	if h == h3 {
+		t.Error("hash should differ with changed params")
+	}
+}
