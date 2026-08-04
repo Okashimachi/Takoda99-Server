@@ -1,9 +1,11 @@
-# deploy/takoda99.service — GCP Compute Engine (e2-micro) 用 systemd unit。
+# deploy/takoda99.service — GCP Compute Engine 用 systemd unit。
+# 想定: e2-micro / us-west1-b / Ubuntu 24.04 LTS（Always Free 枠）
 #
 #   sudo cp deploy/takoda99.service /etc/systemd/system/
 #   sudo systemctl daemon-reload && sudo systemctl enable --now takoda99
 #
 # 秘密（DATABASE_URL 等）はこのファイルに書かない。/etc/takoda99.env に置く（権限600）。
+# 手順の全体は docs/deploy.md。
 
 [Unit]
 Description=Takoda99 game server
