@@ -15,8 +15,12 @@ import (
 func TestConnLimiter_AcquireUpToMax(t *testing.T) {
 	cl := newConnLimiter(2)
 
-	if !cl.acquire() || !cl.acquire() {
-		t.Fatal("上限までは acquire できるべき")
+	// || で繋ぐと短絡評価で2つ目が呼ばれず、枠を1つしか取らないまま先へ進んでしまう。
+	if !cl.acquire() {
+		t.Fatal("1枠目は acquire できるべき")
+	}
+	if !cl.acquire() {
+		t.Fatal("2枠目（上限ちょうど）も acquire できるべき")
 	}
 	if cl.acquire() {
 		t.Fatal("上限超過の acquire は false を返すべき（503）")
