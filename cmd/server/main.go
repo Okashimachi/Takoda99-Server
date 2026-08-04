@@ -96,8 +96,8 @@ func main() {
 				return
 			}
 			id := nextID()
-			awaitJoin(conn, joinTimeout)
-			players := []matchmaking.Player{{Id: id, Conn: conn, Name: string(id)}}
+			name := awaitJoinName(conn, joinTimeout)
+			players := []matchmaking.Player{{Id: id, Conn: conn, Name: name}}
 			for i := 0; i < *bots; i++ {
 				players = append(players, app.NewBotPlayer(ctx, nextID(), botConfig()))
 			}
@@ -131,9 +131,9 @@ func main() {
 				return
 			}
 			id := nextID()
-			awaitJoin(conn, joinTimeout)
-			log.Printf("match: 参加 %s", id)
-			mm.Join(matchmaking.Player{Id: id, Conn: conn, Name: string(id)})
+			name := awaitJoinName(conn, joinTimeout)
+			log.Printf("match: 参加 %s name=%q", id, name)
+			mm.Join(matchmaking.Player{Id: id, Conn: conn, Name: name})
 		})
 	}
 
@@ -237,18 +237,25 @@ func listenAddr() string {
 	return ":8080"
 }
 
+// joinTimeout は MatchmakingJoin（表示名つき）を待つ上限。
+// 期限内に来なければ空名で続行し、試合構築側が接続IDへフォールバックする。
 const joinTimeout = 3 * time.Second
 
-// awaitJoin は接続の最初の MatchmakingJoin を待つ。タイムアウトでも続行する。
-func awaitJoin(conn transport.Connection, timeout time.Duration) {
+// awaitJoinName は接続の最初の MatchmakingJoin を読み、サニタイズ済み表示名を返す。
+// タイムアウト・切断・別種メッセージ・不正JSON はいずれも空名を返す（フォールバック運用）。
+func awaitJoinName(conn transport.Connection, timeout time.Duration) string {
 	select {
 	case env, ok := <-conn.Receive():
 		if !ok || env.Type != proto.TypeMatchmakingJoin {
-			return
+			return ""
 		}
 		var m proto.MatchmakingJoin
-		_ = json.Unmarshal(env.Payload, &m)
+		if json.Unmarshal(env.Payload, &m) != nil {
+			return ""
+		}
+		return matchmaking.SanitizeDisplayName(m.DisplayName)
 	case <-time.After(timeout):
+		return ""
 	}
 }
 
