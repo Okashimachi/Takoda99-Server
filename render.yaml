@@ -5,12 +5,17 @@ services:
     name: takoda99-server
     runtime: docker
     dockerfilePath: ./Dockerfile
-    plan: free
+    # ⚠ starter は有料（$7/月）。Free はスリープするうえ 0.1 CPU で 99接続に耐えないため、
+    # 本番当日は starter 以上にする（Plan-09）。課金を避けたい期間は free に戻してよい。
+    plan: starter
     healthCheckPath: /healthz
     autoDeploy: true
     # 本番は --mode match（Dockerfile CMD の既定）。
     # solo モード（/ws 接続ごとに「人間1＋Bot」で即試合）はローカル確認用。
-    # envVars:
+    envVars:
+      # 一斉接続で小さい alloc が大量に出るため GC のトリガ間隔を広げる（Plan-09）。
+      - key: GOGC
+        value: "200"
     #   - key: DATABASE_URL
     #     sync: false
     #   - key: CONFIG_ADMIN_TOKEN

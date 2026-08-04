@@ -27,6 +27,12 @@ type Connection interface {
 	Send(env proto.Envelope) error
 	// Receive は受信メッセージのチャネル。接続が閉じると close される。
 	Receive() <-chan proto.Envelope
+	// Done は接続が死んだ時に閉じるチャネル（切断・Close いずれでも）。
+	//
+	// 切断の監視に Receive() を使うと、room の readConn とメッセージを奪い合ってしまう
+	// （同じチャネルを2箇所で読むと片方がメッセージを消費する）。受信を消費せずに
+	// 切断だけを待つための口。
+	Done() <-chan struct{}
 	// Close は接続を閉じる（冪等）。
 	Close() error
 }
@@ -67,7 +73,12 @@ func newWSConnection(conn *websocket.Conn) *wsConnection {
 }
 
 // readLoop は WS から読み続け、Envelope に復号して recv へ流す。エラー/切断で recv を閉じる。
+//
+// 相手からの切断もここで検知するので、抜ける時に cancel して Done() を発火させる。
+// これが無いと「クライアントがタブを閉じた」ケースで Done() が閉じず、接続数リミッターの
+// 枠が返らない（送信が発生して write エラーになるまで気付けない）。
 func (c *wsConnection) readLoop() {
+	defer c.cancel()
 	defer close(c.recv)
 	for {
 		_, data, err := c.conn.Read(c.ctx)
@@ -159,6 +170,9 @@ func (c *wsConnection) Send(env proto.Envelope) error {
 }
 
 func (c *wsConnection) Receive() <-chan proto.Envelope { return c.recv }
+
+// Done は接続が死んだ時（切断・書き込み不能・Close）に閉じる。
+func (c *wsConnection) Done() <-chan struct{} { return c.ctx.Done() }
 
 // Close は接続を閉じる（冪等）。送信キューに残っているぶんは writeLoop に吐かせてから閉じる
 // （room は MatchEnd を dispatch した直後に closeConns するので、drain しないと最終メッセージを落とす）。

@@ -23,8 +23,8 @@ func Pipe() (Connection, Connection) {
 	ad := make(chan struct{})
 	bd := make(chan struct{})
 
-	a := &inMemoryConn{peerInbox: bi, out: make(chan proto.Envelope, buf), done: ad, peerDone: bd}
-	b := &inMemoryConn{peerInbox: ai, out: make(chan proto.Envelope, buf), done: bd, peerDone: ad}
+	a := &inMemoryConn{peerInbox: bi, out: make(chan proto.Envelope, buf), done: ad, peerDone: bd, dead: make(chan struct{})}
+	b := &inMemoryConn{peerInbox: ai, out: make(chan proto.Envelope, buf), done: bd, peerDone: ad, dead: make(chan struct{})}
 	go a.forward(ai)
 	go b.forward(bi)
 	return a, b
@@ -35,6 +35,7 @@ type inMemoryConn struct {
 	out       chan proto.Envelope   // Receive が返す公開チャネル。forward が done で閉じる
 	done      chan struct{}         // この端の Close で閉じる
 	peerDone  <-chan struct{}       // 相手の done（相手切断の検知）
+	dead      chan struct{}         // Done() が返す。自端/相手どちらの切断でも閉じる
 	once      sync.Once
 }
 
@@ -42,6 +43,7 @@ type inMemoryConn struct {
 // （送信側は inbox を閉じないので、中継役の out クローズで EOF を表現する）
 func (c *inMemoryConn) forward(inbox <-chan proto.Envelope) {
 	defer close(c.out)
+	defer close(c.dead)
 	for {
 		select {
 		case env := <-inbox:
@@ -81,6 +83,9 @@ func (c *inMemoryConn) Send(env proto.Envelope) error {
 }
 
 func (c *inMemoryConn) Receive() <-chan proto.Envelope { return c.out }
+
+// Done は自端/相手どちらかの Close で閉じる（forward が閉じる）。
+func (c *inMemoryConn) Done() <-chan struct{} { return c.dead }
 
 func (c *inMemoryConn) Close() error {
 	c.once.Do(func() { close(c.done) })
