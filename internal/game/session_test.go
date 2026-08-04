@@ -186,7 +186,12 @@ func TestStepPatience_AttributeLeaveLoss(t *testing.T) {
 	}
 }
 
-func TestStepPatience_HeadOnly(t *testing.T) {
+// 行列に並んでいる客は、対応中(先頭)でなくても我慢が減る。
+//
+// これが「忙しさ」の表現で、行列を溜めること自体のコストになる。
+// 先頭だけ減らすと行列がいくら伸びてもペナルティが無く、
+// 客分配の重み ÷(行列長+1) も意味を失う。
+func TestStepPatience_AllQueuedDrain(t *testing.T) {
 	s := newTestSession(2)
 	s.state = Running
 	store := s.order[0]
@@ -195,16 +200,45 @@ func TestStepPatience_HeadOnly(t *testing.T) {
 	placeAssigned(s, front, store, proto.AttrNormal, 1, 5)
 	placeAssigned(s, behind, store, proto.AttrNormal, 1, 5)
 
-	behindBefore := s.customers[behind].patienceLeftMs
 	frontBefore := s.customers[front].patienceLeftMs
+	behindBefore := s.customers[behind].patienceLeftMs
 
 	s.stepPatience(150, nil)
 
-	if s.customers[front].patienceLeftMs >= frontBefore {
+	if s.customers[front].patienceLeftMs != frontBefore-150 {
 		t.Fatalf("先頭のゲージが減っていない: before=%d after=%d", frontBefore, s.customers[front].patienceLeftMs)
 	}
-	if s.customers[behind].patienceLeftMs != behindBefore {
-		t.Fatalf("2番目のゲージが動いた: before=%d after=%d", behindBefore, s.customers[behind].patienceLeftMs)
+	if s.customers[behind].patienceLeftMs != behindBefore-150 {
+		t.Fatalf("待機中のゲージが減っていない: before=%d after=%d", behindBefore, s.customers[behind].patienceLeftMs)
+	}
+}
+
+// 同一tickで複数の客が同時に我慢切れしても、全員ぶん処理される。
+// 走査中に行列を書き換えると要素を飛ばすため、収集してから処理している。
+func TestStepPatience_MultipleLeavesInOneTick(t *testing.T) {
+	s := newTestSession(2)
+	s.state = Running
+	s.params.Credit.InitialLife = 10 // 脱落させずに離脱だけ見る
+	store := s.order[0]
+	s.stores[store].creditLife = 10
+
+	for i := 0; i < 3; i++ {
+		placeAssigned(s, proto.CustomerId(fmt.Sprintf("c-%d", i)), store, proto.AttrNormal, 1, 5)
+	}
+
+	out := s.stepPatience(99999, nil)
+
+	leaves := 0
+	for _, o := range out {
+		if _, ok := o.Msg.(proto.CustomerLeft); ok {
+			leaves++
+		}
+	}
+	if leaves != 3 {
+		t.Fatalf("3人とも離脱するはず: %d件", leaves)
+	}
+	if len(s.storeQueues[store]) != 0 {
+		t.Fatalf("行列が空になるはず: %v", s.storeQueues[store])
 	}
 }
 
@@ -227,9 +261,11 @@ func TestStepPatience_ServePreventLeave(t *testing.T) {
 	if len(q) != 1 || q[0] != second {
 		t.Fatalf("second が先頭に昇格するはず: %v", q)
 	}
-	if s.customers[second].patienceLeftMs != s.customers[second].patienceMaxMs {
-		t.Fatalf("second のゲージは満タンのはず: left=%d max=%d",
-			s.customers[second].patienceLeftMs, s.customers[second].patienceMaxMs)
+	// second は待機中も我慢が減っているので満タンではない（新仕様）。
+	wantLeft := s.customers[second].patienceMaxMs - half
+	if s.customers[second].patienceLeftMs != wantLeft {
+		t.Fatalf("second のゲージは待機中も減るはず: left=%d want=%d",
+			s.customers[second].patienceLeftMs, wantLeft)
 	}
 
 	out := s.stepPatience(150, nil)
@@ -676,6 +712,14 @@ func TestStepPhase_AliveThreshold(t *testing.T) {
 
 func TestStepPhase_TimeThreshold(t *testing.T) {
 	s := newTestSession(99)
+	// このテストは「経過時間でフェーズが移る」ことだけを見る。
+	// 実 tick の数百倍の dt を1回で流すので、我慢を十分長くしておかないと
+	// 行列の客が一斉に離脱して店が全滅し、試合が終了して Tick が素通りする。
+	huge := 1 << 30
+	s.params.Customer.Normal.PatienceBaseMs = huge
+	s.params.Customer.Bonus.PatienceBaseMs = huge
+	s.params.Customer.Claimer.PatienceBaseMs = huge
+	s.params.Customer.Buzz.PatienceBaseMs = huge
 	s.Start()
 	s.params.Storm.IntervalTicks = 0
 
@@ -1160,5 +1204,153 @@ func TestCheckFinish_NeverEndsOnElapsedTime(t *testing.T) {
 			t.Fatalf("経過時間で試合が終了した（制限時間は廃止済み）: elapsedMs=%d aliveCount=%d",
 				s.elapsedMs, s.aliveCount)
 		}
+	}
+}
+
+// ── proto v0.3.0 値算出（#64）──
+
+// 星は rank から一意に決まる。1位=5.0 / 最下位=0.0 / 中位=2.5。
+func TestStarRating_MapsRankToStars(t *testing.T) {
+	s := newTestSession(99)
+
+	cases := []struct {
+		rank int
+		want float64
+	}{
+		{1, 5.0},
+		{99, 0.0},
+		{50, 2.5},
+	}
+	for _, c := range cases {
+		st := s.stores[s.order[0]]
+		st.rank = c.rank
+		if got := s.starRating(st); got != c.want {
+			t.Fatalf("rank=%d → star=%v, want %v", c.rank, got, c.want)
+		}
+	}
+
+	// rank 未確定(0)は 0 を返す（星が跳ね上がらない）。
+	st := s.stores[s.order[0]]
+	st.rank = 0
+	if got := s.starRating(st); got != 0 {
+		t.Fatalf("rank未確定は0のはず: %v", got)
+	}
+}
+
+// starDelta は前回配信時からの増減。
+func TestEvaluationUpdate_StarDelta(t *testing.T) {
+	s := newTestSession(99)
+	st := s.stores[s.order[0]]
+
+	st.rank = 99 // 最下位 → 星0
+	first := s.evaluationUpdate(st)
+	if first.StarRating != 0 || first.StarDelta != 0 {
+		t.Fatalf("初回: star=%v delta=%v, want 0/0", first.StarRating, first.StarDelta)
+	}
+
+	st.rank = 1 // 首位へ急上昇 → 星5
+	second := s.evaluationUpdate(st)
+	if second.StarRating != 5 {
+		t.Fatalf("star=%v, want 5", second.StarRating)
+	}
+	if second.StarDelta != 5 {
+		t.Fatalf("delta=%v, want 5（0→5の増分）", second.StarDelta)
+	}
+
+	// 変化なしなら delta は0。
+	third := s.evaluationUpdate(st)
+	if third.StarDelta != 0 {
+		t.Fatalf("変化なしの delta=%v, want 0", third.StarDelta)
+	}
+}
+
+// 予告の selfAtRisk は、実際に淘汰される店だけ true になる。
+//
+// 予告と実行で判定がズレると「警告が出ていないのに落ちる」が起きるため、
+// 同じ集合になることをここで固定する。
+func TestForcedEliminationWarning_SelfAtRiskMatchesCull(t *testing.T) {
+	s := newTestSession(10)
+	s.state = Running
+	s.params.Storm.ThresholdPct = 0.2 // 10店の20% = 2店が対象
+
+	// 評価に差を付ける（s-1 が最弱、s-10 が最強）。
+	for i, sid := range s.order {
+		s.stores[sid].evalNormalized = float64(i) / 9.0
+		s.stores[sid].rank = 10 - i
+	}
+
+	atRisk := s.cullTargets()
+	if len(atRisk) != 2 {
+		t.Fatalf("淘汰対象は2店のはず: %d店 %v", len(atRisk), atRisk)
+	}
+	// 最弱2店（s-1, s-2）が対象。
+	for _, want := range []PlayerId{"s-1", "s-2"} {
+		if !atRisk[want] {
+			t.Fatalf("%s が対象に入っていない: %v", want, atRisk)
+		}
+	}
+	if atRisk["s-10"] {
+		t.Fatal("最強の s-10 が対象に入っている")
+	}
+
+	// 実際に淘汰を実行して、同じ集合が落ちることを確認する。
+	out := s.executeCull(nil)
+	eliminated := map[PlayerId]bool{}
+	for _, o := range out {
+		if se, ok := o.Msg.(proto.StoreEliminated); ok {
+			eliminated[se.StoreId] = true
+		}
+	}
+	if len(eliminated) != len(atRisk) {
+		t.Fatalf("予告と実行で対象数が違う: 予告=%d 実行=%d", len(atRisk), len(eliminated))
+	}
+	for sid := range atRisk {
+		if !eliminated[sid] {
+			t.Fatalf("予告された %s が実際には落ちていない", sid)
+		}
+	}
+}
+
+// 演出しきい値が公開パラメータに載る（既定値）。
+func TestPublicParams_PresentationThresholds(t *testing.T) {
+	s := newTestSession(3)
+	p := s.publicParams()
+	def := DefaultParameters().Presentation
+	if p.FinalStageAliveThreshold != def.FinalStageAliveThreshold {
+		t.Fatalf("finalStageAliveThreshold=%d, want %d", p.FinalStageAliveThreshold, def.FinalStageAliveThreshold)
+	}
+	if p.FinalRushAliveThreshold != def.FinalRushAliveThreshold {
+		t.Fatalf("finalRushAliveThreshold=%d, want %d", p.FinalRushAliveThreshold, def.FinalRushAliveThreshold)
+	}
+	if def.FinalStageAliveThreshold == 0 || def.FinalRushAliveThreshold == 0 {
+		t.Fatal("既定値が0のまま（クライアントが演出切替できない）")
+	}
+}
+
+// CustomerArrived は我慢の起点（サーバー時刻）を伴う。
+//
+// 我慢は行列に入った瞬間から減るので、起点は来店時刻そのもの。
+// クライアントはこれを基準にゲージを描けば受信遅延ぶんズレない。
+func TestAdmitCustomer_CarriesPatienceStart(t *testing.T) {
+	s := newTestSession(2)
+	s.state = Running
+	s.initCustomers()
+	s.elapsedMs = 4200 // 試合開始から 4.2 秒経過した時点で来店させる
+
+	var cid proto.CustomerId
+	for id := range s.customers {
+		cid = id
+		break
+	}
+	ob, ok := s.admitCustomer(cid, s.order[0])
+	if !ok {
+		t.Fatal("admitCustomer が失敗した")
+	}
+	cv, ok := ob.Msg.(proto.CustomerView)
+	if !ok {
+		t.Fatalf("CustomerView でない: %T", ob.Msg)
+	}
+	if cv.PatienceStartedAtServerMs != 4200 {
+		t.Fatalf("起点=%d, want 4200", cv.PatienceStartedAtServerMs)
 	}
 }

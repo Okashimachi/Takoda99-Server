@@ -47,6 +47,10 @@ type customer struct {
 	orderCount     int
 	keystrokeTotal int
 	assignedStore  *PlayerId
+
+	// patienceStartedAtMs は我慢が減り始めたサーバー時刻（= 行列に入った時刻）。
+	// クライアントが受信遅延ぶんズレずにゲージを描くために配る。
+	patienceStartedAtMs int64
 }
 
 // servedStats は1店の提供集計（リザルト用）。
@@ -69,6 +73,9 @@ type storeState struct {
 	alive       bool
 	finalRank   int
 	elimination string
+
+	// prevStar は前回 EvaluationUpdate を出した時の starRating。starDelta の算出に使う。
+	prevStar float64
 }
 
 // PlayerInit は NewSession に渡す初期店舗情報。
@@ -207,15 +214,41 @@ func (s *Session) ApplyOrderServed(from PlayerId, r proto.OrderServed) []Outboun
 
 	s.releaseToRest(r.CustomerId)
 
-	return append([]Outbound(nil), to(from, proto.EvaluationUpdate{
+	return append([]Outbound(nil), to(from, s.evaluationUpdate(st)))
+}
+
+func (s *Session) evalScore(st *storeState) float64 { return st.evalRaw + st.buzzBonus }
+
+// starRating は表示専用の星（0..5）を返す。
+//
+//	starRating = 5 * (maxStores - rank) / (maxStores - 1)
+//
+// 母集団は生存店ではなく**99店全体**（脱落店は下位に積む）。生存店の rank は
+// 生存店内順位だが、脱落店は必ずその下に積まれるので全体順位と一致する。
+// これは表示専用で、分配重み・下位淘汰には従来どおり evalNormalized を使う。
+func (s *Session) starRating(st *storeState) float64 {
+	maxStores := len(s.order)
+	if maxStores <= 1 || st.rank <= 0 {
+		return 0
+	}
+	return 5 * float64(maxStores-st.rank) / float64(maxStores-1)
+}
+
+// evaluationUpdate は1店ぶんの EvaluationUpdate を組み立て、星の前回値を更新する。
+// starDelta は「前回配信時からの増減」なので、組み立てと同時に prevStar を進める。
+func (s *Session) evaluationUpdate(st *storeState) proto.EvaluationUpdate {
+	star := s.starRating(st)
+	delta := star - st.prevStar
+	st.prevStar = star
+	return proto.EvaluationUpdate{
 		EvalRaw:    s.evalScore(st),
 		Normalized: st.evalNormalized,
 		Rank:       st.rank,
 		AliveCount: s.aliveCount,
-	}))
+		StarRating: star,
+		StarDelta:  delta,
+	}
 }
-
-func (s *Session) evalScore(st *storeState) float64 { return st.evalRaw + st.buzzBonus }
 
 func clampF(v, lo, hi float64) float64 {
 	if v < lo {
@@ -388,13 +421,36 @@ func (s *Session) stepPatience(dtMs int, out []Outbound) []Outbound {
 		if len(q) == 0 {
 			continue
 		}
-		head := s.customers[q[0]]
-		head.patienceLeftMs -= effectiveDt
-		if head.patienceLeftMs <= 0 {
+
+		// 対応中(先頭)だけでなく**待機中の客も**我慢が減る。
+		// これが「忙しさ」の表現で、行列を溜めること自体のコストになる
+		// （先頭だけだと行列がいくら伸びてもペナルティが無い）。
+		//
+		// 属性で分岐しないこと（#29）。特定属性が離脱から漏れると、その客が
+		// 行列に居座って店が永久に詰まる。
+		//
+		// 離脱者は先に集める。processLeave が storeQueues を書き換えるため、
+		// 走査中に処理すると要素を飛ばす。
+		var left []proto.CustomerId
+		for _, cid := range q {
+			c := s.customers[cid]
+			if c == nil {
+				continue
+			}
+			c.patienceLeftMs -= effectiveDt
+			if c.patienceLeftMs <= 0 {
+				left = append(left, cid)
+			}
+		}
+
+		for _, cid := range left {
 			var died bool
-			out, died = s.processLeave(sid, q[0], out)
+			out, died = s.processLeave(sid, cid, out)
 			if died {
+				// 信用が尽きた時点で打ち切る。残りの客は脱落処理で
+				// まとめて restPool へ戻るので、ここで二重に信用を削らない。
 				collapsed = append(collapsed, st)
+				break
 			}
 		}
 	}
@@ -527,12 +583,7 @@ func (s *Session) stepNormalize(out []Outbound) []Outbound {
 	}
 
 	for _, e := range alive {
-		out = append(out, to(e.store.id, proto.EvaluationUpdate{
-			EvalRaw:    s.evalScore(e.store),
-			Normalized: e.store.evalNormalized,
-			Rank:       e.store.rank,
-			AliveCount: s.aliveCount,
-		}))
+		out = append(out, to(e.store.id, s.evaluationUpdate(e.store)))
 	}
 	return out
 }
@@ -571,10 +622,20 @@ func (s *Session) stepStorm(out []Outbound) []Outbound {
 	if s.stormTickCounter == warnAt && !s.stormWarnSent {
 		s.stormWarnSent = true
 		remaining := sp.IntervalTicks - s.stormTickCounter
-		out = append(out, broadcastMsg(proto.ForcedEliminationWarning{
-			UntilTick:    remaining,
-			ThresholdPct: sp.ThresholdPct,
-		}))
+
+		// selfAtRisk は店ごとに異なるので broadcast できない（宛先別に配る）。
+		// 「今 storm が起きたら淘汰される集合」を淘汰本体と同じロジックで求める。
+		atRisk := s.cullTargets()
+		for _, sid := range s.order {
+			if !s.stores[sid].alive {
+				continue
+			}
+			out = append(out, to(sid, proto.ForcedEliminationWarning{
+				UntilTick:    remaining,
+				ThresholdPct: sp.ThresholdPct,
+				SelfAtRisk:   atRisk[sid],
+			}))
+		}
 	}
 
 	if s.stormTickCounter < sp.IntervalTicks {
@@ -592,7 +653,11 @@ func (s *Session) stepStorm(out []Outbound) []Outbound {
 	return out
 }
 
-func (s *Session) executeCull(out []Outbound) []Outbound {
+// cullCandidates は「今 storm が起きたら淘汰される店」を弱い順に返す。
+//
+// 予告(selfAtRisk)と実行(executeCull)で別々に判定すると、予告が嘘になったり
+// 「警告が出ていないのに落ちる」が起きる。両者はこの1関数を共有する。
+func (s *Session) cullCandidates() []*storeState {
 	sp := s.params.Storm
 
 	alive := make([]*storeState, 0, s.aliveCount)
@@ -602,7 +667,7 @@ func (s *Session) executeCull(out []Outbound) []Outbound {
 		}
 	}
 	if len(alive) <= 1 {
-		return out
+		return nil
 	}
 
 	cullCount := int(float64(len(alive))*sp.ThresholdPct + 0.999999)
@@ -614,9 +679,27 @@ func (s *Session) executeCull(out []Outbound) []Outbound {
 	}
 
 	sortStoresByWeakest(alive)
-	culled := alive[:cullCount]
+	return alive[:cullCount]
+}
 
-	// 淘汰対象の中での順位も、自滅と同じ総合判定で決める。
+// cullTargets は淘汰対象の店IDの集合（予告の selfAtRisk 用）。
+func (s *Session) cullTargets() map[PlayerId]bool {
+	targets := s.cullCandidates()
+	m := make(map[PlayerId]bool, len(targets))
+	for _, st := range targets {
+		m[st.id] = true
+	}
+	return m
+}
+
+func (s *Session) executeCull(out []Outbound) []Outbound {
+	// 対象の選定は予告(selfAtRisk)と同じ関数を使う。ここがズレると予告が嘘になる。
+	culled := s.cullCandidates()
+	if len(culled) == 0 {
+		return out
+	}
+
+	// 淘汰対象の中での順位は、自滅と同じ総合判定で決める。
 	sortWeakestFirst(culled)
 
 	for i := 0; i < len(culled); i++ {
@@ -791,11 +874,12 @@ func (s *Session) admitCustomer(cid proto.CustomerId, store PlayerId) (Outbound,
 	}
 	c.keystrokeTotal = keystrokes
 	return to(store, proto.CustomerView{
-		CustomerId:    cid,
-		Attribute:     c.attribute,
-		OrderCount:    c.orderCount,
-		Words:         words,
-		PatienceMaxMs: c.patienceMaxMs,
+		CustomerId:                cid,
+		Attribute:                 c.attribute,
+		OrderCount:                c.orderCount,
+		Words:                     words,
+		PatienceMaxMs:             c.patienceMaxMs,
+		PatienceStartedAtServerMs: c.patienceStartedAtMs,
 	}), true
 }
 
@@ -810,6 +894,8 @@ func (s *Session) assignCustomer(cid proto.CustomerId, store PlayerId) {
 	s.storeQueues[store] = append(s.storeQueues[store], cid)
 	c.assignedStore = &store
 	c.patienceLeftMs = c.patienceMaxMs
+	// 我慢は行列に入った瞬間から減る（待たせること自体がコスト）。
+	c.patienceStartedAtMs = s.elapsedMs
 }
 
 func (s *Session) releaseToRest(cid proto.CustomerId) {
@@ -865,10 +951,8 @@ func (s *Session) publicParams() proto.GameParametersPublicSubset {
 		MaxStores:   len(s.order),
 		// 順位バーに「淘汰圏」の帯を常時描くために配る（既存の storm 設定をそのまま公開）。
 		StormThresholdPct: s.params.Storm.ThresholdPct,
-		// TODO(tako-K): 終盤/最終盤の演出切替しきい値。対応する GameParameters の項目は
-		// tako-K で定義する。それまでは 0（クライアントは演出切替を行わない）。
-		FinalStageAliveThreshold: 0,
-		FinalRushAliveThreshold:  0,
+		FinalStageAliveThreshold: s.params.Presentation.FinalStageAliveThreshold,
+		FinalRushAliveThreshold:  s.params.Presentation.FinalRushAliveThreshold,
 	}
 }
 
