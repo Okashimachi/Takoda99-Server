@@ -182,8 +182,23 @@ type Connection interface {
 ```
 - 実装：coder/websocket（本番）／InMemory（Bot・負荷検証）。**Bot も人間も同じ Connection**として room から区別しない（IsBot はプレイヤー属性）。
 - `StatePublisher`：`StoreListUpdate` を間引いて配信。差し替え可能（フル配信⇔間引き）。まずフル配信、負荷が見えてから間引き。
+- **`Send` は非同期**（送信キュー＋writeLoop）。room は単一 goroutine から全接続へ順に Send するため、
+  ここで実 I/O をすると半開接続1つで試合全体が止まる。キューが埋まった接続は切る（slow-consumer eviction）。
+  `Close` は残りを吐き切ってから閉じる（最終 `MatchEnd` を落とさないため）。
 
 **matchmaking**：待機プール→編成→session/room を生成し開始。定員不足は Bot 補完。
+
+### 切断時の扱い（#40・自然減衰に任せる）
+
+切断専用の機構は持たない。切断した店は `OrderServed` を送らなくなるので、
+**行列の客が我慢ゲージ切れで離脱 → 信用減 → 0 で `SelfCollapse`** という既存の経済モデルだけで自然に脱落する。
+
+- Bot 引き継ぎはしない（「切断すれば Bot が代わりに戦う」となり離脱のペナルティが消え、順位の公平性が崩れるため）。
+- 即時脱落もしない（一時的な回線断で即死すると再接続の余地がなくなるため）。
+- session は切断を認識しない（コアを純粋に保つ）。切断は transport / room の層で吸収する。
+
+これが成立する前提は「**切断が試合の進行を止めないこと**」。room は tick 駆動で接続に依存せず、
+`readConn` は `Receive()` のクローズで抜け、`Send` は非同期でブロックしない。
 
 ---
 
