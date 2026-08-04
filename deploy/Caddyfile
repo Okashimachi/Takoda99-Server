@@ -7,11 +7,13 @@
 #   sudo systemctl reload caddy
 #
 # 事前に必要なこと:
-#   - ドメインの A レコードを VM の外部IP（静的に予約したもの）へ向ける
-#   - VM のファイアウォールで 80/443 を開ける（80 は証明書の取得に要る）
-#   - サーバー本体は 8080 で listen したまま外部公開しない
+#   - FreeDNS(afraid.org) 等で takoda99.mooo.com を取り、VM の【静的】外部IPへ向ける
+#   - VM 作成時に「HTTPトラフィックを許可」「HTTPSトラフィックを許可」へチェック（80/443）
+#     80 は Let's Encrypt の取得に要るので閉じないこと
+#   - サーバー本体は 8080 で listen したまま、外部には公開しない
+#
+# Textro99 とは別ドメイン・別VMにする（同居させると 1GB/0.25vCPU を奪い合う）。
 
-# TODO: 実際に使うドメインへ差し替える。
-takoda99.example.com {
+takoda99.mooo.com {
 	reverse_proxy localhost:8080
 }
