@@ -1354,3 +1354,129 @@ func TestAdmitCustomer_CarriesPatienceStart(t *testing.T) {
 		t.Fatalf("起点=%d, want 4200", cv.PatienceStartedAtServerMs)
 	}
 }
+
+// ── 我慢ゲージのタイムアウトを全属性で保証する（#29）──
+//
+// Textro #78 の類型: 種別で時間切れ判定を分岐した結果、一部の種別がタイムアウトから
+// 漏れ、キューの先頭が永遠に消化されず固まった。
+//
+// Takoda の相当機構は「客の我慢ゲージ → CustomerLeft / 信用減」。属性ごとに離脱の
+// 発火可否を分岐すると、漏れた属性の客が行列に居座って店の対応が永久に止まる。
+// 属性差は「減算量やペナルティ量」で表現し、**離脱が起きうること自体は全属性で不変**。
+
+// 全4属性が我慢切れで離脱し、信用が減り、行列が次へ進む。
+func TestStepPatience_AllAttributesTimeOut(t *testing.T) {
+	attrs := []proto.CustomerAttribute{
+		proto.AttrNormal, proto.AttrBonus, proto.AttrClaimer, proto.AttrBuzz,
+	}
+
+	for _, attr := range attrs {
+		t.Run(string(attr), func(t *testing.T) {
+			s := newTestSession(2)
+			s.state = Running
+			s.params.Credit.InitialLife = 10 // 脱落させずに離脱だけを見る
+			store := s.order[0]
+			s.stores[store].creditLife = 10
+
+			stuck := proto.CustomerId("stuck")
+			next := proto.CustomerId("next")
+			placeAssigned(s, stuck, store, attr, 1, 5)
+			placeAssigned(s, next, store, proto.AttrNormal, 1, 5)
+
+			lifeBefore := s.stores[store].creditLife
+
+			// この属性の我慢時間を超えて進める。
+			out := s.stepPatience(s.customers[stuck].patienceMaxMs+1, nil)
+
+			// 1) CustomerLeft が発火する
+			leftIDs := map[proto.CustomerId]bool{}
+			for _, o := range out {
+				if cl, ok := o.Msg.(proto.CustomerLeft); ok {
+					leftIDs[cl.CustomerId] = true
+				}
+			}
+			if !leftIDs[stuck] {
+				t.Fatalf("%s が離脱しない（この属性がタイムアウトから漏れている）", attr)
+			}
+
+			// 2) 信用が減る
+			if s.stores[store].creditLife >= lifeBefore {
+				t.Fatalf("%s の離脱で信用が減っていない: before=%d after=%d",
+					attr, lifeBefore, s.stores[store].creditLife)
+			}
+
+			// 3) 行列に居座らない（たべたべエリアへ戻る）
+			for _, cid := range s.storeQueues[store] {
+				if cid == stuck {
+					t.Fatalf("%s が離脱後も行列に残っている: %v", attr, s.storeQueues[store])
+				}
+			}
+			if s.customers[stuck].assignedStore != nil {
+				t.Fatalf("%s の assignedStore がクリアされていない", attr)
+			}
+		})
+	}
+}
+
+// 特殊属性が行列先頭にいても、店が詰まらない。
+//
+// 「先頭の特殊属性だけ離脱しない」実装だと、後ろの客が永久に対応されず
+// その店だけ試合から取り残される（Textro #78 の詰まり）。
+func TestStepPatience_SpecialAttributeDoesNotBlockQueue(t *testing.T) {
+	for _, attr := range []proto.CustomerAttribute{proto.AttrBonus, proto.AttrClaimer, proto.AttrBuzz} {
+		t.Run(string(attr), func(t *testing.T) {
+			s := newTestSession(2)
+			s.state = Running
+			s.params.Credit.InitialLife = 10
+			store := s.order[0]
+			s.stores[store].creditLife = 10
+
+			// 先頭に特殊属性、後ろに通常客。
+			head := proto.CustomerId("head-" + string(attr))
+			behind := proto.CustomerId("behind")
+			placeAssigned(s, head, store, attr, 1, 5)
+			placeAssigned(s, behind, store, proto.AttrNormal, 1, 5)
+
+			// 十分に時間を進めれば、どちらも離脱して行列は空になる。
+			s.stepPatience(999999, nil)
+
+			if len(s.storeQueues[store]) != 0 {
+				t.Fatalf("%s が先頭のとき行列が詰まった: %v", attr, s.storeQueues[store])
+			}
+		})
+	}
+}
+
+// 属性ごとの離脱ペナルティ（信用減少量）が LeaveLoss どおりに効く。
+// 「発火の有無」ではなく「ペナルティ量」で属性差を表現する、という設計の確認。
+func TestProcessLeave_PenaltyDiffersByAttribute(t *testing.T) {
+	loss := LeaveLoss{Normal: 1, Bonus: 2, Claimer: 3, Buzz: 4}
+	cases := []struct {
+		attr proto.CustomerAttribute
+		want int
+	}{
+		{proto.AttrNormal, 1},
+		{proto.AttrBonus, 2},
+		{proto.AttrClaimer, 3},
+		{proto.AttrBuzz, 4},
+	}
+	for _, c := range cases {
+		t.Run(string(c.attr), func(t *testing.T) {
+			s := newTestSession(2)
+			s.state = Running
+			s.params.Credit.LeaveLoss = loss
+			s.params.Credit.InitialLife = 100
+			store := s.order[0]
+			s.stores[store].creditLife = 100
+
+			cid := proto.CustomerId("c")
+			placeAssigned(s, cid, store, c.attr, 1, 5)
+			s.stepPatience(s.customers[cid].patienceMaxMs+1, nil)
+
+			got := 100 - s.stores[store].creditLife
+			if got != c.want {
+				t.Fatalf("%s の信用減=%d, want %d", c.attr, got, c.want)
+			}
+		})
+	}
+}
