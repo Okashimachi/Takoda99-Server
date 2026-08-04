@@ -39,10 +39,12 @@ type GameParameters struct {
 }
 
 // SessionParams: 試合ループの調整値。tick 周期・状態配信間隔もハードコードせずここで持つ。
+//
+// 制限時間の項目は持たない。試合の終了条件は「生存店=1」のみで、決着は storm（下位淘汰）が
+// 保証する（proto v0.3.0 で matchTimeLimitMs を契約から削除）。復活させないこと。
 type SessionParams struct {
 	TickIntervalMs    int `json:"tickIntervalMs"`
 	PublishIntervalMs int `json:"publishIntervalMs"`
-	MatchTimeLimitMs  int `json:"matchTimeLimitMs"`
 }
 
 // MatchingParams: マッチング（試合前）。minPlayers は当日運用で下げられるよう可変性が重要。
@@ -194,7 +196,6 @@ func DefaultParameters() GameParameters {
 		Session: SessionParams{
 			TickIntervalMs:    150,
 			PublishIntervalMs: 250,
-			MatchTimeLimitMs:  0,
 		},
 		Matching: MatchingParams{
 			MinPlayers:       20,

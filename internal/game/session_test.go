@@ -1,8 +1,10 @@
 package game
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/rand"
+	"strings"
 	"testing"
 
 	"takoda99/internal/proto"
@@ -1078,5 +1080,85 @@ func TestWeakerForRank_Order(t *testing.T) {
 	x, y := mk("a", 1, 0.5, 5, 5), mk("b", 1, 0.5, 5, 5)
 	if weakerForRank(x, y) == weakerForRank(y, x) {
 		t.Fatal("同値でも決定的な順序が付くべき")
+	}
+}
+
+// ── proto v0.3.0 追随（#33）──
+
+// summaries() は脱落店にだけ finalRank を入れる。
+//
+// 生存店に 0 を入れて送ると「順位0」という存在しない順位をクライアントに渡すことになる。
+// 契約側は omitempty つきポインタなので、nil のままなら JSON にキーごと出ない。
+func TestSummaries_FinalRankOnlyForEliminated(t *testing.T) {
+	s := newTestSession(3)
+	s.state = Running
+
+	// s-2 だけ脱落済みにする。
+	dead := s.stores[PlayerId("s-2")]
+	dead.alive = false
+	dead.finalRank = 3
+
+	for _, sum := range s.summaries() {
+		switch sum.StoreId {
+		case "s-2":
+			if sum.FinalRank == nil {
+				t.Fatal("脱落店に finalRank が入っていない")
+			}
+			if *sum.FinalRank != 3 {
+				t.Fatalf("finalRank=%d, want 3", *sum.FinalRank)
+			}
+		default:
+			if sum.FinalRank != nil {
+				t.Fatalf("生存店 %s に finalRank が入っている: %d", sum.StoreId, *sum.FinalRank)
+			}
+		}
+	}
+
+	// 実際の JSON にもキーが出ないことを確認する。
+	alive := s.summaries()[0]
+	b, err := json.Marshal(alive)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(b), "finalRank") {
+		t.Fatalf("生存店の JSON に finalRank キーが出ている: %s", b)
+	}
+}
+
+// 公開パラメータに制限時間が無く、淘汰しきい値が配られる（proto v0.3.0）。
+func TestPublicParams_NoTimeLimitAndHasStormThreshold(t *testing.T) {
+	s := newTestSession(3)
+	s.params.Storm.ThresholdPct = 0.15
+
+	p := s.publicParams()
+	if p.StormThresholdPct != 0.15 {
+		t.Fatalf("stormThresholdPct=%v, want 0.15", p.StormThresholdPct)
+	}
+	if p.MaxStores != 3 || p.InitialLife != s.params.Credit.InitialLife {
+		t.Fatalf("公開パラメータが不正: %+v", p)
+	}
+
+	b, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(b), "matchTimeLimitMs") {
+		t.Fatalf("公開パラメータに matchTimeLimitMs が残っている: %s", b)
+	}
+}
+
+// 試合は生存店=1 でのみ終わる。経過時間では終わらない（制限時間は廃止済み）。
+func TestCheckFinish_NeverEndsOnElapsedTime(t *testing.T) {
+	s := newTestSession(3)
+	s.state = Running
+
+	// 十分に長い時間を進めても、生存店が2以上なら終了しない。
+	for i := 0; i < 500; i++ {
+		s.elapsedMs += 1000
+		s.checkFinish(nil)
+		if s.state == Finished {
+			t.Fatalf("経過時間で試合が終了した（制限時間は廃止済み）: elapsedMs=%d aliveCount=%d",
+				s.elapsedMs, s.aliveCount)
+		}
 	}
 }
