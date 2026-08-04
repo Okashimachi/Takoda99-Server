@@ -140,12 +140,18 @@ curl http://localhost:8080/healthz
 
 DNS が反映されてから:
 
+GCE の Ubuntu イメージは最小構成で **`gnupg` が入っていない**。先に入れること
+（無いと鍵を変換できず、リポジトリが未署名扱いになって apt が拒否する）。
+`debian-keyring` / `debian-archive-keyring` は Debian 用なので Ubuntu では不要。
+
 ```bash
-sudo apt-get install -y debian-keyring debian-archive-keyring apt-transport-https
+sudo apt-get update && sudo apt-get install -y gnupg curl
+```
+
+```bash
 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
-sudo apt-get update
-sudo apt-get install -y caddy
+sudo apt-get update && sudo apt-get install -y caddy
 ```
 
 ```bash

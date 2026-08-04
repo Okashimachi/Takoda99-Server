@@ -20,7 +20,9 @@ ExecStart=/opt/takoda99/server --mode match
 WorkingDirectory=/opt/takoda99
 
 # 秘密はここから読む（git に入れない。権限600・所有者root）。
-EnvironmentFile=/etc/takoda99.env
+# 先頭の "-" は「無ければ無視して起動する」の意味。サーバーは DATABASE_URL が無くても
+# 内蔵デフォルトで動く設計なので、env ファイル未作成でサービスごと起動不能にしない。
+-EnvironmentFile=/etc/takoda99.env
 
 # 一斉接続で小さい alloc が大量に出るため GC のトリガ間隔を広げる（Plan-09）。
 Environment=GOGC=200
