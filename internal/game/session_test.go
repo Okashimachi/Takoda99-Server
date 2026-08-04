@@ -1162,3 +1162,123 @@ func TestCheckFinish_NeverEndsOnElapsedTime(t *testing.T) {
 		}
 	}
 }
+
+// ── proto v0.3.0 値算出（#64）──
+
+// 星は rank から一意に決まる。1位=5.0 / 最下位=0.0 / 中位=2.5。
+func TestStarRating_MapsRankToStars(t *testing.T) {
+	s := newTestSession(99)
+
+	cases := []struct {
+		rank int
+		want float64
+	}{
+		{1, 5.0},
+		{99, 0.0},
+		{50, 2.5},
+	}
+	for _, c := range cases {
+		st := s.stores[s.order[0]]
+		st.rank = c.rank
+		if got := s.starRating(st); got != c.want {
+			t.Fatalf("rank=%d → star=%v, want %v", c.rank, got, c.want)
+		}
+	}
+
+	// rank 未確定(0)は 0 を返す（星が跳ね上がらない）。
+	st := s.stores[s.order[0]]
+	st.rank = 0
+	if got := s.starRating(st); got != 0 {
+		t.Fatalf("rank未確定は0のはず: %v", got)
+	}
+}
+
+// starDelta は前回配信時からの増減。
+func TestEvaluationUpdate_StarDelta(t *testing.T) {
+	s := newTestSession(99)
+	st := s.stores[s.order[0]]
+
+	st.rank = 99 // 最下位 → 星0
+	first := s.evaluationUpdate(st)
+	if first.StarRating != 0 || first.StarDelta != 0 {
+		t.Fatalf("初回: star=%v delta=%v, want 0/0", first.StarRating, first.StarDelta)
+	}
+
+	st.rank = 1 // 首位へ急上昇 → 星5
+	second := s.evaluationUpdate(st)
+	if second.StarRating != 5 {
+		t.Fatalf("star=%v, want 5", second.StarRating)
+	}
+	if second.StarDelta != 5 {
+		t.Fatalf("delta=%v, want 5（0→5の増分）", second.StarDelta)
+	}
+
+	// 変化なしなら delta は0。
+	third := s.evaluationUpdate(st)
+	if third.StarDelta != 0 {
+		t.Fatalf("変化なしの delta=%v, want 0", third.StarDelta)
+	}
+}
+
+// 予告の selfAtRisk は、実際に淘汰される店だけ true になる。
+//
+// 予告と実行で判定がズレると「警告が出ていないのに落ちる」が起きるため、
+// 同じ集合になることをここで固定する。
+func TestForcedEliminationWarning_SelfAtRiskMatchesCull(t *testing.T) {
+	s := newTestSession(10)
+	s.state = Running
+	s.params.Storm.ThresholdPct = 0.2 // 10店の20% = 2店が対象
+
+	// 評価に差を付ける（s-1 が最弱、s-10 が最強）。
+	for i, sid := range s.order {
+		s.stores[sid].evalNormalized = float64(i) / 9.0
+		s.stores[sid].rank = 10 - i
+	}
+
+	atRisk := s.cullTargets()
+	if len(atRisk) != 2 {
+		t.Fatalf("淘汰対象は2店のはず: %d店 %v", len(atRisk), atRisk)
+	}
+	// 最弱2店（s-1, s-2）が対象。
+	for _, want := range []PlayerId{"s-1", "s-2"} {
+		if !atRisk[want] {
+			t.Fatalf("%s が対象に入っていない: %v", want, atRisk)
+		}
+	}
+	if atRisk["s-10"] {
+		t.Fatal("最強の s-10 が対象に入っている")
+	}
+
+	// 実際に淘汰を実行して、同じ集合が落ちることを確認する。
+	out := s.executeCull(nil)
+	eliminated := map[PlayerId]bool{}
+	for _, o := range out {
+		if se, ok := o.Msg.(proto.StoreEliminated); ok {
+			eliminated[se.StoreId] = true
+		}
+	}
+	if len(eliminated) != len(atRisk) {
+		t.Fatalf("予告と実行で対象数が違う: 予告=%d 実行=%d", len(atRisk), len(eliminated))
+	}
+	for sid := range atRisk {
+		if !eliminated[sid] {
+			t.Fatalf("予告された %s が実際には落ちていない", sid)
+		}
+	}
+}
+
+// 演出しきい値が公開パラメータに載る（既定値）。
+func TestPublicParams_PresentationThresholds(t *testing.T) {
+	s := newTestSession(3)
+	p := s.publicParams()
+	def := DefaultParameters().Presentation
+	if p.FinalStageAliveThreshold != def.FinalStageAliveThreshold {
+		t.Fatalf("finalStageAliveThreshold=%d, want %d", p.FinalStageAliveThreshold, def.FinalStageAliveThreshold)
+	}
+	if p.FinalRushAliveThreshold != def.FinalRushAliveThreshold {
+		t.Fatalf("finalRushAliveThreshold=%d, want %d", p.FinalRushAliveThreshold, def.FinalRushAliveThreshold)
+	}
+	if def.FinalStageAliveThreshold == 0 || def.FinalRushAliveThreshold == 0 {
+		t.Fatal("既定値が0のまま（クライアントが演出切替できない）")
+	}
+}

@@ -148,6 +148,9 @@ func backfillDefaults(gp *game.GameParameters, def game.GameParameters) {
 	if gp.Patience == (game.PatienceParams{}) {
 		gp.Patience = def.Patience
 	}
+	if gp.Presentation == (game.PresentationParams{}) {
+		gp.Presentation = def.Presentation
+	}
 	if gp.Bot == (game.BotParams{}) {
 		gp.Bot = def.Bot
 	}

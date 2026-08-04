@@ -35,6 +35,7 @@ type GameParameters struct {
 	Storm        StormParams        `json:"storm"`
 	Distribution DistributionParams `json:"distribution"`
 	Patience     PatienceParams     `json:"patience"`
+	Presentation PresentationParams `json:"presentation"`
 	Bot          BotParams          `json:"bot"`
 }
 
@@ -150,6 +151,18 @@ type PatienceParams struct {
 	AlertMs int     `json:"alertMs"`
 }
 
+// PresentationParams: クライアントの演出切替に使うしきい値。ゲーム進行には影響しない
+// （サーバーは判定に使わず、公開パラメータとして配るだけ）。
+//
+// フェーズ(PhaseParams)とは別物。フェーズは我慢短縮・火力・客属性の解禁といった
+// **ルール**を変えるが、こちらは見た目の切り替えだけを担う。
+type PresentationParams struct {
+	// FinalStageAliveThreshold は終盤演出へ切り替える生存店数。
+	FinalStageAliveThreshold int `json:"finalStageAliveThreshold"`
+	// FinalRushAliveThreshold は最終盤演出へ切り替える生存店数。
+	FinalRushAliveThreshold int `json:"finalRushAliveThreshold"`
+}
+
 // BotParams: CPU（Bot）の強さ。
 type BotParams struct {
 	BaseAccuracy    float64 `json:"baseAccuracy"`
@@ -251,6 +264,10 @@ func DefaultParameters() GameParameters {
 		Patience: PatienceParams{
 			LateMul: 0.6,
 			AlertMs: 2000,
+		},
+		Presentation: PresentationParams{
+			FinalStageAliveThreshold: 20,
+			FinalRushAliveThreshold:  10,
 		},
 		Bot: BotParams{
 			BaseAccuracy:    0.85,
