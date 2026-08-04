@@ -1,5 +1,5 @@
-github.com/Okashimachi/Takoda99-Proto v0.2.0 h1:ZHCKSdIAcCb8IaL5kvtPLO5O/8c+B/lyeEYdoKhzfU4=
-github.com/Okashimachi/Takoda99-Proto v0.2.0/go.mod h1:H3H55ecCc9pGkYrtOiUz/BA3E5Oy9bQ7wCmxfS8qT5A=
+github.com/Okashimachi/Takoda99-Proto v0.2.1 h1:T6cTIZvp1Ik0V2xhQawakLWZz3Gru9tVU9LNe7quK7Q=
+github.com/Okashimachi/Takoda99-Proto v0.2.1/go.mod h1:H3H55ecCc9pGkYrtOiUz/BA3E5Oy9bQ7wCmxfS8qT5A=
 github.com/coder/websocket v1.8.15 h1:6B2JPeOGlpff2Uz6vOEH1Vzpi0iUz20A+lPVhPHtNUA=
 github.com/coder/websocket v1.8.15/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
