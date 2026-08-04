@@ -1,20 +1,19 @@
 # Render Blueprint。Render ダッシュボードで「New > Blueprint」からこのリポジトリを指定すると
 # 下記のサービスが作成される（Dockerfile でビルド）。
-# ※ free プランはスリープあり。本番前に Starter 以上へ（#72）。
 services:
   - type: web
-    name: textro99-server
+    name: takoda99-server
     runtime: docker
     dockerfilePath: ./Dockerfile
     plan: free
     healthCheckPath: /healthz
     autoDeploy: true
-    # 【一時】Webフロント単独結合テスト用に solo モードで起動（#56）。
-    # solo = /ws 接続ごとに「人間1＋Bot」で即試合開始 → 単独で MatchStart 以降を検証できる。
-    # ★本番（99人）前に必ずこの行を削除 or --mode match に戻す（#57）。
-    dockerCommand: /server --mode solo --bots 5
-    # （本番の既定は Dockerfile の CMD = --mode match）
-    # 調整値をリモート取得する場合は config-front の URL を渡す:
+    # 本番は --mode match（Dockerfile CMD の既定）。
+    # solo モード（/ws 接続ごとに「人間1＋Bot」で即試合）はローカル確認用。
     # envVars:
-    #   - key: CONFIG_URL
-    #     sync: false   # ダッシュボードで値を設定
+    #   - key: DATABASE_URL
+    #     sync: false
+    #   - key: CONFIG_ADMIN_TOKEN
+    #     sync: false
+    #   - key: CONFIG_FRONT_ORIGIN
+    #     sync: false
