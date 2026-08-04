@@ -5,10 +5,9 @@ import (
 	"testing"
 )
 
-// Noop は ResultStore を満たし、Save は常に nil。
-func TestNoop_SaveReturnsNil(t *testing.T) {
+func TestNoop_SaveMatchReturnsNil(t *testing.T) {
 	var s ResultStore = Noop{}
-	if err := s.Save(context.Background(), Result{MatchId: "m1", PlayerId: "a", Rank: 1}); err != nil {
-		t.Fatalf("Noop.Save は nil を返すべき: %v", err)
+	if err := s.SaveMatch(context.Background(), MatchResult{MatchId: "m1"}); err != nil {
+		t.Fatalf("Noop.SaveMatch は nil を返すべき: %v", err)
 	}
 }
