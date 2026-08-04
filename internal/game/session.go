@@ -840,23 +840,35 @@ func (s *Session) summaries() []proto.StoreSummary {
 	out := make([]proto.StoreSummary, 0, len(s.order))
 	for _, sid := range s.order {
 		st := s.stores[sid]
-		out = append(out, proto.StoreSummary{
+		sum := proto.StoreSummary{
 			StoreId:        st.id,
 			DisplayName:    st.name,
 			EvalNormalized: st.evalNormalized,
 			Rank:           st.rank,
 			CreditLife:     st.creditLife,
 			Alive:          st.alive,
-		})
+		}
+		// finalRank は脱落済みの店だけに入れる（生存店では JSON にキーごと出さない）。
+		// 0 を送ると「順位0」という存在しない順位をクライアントに渡すことになる。
+		if !st.alive && st.finalRank > 0 {
+			fr := st.finalRank
+			sum.FinalRank = &fr
+		}
+		out = append(out, sum)
 	}
 	return out
 }
 
 func (s *Session) publicParams() proto.GameParametersPublicSubset {
 	return proto.GameParametersPublicSubset{
-		MatchTimeLimitMs: s.params.Session.MatchTimeLimitMs,
-		InitialLife:      s.params.Credit.InitialLife,
-		MaxStores:        len(s.order),
+		InitialLife: s.params.Credit.InitialLife,
+		MaxStores:   len(s.order),
+		// 順位バーに「淘汰圏」の帯を常時描くために配る（既存の storm 設定をそのまま公開）。
+		StormThresholdPct: s.params.Storm.ThresholdPct,
+		// TODO(tako-K): 終盤/最終盤の演出切替しきい値。対応する GameParameters の項目は
+		// tako-K で定義する。それまでは 0（クライアントは演出切替を行わない）。
+		FinalStageAliveThreshold: 0,
+		FinalRushAliveThreshold:  0,
 	}
 }
 
