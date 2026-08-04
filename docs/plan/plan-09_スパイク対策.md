@@ -1,5 +1,9 @@
 # Plan-09: マッチングスパイク対策
 
+> ⚠ **§2.2「Render インスタンスサイズ」と §2.3 の render.yaml 例は無効**。
+> ホスティングは GCP Compute Engine（e2-micro）に変更済み。`GOGC=200` は
+> `deploy/takoda99.service` の `Environment=` で設定する。正典は `docs/deploy.md`。
+
 > **目的**: ハッカソン会場で99人が一斉に接続する瞬間のスパイクに耐えるようにする。
 > **対応issue**: 新規（#45）
 > **依存**: Plan-01（基盤移行）

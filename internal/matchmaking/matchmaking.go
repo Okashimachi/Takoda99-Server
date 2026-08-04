@@ -153,8 +153,14 @@ func (m *Matchmaker) Run(ctx context.Context) {
 			case evLeave:
 				pool = removePlayer(pool, ev.id)
 			}
-			update(true)
-			
+			// ここで強制ブロードキャストしない。会場で99人が一斉に参加すると
+			// 「1 join ごとにプール全員へ配信」で O(N^2)（99人なら約4,900通）の
+			// バーストになり、送信キューを溢れさせて待機者を切断してしまう。
+			// 人数の定期通知は下の ticker（1秒）に任せ、ここではカウントダウンの
+			// 開始/中断のような状態変化があった時だけ配信する（update 内の changed）。
+			update(false)
+
+
 		case <-ticker.C:
 			if len(pool) > 0 {
 				update(true)

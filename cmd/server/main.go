@@ -88,13 +88,21 @@ func main() {
 		}
 	})
 
+	limiter := newConnLimiter(maxConcurrentConnections)
+
 	switch *mode {
 	case "solo":
 		http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-			conn, err := transport.Accept(w, r, wsAccept)
-			if err != nil {
+			if !limiter.acquire() {
+				http.Error(w, "too many connections", http.StatusServiceUnavailable)
 				return
 			}
+			conn, err := transport.Accept(w, r, wsAccept)
+			if err != nil {
+				limiter.release()
+				return
+			}
+			limiter.releaseOnDisconnect(conn)
 			id := nextID()
 			name := awaitJoinName(conn, joinTimeout)
 			players := []matchmaking.Player{{Id: id, Conn: conn, Name: name}}
@@ -126,14 +134,23 @@ func main() {
 		})
 		go mm.Run(ctx)
 		http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-			conn, err := transport.Accept(w, r, wsAccept)
-			if err != nil {
+			if !limiter.acquire() {
+				http.Error(w, "too many connections", http.StatusServiceUnavailable)
 				return
 			}
+			conn, err := transport.Accept(w, r, wsAccept)
+			if err != nil {
+				limiter.release()
+				return
+			}
+			limiter.releaseOnDisconnect(conn)
 			id := nextID()
 			name := awaitJoinName(conn, joinTimeout)
-			log.Printf("match: 参加 %s name=%q", id, name)
+			log.Printf("match: 参加 %s name=%q (active=%d)", id, name, limiter.active())
 			mm.Join(matchmaking.Player{Id: id, Conn: conn, Name: name})
+			// 待機中に切断されたらプールから外す（幽霊の待機者が WaitingCount を
+			// 水増しし、実体のない人数で試合が始まるのを防ぐ）。Join の後に張る。
+			leaveOnDisconnect(conn, mm, id)
 		})
 	}
 
@@ -261,4 +278,59 @@ func awaitJoinName(conn transport.Connection, timeout time.Duration) string {
 
 func idString(n int64) string {
 	return "p-" + strconv.FormatInt(n, 10)
+}
+
+// maxConcurrentConnections は同時 WebSocket 接続数の上限（99人＋再接続/観戦の余裕）。
+// ハッカソン会場の「せーの」で一斉接続が来た時に、受け付けすぎてメモリ・goroutine が
+// 破綻するのを防ぐための back-pressure（Plan-09）。
+const maxConcurrentConnections = 200
+
+// connLimiter は同時 WebSocket 接続数を制限する。
+//
+// 枠は「接続の生存期間ぶん」保持し、実際に切断されたら返す（＝真の同時接続数キャップ）。
+// upgrade 直後に返す実装だと瞬間的なハンドシェイク数しか見ないので、居座る接続に対して
+// 無防備になる。解放の検知には Connection.Done() を使う（Receive() を読むと room と
+// メッセージを奪い合うため）。
+type connLimiter struct {
+	sem chan struct{}
+}
+
+func newConnLimiter(max int) *connLimiter {
+	return &connLimiter{sem: make(chan struct{}, max)}
+}
+
+// acquire は枠を1つ取る。取れなければ false（ブロックしない）。
+func (cl *connLimiter) acquire() bool {
+	select {
+	case cl.sem <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+// release は枠を1つ返す。
+func (cl *connLimiter) release() { <-cl.sem }
+
+// active は現在の使用枠数（ログ・監視用）。
+func (cl *connLimiter) active() int { return len(cl.sem) }
+
+// releaseOnDisconnect は接続が死んだら枠を返す。
+func (cl *connLimiter) releaseOnDisconnect(conn transport.Connection) {
+	go func() {
+		<-conn.Done()
+		cl.release()
+	}()
+}
+
+// leaveOnDisconnect は接続が死んだら待機プールから外す。
+//
+// **必ず Join の後に呼ぶこと**。先に呼ぶと、切断が Join より早い場合に Leave が空振りし、
+// その後の Join が幽霊の待機者をプールへ残してしまう（WaitingCount が水増しされ、
+// 実体のない人数で試合が始まる）。Join の後なら、既に切れていても即 Leave が走って外れる。
+func leaveOnDisconnect(conn transport.Connection, mm *matchmaking.Matchmaker, id game.PlayerId) {
+	go func() {
+		<-conn.Done()
+		mm.Leave(id)
+	}()
 }

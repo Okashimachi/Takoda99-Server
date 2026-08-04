@@ -965,3 +965,118 @@ func TestCheckFinish_AllEliminatedSimultaneously(t *testing.T) {
 		t.Fatalf("out=%d want 2", len(out))
 	}
 }
+
+// ── 同時脱落のタイブレーク（総合判定）──
+
+// 同一tickで複数店が自滅した時、順位が店IDの並びでなく実力順になる。
+func TestStepPatience_SimultaneousCollapse_RankedByMerit(t *testing.T) {
+	s := newTestSession(4)
+	s.state = Running
+	s.params.Credit.InitialLife = 1
+	s.params.Credit.LeaveLoss = LeaveLoss{Normal: 1, Bonus: 1, Claimer: 1, Buzz: 2}
+
+	// s-1..s-3 を同時に自滅させる。s-4 は客を持たないので生き残る。
+	// 評価は s-1 が最強、s-3 が最弱。ID順（s-1,s-2,s-3）とは逆になるよう仕込む。
+	evals := map[PlayerId]float64{"s-1": 0.9, "s-2": 0.5, "s-3": 0.1}
+	for _, sid := range []PlayerId{"s-1", "s-2", "s-3"} {
+		s.stores[sid].creditLife = 1
+		s.stores[sid].evalNormalized = evals[sid]
+		cid := proto.CustomerId("c-" + string(sid))
+		placeAssigned(s, cid, sid, proto.AttrNormal, 1, 5)
+	}
+
+	out := s.stepPatience(99999, nil)
+
+	got := map[PlayerId]int{}
+	for _, o := range out {
+		if se, ok := o.Msg.(proto.StoreEliminated); ok {
+			got[se.StoreId] = se.FinalRank
+		}
+	}
+	if len(got) != 3 {
+		t.Fatalf("3店が脱落するはず: %v", got)
+	}
+	// 4店中3店脱落 → 弱い順に 4位,3位,2位。
+	want := map[PlayerId]int{"s-3": 4, "s-2": 3, "s-1": 2}
+	for sid, w := range want {
+		if got[sid] != w {
+			t.Fatalf("評価順に順位が付いていない: got=%v want=%v", got, want)
+		}
+	}
+	if !s.stores["s-4"].alive {
+		t.Fatal("客を持たない s-4 は生存しているはず")
+	}
+}
+
+// 生存店が全滅する tick でも、最強の1店は残して優勝者にする（バトロワ）。
+// 「優勝者なのに脱落理由が付く」状態を作らないこと。
+func TestStepPatience_AllCollapse_StrongestSurvivesAsWinner(t *testing.T) {
+	s := newTestSession(3)
+	s.state = Running
+	s.params.Credit.InitialLife = 1
+	s.params.Credit.LeaveLoss = LeaveLoss{Normal: 1, Bonus: 1, Claimer: 1, Buzz: 2}
+
+	evals := map[PlayerId]float64{"s-1": 0.2, "s-2": 0.8, "s-3": 0.5}
+	for sid, e := range evals {
+		s.stores[sid].creditLife = 1
+		s.stores[sid].evalNormalized = e
+		placeAssigned(s, proto.CustomerId("c-"+string(sid)), sid, proto.AttrNormal, 1, 5)
+	}
+
+	out := s.stepPatience(99999, nil)
+
+	elim := map[PlayerId]bool{}
+	for _, o := range out {
+		if se, ok := o.Msg.(proto.StoreEliminated); ok {
+			elim[se.StoreId] = true
+		}
+	}
+	if len(elim) != 2 {
+		t.Fatalf("最強の1店は残すので脱落は2店のはず: %v", elim)
+	}
+	if elim["s-2"] {
+		t.Fatal("最も評価の高い s-2 が脱落している（優勝者が残っていない）")
+	}
+	if s.aliveCount != 1 || !s.stores["s-2"].alive {
+		t.Fatalf("s-2 が生存しているはず: aliveCount=%d alive=%v", s.aliveCount, s.stores["s-2"].alive)
+	}
+
+	// checkFinish が正規の優勝者として扱う（脱落理由が付かない）。
+	out = s.checkFinish(nil)
+	if s.state != Finished {
+		t.Fatal("aliveCount=1 で試合が終了していない")
+	}
+	w := s.stores["s-2"]
+	if w.finalRank != 1 {
+		t.Fatalf("優勝者の finalRank=1 のはず: %d", w.finalRank)
+	}
+	if w.elimination != "" {
+		t.Fatalf("優勝者に脱落理由が付いている: %q", w.elimination)
+	}
+	_ = out
+}
+
+// 総合判定は残信用→評価→提供数→精度の順に見る（決定的であること）。
+func TestWeakerForRank_Order(t *testing.T) {
+	mk := func(id PlayerId, life int, norm float64, served int, accSum float64) *storeState {
+		return &storeState{id: id, creditLife: life, evalNormalized: norm,
+			served: servedStats{count: served, accuracySum: accSum}}
+	}
+	// 信用が少ない方が下位。
+	if !weakerForRank(mk("a", 1, 0.9, 100, 99), mk("b", 2, 0.1, 0, 0)) {
+		t.Fatal("残信用が少ない方が下位のはず")
+	}
+	// 信用が同じなら評価。
+	if !weakerForRank(mk("a", 1, 0.1, 100, 99), mk("b", 1, 0.9, 0, 0)) {
+		t.Fatal("評価が低い方が下位のはず")
+	}
+	// 信用・評価が同じなら提供数。
+	if !weakerForRank(mk("a", 1, 0.5, 3, 3), mk("b", 1, 0.5, 10, 10)) {
+		t.Fatal("提供数が少ない方が下位のはず")
+	}
+	// 全部同じでも id で決定的に順序が付く（揺れない）。
+	x, y := mk("a", 1, 0.5, 5, 5), mk("b", 1, 0.5, 5, 5)
+	if weakerForRank(x, y) == weakerForRank(y, x) {
+		t.Fatal("同値でも決定的な順序が付くべき")
+	}
+}

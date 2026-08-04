@@ -1,0 +1,17 @@
+# deploy/Caddyfile — TLS 終端とリバースプロキシ。
+#
+# ブラウザは https のページから ws:// に繋げないので wss:// が必須。
+# Caddy は Let's Encrypt の取得・更新を自動でやる（WebSocket の upgrade も素通し）。
+#
+#   sudo cp deploy/Caddyfile /etc/caddy/Caddyfile
+#   sudo systemctl reload caddy
+#
+# 事前に必要なこと:
+#   - ドメインの A レコードを VM の外部IP（静的に予約したもの）へ向ける
+#   - VM のファイアウォールで 80/443 を開ける（80 は証明書の取得に要る）
+#   - サーバー本体は 8080 で listen したまま外部公開しない
+
+# TODO: 実際に使うドメインへ差し替える。
+takoda99.example.com {
+	reverse_proxy localhost:8080
+}

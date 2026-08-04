@@ -183,7 +183,7 @@ internal/
 |------|------|
 | 言語 | Go |
 | WebSocket | coder/websocket（`github.com/coder/websocket`） |
-| ホスティング | Render（Web Service。本番は Starter 以上でスリープ無効化） |
+| ホスティング | **GCP Compute Engine（e2-micro）**。systemd 常駐 ＋ Caddy で TLS 終端。`docs/deploy.md` |
 | 調整パラメータ | Postgres + config-front（Next.js / Vercel）。`GameParameters` 経由で取得 |
 | **ライブ試合状態** | **メモリ（Goの構造体）**。DB/Redis に置かない |
 | 永続化 | **Postgres をゲームサーバーが所有**。設定・試合結果・BOT調整用データ |
