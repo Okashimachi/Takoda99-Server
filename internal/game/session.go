@@ -47,6 +47,10 @@ type customer struct {
 	orderCount     int
 	keystrokeTotal int
 	assignedStore  *PlayerId
+
+	// patienceStartedAtMs は我慢が減り始めたサーバー時刻（= 行列に入った時刻）。
+	// クライアントが受信遅延ぶんズレずにゲージを描くために配る。
+	patienceStartedAtMs int64
 }
 
 // servedStats は1店の提供集計（リザルト用）。
@@ -417,13 +421,36 @@ func (s *Session) stepPatience(dtMs int, out []Outbound) []Outbound {
 		if len(q) == 0 {
 			continue
 		}
-		head := s.customers[q[0]]
-		head.patienceLeftMs -= effectiveDt
-		if head.patienceLeftMs <= 0 {
+
+		// 対応中(先頭)だけでなく**待機中の客も**我慢が減る。
+		// これが「忙しさ」の表現で、行列を溜めること自体のコストになる
+		// （先頭だけだと行列がいくら伸びてもペナルティが無い）。
+		//
+		// 属性で分岐しないこと（#29）。特定属性が離脱から漏れると、その客が
+		// 行列に居座って店が永久に詰まる。
+		//
+		// 離脱者は先に集める。processLeave が storeQueues を書き換えるため、
+		// 走査中に処理すると要素を飛ばす。
+		var left []proto.CustomerId
+		for _, cid := range q {
+			c := s.customers[cid]
+			if c == nil {
+				continue
+			}
+			c.patienceLeftMs -= effectiveDt
+			if c.patienceLeftMs <= 0 {
+				left = append(left, cid)
+			}
+		}
+
+		for _, cid := range left {
 			var died bool
-			out, died = s.processLeave(sid, q[0], out)
+			out, died = s.processLeave(sid, cid, out)
 			if died {
+				// 信用が尽きた時点で打ち切る。残りの客は脱落処理で
+				// まとめて restPool へ戻るので、ここで二重に信用を削らない。
 				collapsed = append(collapsed, st)
+				break
 			}
 		}
 	}
@@ -847,11 +874,12 @@ func (s *Session) admitCustomer(cid proto.CustomerId, store PlayerId) (Outbound,
 	}
 	c.keystrokeTotal = keystrokes
 	return to(store, proto.CustomerView{
-		CustomerId:    cid,
-		Attribute:     c.attribute,
-		OrderCount:    c.orderCount,
-		Words:         words,
-		PatienceMaxMs: c.patienceMaxMs,
+		CustomerId:                cid,
+		Attribute:                 c.attribute,
+		OrderCount:                c.orderCount,
+		Words:                     words,
+		PatienceMaxMs:             c.patienceMaxMs,
+		PatienceStartedAtServerMs: c.patienceStartedAtMs,
 	}), true
 }
 
@@ -866,6 +894,8 @@ func (s *Session) assignCustomer(cid proto.CustomerId, store PlayerId) {
 	s.storeQueues[store] = append(s.storeQueues[store], cid)
 	c.assignedStore = &store
 	c.patienceLeftMs = c.patienceMaxMs
+	// 我慢は行列に入った瞬間から減る（待たせること自体がコスト）。
+	c.patienceStartedAtMs = s.elapsedMs
 }
 
 func (s *Session) releaseToRest(cid proto.CustomerId) {
