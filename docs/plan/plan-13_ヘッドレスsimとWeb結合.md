@@ -29,7 +29,7 @@
 |---|---|
 | `internal/game/session.go` | `NewSession` / `Start` / `Tick` / `Results` のシグネチャ |
 | `internal/app/app.go` | `Deps` / `RunMatch` / `NewBotPlayer` の組み立て方 |
-| `internal/bot/bot.go` | Bot の設定項目（打鍵速度・ミス率） |
+| `internal/bot/bot.go` | `bot.Config`（`BaseAccuracy` / `BaseElapsedMs` / 各 Jitter）。**1打鍵単位ではなく1注文単位**のモデル |
 | `internal/transport/inmemory.go` | `Pipe()` |
 | `internal/odai/pool.go` | `NewStaticPool()`（DB 無しで動くお題） |
 
@@ -100,9 +100,10 @@ func (d *dummyStore) accept(v proto.CustomerView, rng *rand.Rand) {
 }
 ```
 
-> **注意**: `CustomerView.Words` は文字列なので、正確な打鍵数はここでは分からない。
-> 概算で十分（バランスの傾向を見るのが目的）。厳密にしたい場合は `odai` の
-> `keystrokes()` を公開して使う。
+> **注意**: 打鍵数の算出は本来 **`reading`（読み）** から行う（`odai.Keystrokes(reading string) int`・公開済み）。
+> しかし `CustomerView.Words` は**表示テキストしか含まず `reading` が無い**ので、sim では正確な値を出せない。
+> ルーン数による概算で十分（バランスの傾向を見るのが目的）。
+> 厳密にしたいなら proto に reading を載せる必要があり、それは**契約変更＝要承認**なのでここではやらない。
 
 毎tick進めて、0 になったら報告:
 

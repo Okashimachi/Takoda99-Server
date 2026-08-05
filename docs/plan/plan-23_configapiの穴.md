@@ -88,26 +88,36 @@ func (s *WordStore) Delete(ctx context.Context, id int) error {
 		return err
 	}
 	if tag.RowsAffected() == 0 {
-		return ErrNotFound
+		return odai.ErrNotFound
 	}
 	return nil
 }
 ```
 
-`internal/store` ではなく configapi が参照できる場所にエラーを置く。
-`internal/odai` に置くと db → odai の依存が要る。**`internal/configapi` に定義して db から参照する**と
-依存が逆流するので、**`internal/db` に定義**して configapi が参照するのが素直:
+**エラーの置き場所は `internal/odai` 一択**。理由は depguard:
+
+```yaml
+# .golangci.yml — http-adapters-boundary
+files: ["**/internal/configapi/**"]
+deny:
+  - pkg: "takoda99/internal/db"
+    desc: "configapi は db 実装に依存しない。Store インターフェースを合成ルートが注入する。"
+```
+
+**`configapi` から `db` は import できない**（CI が落ちる）。
+一方 `configapi` も `db` も**既に `odai` に依存している**（`odai.WordEntry` を使う）ので、
+そこに置けば両者から参照できる。
 
 ```go
-// internal/db/words.go
-var ErrNotFound = errors.New("not found")
+// internal/odai/configurable.go
+var ErrNotFound = errors.New("odai: word not found")
 ```
 
 ハンドラ側:
 
 ```go
 if err := h.store.Delete(r.Context(), id); err != nil {
-	if errors.Is(err, db.ErrNotFound) {
+	if errors.Is(err, odai.ErrNotFound) {
 		http.Error(w, "word not found", http.StatusNotFound)
 		return
 	}
@@ -117,12 +127,10 @@ if err := h.store.Delete(r.Context(), id); err != nil {
 w.WriteHeader(http.StatusNoContent)
 ```
 
-> **依存の確認**: `configapi` は既に `odai` を import している（`odai.WordEntry`）。
-> `db` を import してよいか .golangci.yml の depguard を確認すること。
-> 弾かれる場合は、`WordStore` interface の隣（`configapi` 側）に
-> `var ErrWordNotFound = errors.New(...)` を定義し、db 側がそれを返す形にする
-> （db → configapi の依存になるので、これも要確認）。
-> **最も安全なのは `internal/odai` に `ErrNotFound` を置く**こと。両者とも既に odai に依存している。
+> **確認コマンド**: 実装後に必ず回す。depguard 違反は CI で弾かれる。
+> ```bash
+> golangci-lint run
+> ```
 
 ### テスト
 
@@ -332,20 +340,35 @@ CORS の許可メソッドにも追加:
 head.Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
 ```
 
-### 注意: `keystrokeCount` の再計算
+### 注意: `keystrokeCount` の再計算は **`reading`** から
 
-`text` を変えたのに `keystrokeCount` を変えないと、**打鍵数と実際の語がズレる**。
+`reading`（読み）を変えたのに `keystrokeCount` を変えないと、**打鍵数と実際の語がズレる**。
 評価の精度計算（`missCount / keystrokeTotal`）が狂う。
 
-- `text` が来て `keystrokeCount` が来ない場合は**サーバー側で再計算する**
-- `internal/odai` の打鍵数算出関数を使う
+**打鍵数は `text`（表示文字）ではなく `reading`（読み）から算出する**。
+既存コードが2箇所でそうしているので合わせること:
 
 ```go
-if p.Text != nil && p.KeystrokeCount == nil {
-	n := odai.Keystrokes(*p.Text)   // 未公開なら公開する
+// internal/db/words.go:117
+ks = odai.Keystrokes(e.Reading)
+
+// internal/configapi/words.go:173
+req.Words[i].KeystrokeCount = odai.Keystrokes(req.Words[i].Reading)
+```
+
+`odai.Keystrokes(reading string) int` は**既に公開済み**（`internal/odai/configurable.go:59`）。
+新たに公開する作業は不要。
+
+PATCH では:
+
+```go
+if p.Reading != nil && p.KeystrokeCount == nil {
+	n := odai.Keystrokes(*p.Reading)
 	p.KeystrokeCount = &n
 }
 ```
+
+`text` だけ変えた場合（誤字修正など）は打鍵数に影響しないので再計算しない。
 
 **これを忘れると静かに壊れる**ので、テストで固定する。
 
@@ -398,7 +421,8 @@ curl -i -X PATCH -H "X-Admin-Token: $TOKEN" -H "Content-Type: application/json" 
 - [ ] `PATCH /api/words/{id}` が動く（`X-Admin-Token` 必須）
 - [ ] nil のフィールドは変更されない
 - [ ] 未存在 id で 404
-- [ ] **`text` 更新時に `keystrokeCount` が再計算される**（テストで固定）
+- [ ] **`reading` 更新時に `keystrokeCount` が再計算される**（`text` のみの変更では再計算しない）
+- [ ] `golangci-lint run` が通る（configapi が db を import していない）
 - [ ] CORS の許可メソッドに `PATCH` が入っている
 
 **課題4**

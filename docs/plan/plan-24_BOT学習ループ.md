@@ -118,27 +118,55 @@ GROUP BY heat_level
 ORDER BY heat_level;
 ```
 
-### 生成物
+### 生成物 — **`bot.Config` に写せる形で出す**
 
-3段階の難易度帯を作る:
+ここが設計の要。既存の Bot は**1打鍵単位ではなく1注文単位**のモデルで動いている:
+
+```go
+// internal/bot/bot.go
+type Config struct {
+	BaseAccuracy    float64   // 精度 0..1
+	BaseElapsedMs   int       // 1注文あたりの所要ms
+	AccuracyJitter  float64
+	ElapsedJitterMs int
+}
+```
+
+したがって `msPerKey` / `missRate` のままではBotに流し込めない。
+**集計結果を `accuracy` と `elapsedMs` に変換して出す**:
+
+```
+accuracy  = 1 - miss_count / keystrokes
+elapsedMs = elapsed_ms                    （1注文の実測をそのまま）
+jitter    = 分位の幅（p75 - p25）から算出
+```
+
+3段階の難易度帯:
 
 | 帯 | 元にする分位 |
 |---|---|
-| 弱BOT | p75（遅い側） |
+| 弱BOT | p75（遅い・不正確側） |
 | 中BOT | p50 |
-| 強BOT | p25（速い側） |
+| 強BOT | p25（速い・正確側） |
 
 ```json
 {
   "generatedAt": "2026-08-10T12:00:00Z",
   "sampleSize": 4213,
   "profiles": {
-    "weak":   { "0": {"msPerKey": 320, "missRate": 0.12}, "5": {"msPerKey": 380, "missRate": 0.18} },
-    "normal": { "0": {"msPerKey": 210, "missRate": 0.06}, "5": {"msPerKey": 250, "missRate": 0.09} },
-    "strong": { "0": {"msPerKey": 140, "missRate": 0.02}, "5": {"msPerKey": 160, "missRate": 0.03} }
+    "weak":   { "0": {"baseAccuracy": 0.78, "baseElapsedMs": 4800, "accuracyJitter": 0.10, "elapsedJitterMs": 900},
+                "5": {"baseAccuracy": 0.71, "baseElapsedMs": 5600, "accuracyJitter": 0.12, "elapsedJitterMs": 1100} },
+    "normal": { "0": {"baseAccuracy": 0.90, "baseElapsedMs": 3200, "accuracyJitter": 0.07, "elapsedJitterMs": 600},
+                "5": {"baseAccuracy": 0.86, "baseElapsedMs": 3700, "accuracyJitter": 0.08, "elapsedJitterMs": 700} },
+    "strong": { "0": {"baseAccuracy": 0.97, "baseElapsedMs": 2100, "accuracyJitter": 0.03, "elapsedJitterMs": 300},
+                "5": {"baseAccuracy": 0.95, "baseElapsedMs": 2400, "accuracyJitter": 0.04, "elapsedJitterMs": 350} }
   }
 }
 ```
+
+> **注文の語数(`order_count`)で所要が変わる**点に注意。属性ごとに `orderCount` が違う
+> （Buzz は多め）ので、`elapsed_ms` をそのまま平均すると属性の偏りを拾ってしまう。
+> **`order_count` で正規化してから帯を作る**か、集計を属性別に分ける。
 
 ### 生成方法
 
@@ -167,13 +195,17 @@ go run ./cmd/botprofile --dsn "$DATABASE_URL" --out profiles.json
 
 ```sql
 CREATE TABLE IF NOT EXISTS bot_profile (
-    tier        TEXT NOT NULL,     -- weak/normal/strong
-    heat_level  INT  NOT NULL,
-    ms_per_key  INT  NOT NULL,
-    miss_rate   FLOAT NOT NULL,
+    tier              TEXT  NOT NULL,   -- weak/normal/strong
+    heat_level        INT   NOT NULL,
+    base_accuracy     FLOAT NOT NULL,   -- bot.Config と1対1
+    base_elapsed_ms   INT   NOT NULL,
+    accuracy_jitter   FLOAT NOT NULL,
+    elapsed_jitter_ms INT   NOT NULL,
     PRIMARY KEY (tier, heat_level)
 );
 ```
+
+カラム名を `bot.Config` のフィールドと**1対1**にしておくと、写す処理が素直に書ける。
 
 `internal/bot` は `BotProfileSource` interface（DIP）で受け取る。
 DB が無ければ現在の `BotParams` にフォールバックする。
@@ -213,6 +245,8 @@ weak 25% / normal 50% / strong 25%
 - [ ] heat_level 別の速度・ミス率の分位が出せる
 - [ ] `cmd/botprofile` が profiles.json を生成できる
 - [ ] 弱/中/強の3帯が作れる
+- [ ] 出力が `bot.Config`（accuracy / elapsedMs / jitter）の形になっている（msPerKey のままにしない）
+- [ ] `order_count` の偏り（属性差）を正規化してから集計している
 
 **Phase 4（反映）**
 - [ ] `bot_profile` テーブル経由で BOT の挙動が変わる

@@ -78,6 +78,19 @@ cmd/matchsim/main.go   … internal/sim を呼ぶ薄いCLIになる
 ```
 
 > `internal/sim` は game を import するが、game は sim を知らない（依存の向きは維持）。
+>
+> **depguard にルールを足すこと**。`.golangci.yml` の現行ルールは
+> game / db / configapi / targeting・odai・config の各ディレクトリを名指ししており、
+> **新規の `internal/sim` はどのルールにも当たらない**（＝何でも import できてしまう）。
+> `game-core-isolation` の deny に `takoda99/internal/sim` を追加し、
+> 「game が sim を import しない」を機械強制する:
+>
+> ```yaml
+> game-core-isolation:
+>   deny:
+>     - pkg: "takoda99/internal/sim"
+>       desc: "game はシミュレータを知らない。sim が game を駆動する一方向。"
+> ```
 
 ### 2.2 テスト1: 全プロファイルで有限ティック決着
 

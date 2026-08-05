@@ -43,13 +43,27 @@ Go を変えても TS は自動で追随しない。ズレると:
 後者が危険。`backfillDefaults` は**セクション丸ごとゼロ**の時しか救済しないので、
 **セクション内の一部フィールドだけ欠けると 0 が入る**。
 
+現行 `Validate()` が既に弾く項目（＝安全）:
+
 ```
-patience.lateMul = 0  → stepPatience の effectiveDt = dtMs / 0 で 0除算 or +Inf
-storm.intervalTicks = 0 → storm が毎tick発火 or 発火しない
-credit.initialLife = 0  → 全店が開始直後に自滅脱落
+customer.total / credit.initialLife / session.tickIntervalMs
+bot.baseElapsedMs / bot.baseAccuracy / heat.maxLevel
+storm.intervalTicks / storm.thresholdPct / phase.midAliveThreshold
 ```
 
-**config-front で保存ボタンを押した瞬間に本番が壊れる**類の事故になる。
+**まだ弾いていない項目**（ここが穴）:
+
+| キー | 0 になると |
+|---|---|
+| `distribution.queueRefillThreshold` | **客が1人も配られない**。`len(queue) < 0` は常に偽なので分配候補が空になり、試合は始まるが誰も何もできない |
+| `matching.minPlayers` | 待機0人でもカウントダウンが始まりうる |
+| `eval.emaAlpha` | `evalRaw` が更新されず全店が同値。評価が機能しない |
+| `session.publishIntervalMs` | 盤面が毎tick配信され帯域が跳ねる |
+
+> `patience.lateMul` は `stepPatience` 側に `> 0` のガードがあるので**0除算は起きない**
+> （Late での短縮が効かなくなるだけ）。全部が全部むき出しではない。
+
+**config-front で保存ボタンを押した瞬間に本番が壊れる**類の事故になるのは上表の項目。
 
 ### 問題2: 検出が人力
 
@@ -60,12 +74,16 @@ credit.initialLife = 0  → 全店が開始直後に自滅脱落
 
 先送りする代わりに、以下で被害を抑える:
 
-1. **`Validate()` を厚くする** — 0除算や即死につながる値を弾く。
+1. **`Validate()` に未検証の項目を足す** — 上表の4つ。
    これは proto と無関係にサーバー側だけで完結し、**最も費用対効果が高い**。
    ```go
-   if gp.Patience.LateMul <= 0 { return fmt.Errorf(...) }
-   if gp.Credit.InitialLife <= 0 { return fmt.Errorf(...) }
-   if gp.Storm.IntervalTicks <= 0 { return fmt.Errorf(...) }
+   if gp.Distribution.QueueRefillThreshold <= 0 {
+       return fmt.Errorf("distribution.queueRefillThreshold は正である必要 (got %d)",
+           gp.Distribution.QueueRefillThreshold)
+   }
+   if gp.Matching.MinPlayers <= 0 { ... }
+   if gp.Eval.EmaAlpha <= 0 || gp.Eval.EmaAlpha > 1 { ... }
+   if gp.Session.PublishIntervalMs <= 0 { ... }
    ```
    POST が 400 で弾かれれば、壊れた値は保存されない。
 2. **パラメータを増やしたら Plan-20 の突き合わせを必ず実施**
