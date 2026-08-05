@@ -19,12 +19,16 @@ func (fakeWords) Next(_ int, _ *rand.Rand) Word {
 }
 
 func newTestSession(n int) *Session {
+	return newTestSessionWith(DefaultParameters(), n)
+}
+
+func newTestSessionWith(params GameParameters, n int) *Session {
 	inits := make([]PlayerInit, n)
 	for i := range inits {
 		id := PlayerId(fmt.Sprintf("s-%d", i+1))
 		inits[i] = PlayerInit{Id: id, DisplayName: string(id)}
 	}
-	return NewSession("test-match", DefaultParameters(), fakeWords{}, rand.New(rand.NewSource(42)), inits)
+	return NewSession("test-match", params, fakeWords{}, rand.New(rand.NewSource(42)), inits)
 }
 
 func placeAssigned(s *Session, cid proto.CustomerId, store PlayerId, attr proto.CustomerAttribute, orderCount, keystrokes int) {
@@ -1478,5 +1482,60 @@ func TestProcessLeave_PenaltyDiffersByAttribute(t *testing.T) {
 				t.Fatalf("%s の信用減=%d, want %d", c.attr, got, c.want)
 			}
 		})
+	}
+}
+
+// heatLevel が heat.maxLevel を超えないこと（#75）。
+//
+// 超えた値を配ると、WordSource は下の段階へ降りるだけなので難度は変わらないのに
+// クライアントの heatLevel 表示と運営UIの maxLevel が実態と食い違う。
+func TestStepHeat_ClampsToMaxLevel(t *testing.T) {
+	params := DefaultParameters()
+	params.Heat.MaxLevel = 3
+	params.Heat.Base = 0
+	params.Heat.PerAliveDrop = 1 // 1店脱落ごとに +1（すぐ上限を超える）
+	params.Heat.PhaseEarly = 0
+	params.Heat.PhaseMid = 5
+	params.Heat.PhaseLate = 10
+
+	s := newTestSessionWith(params, 20)
+	s.Start()
+	maxSeen := 0
+	for i := 0; i < 3000 && s.State() != Finished; i++ {
+		for _, o := range s.Tick(params.Session.TickIntervalMs) {
+			if d, ok := o.Msg.(proto.DifficultyUpdate); ok {
+				if d.HeatLevel > maxSeen {
+					maxSeen = d.HeatLevel
+				}
+				if d.HeatLevel > params.Heat.MaxLevel {
+					t.Fatalf("heatLevel %d が maxLevel %d を超えた", d.HeatLevel, params.Heat.MaxLevel)
+				}
+			}
+		}
+	}
+	if maxSeen != params.Heat.MaxLevel {
+		t.Fatalf("上限 %d に到達していない（maxSeen=%d）。テストが上限を突いていない", params.Heat.MaxLevel, maxSeen)
+	}
+}
+
+// heat.base に負値が入っても heatLevel が負にならないこと。
+//
+// 負のまま WordSource へ渡すと下降ループが1回も回らず、全店がフォールバック語固定になる。
+func TestStepHeat_NeverGoesNegative(t *testing.T) {
+	params := DefaultParameters()
+	params.Heat.Base = -50
+	params.Heat.PerAliveDrop = 0
+	params.Heat.PhaseEarly = 0
+	params.Heat.PhaseMid = 0
+	params.Heat.PhaseLate = 0
+
+	s := newTestSessionWith(params, 5)
+	s.Start()
+	for i := 0; i < 500 && s.State() != Finished; i++ {
+		for _, o := range s.Tick(params.Session.TickIntervalMs) {
+			if d, ok := o.Msg.(proto.DifficultyUpdate); ok && d.HeatLevel < 0 {
+				t.Fatalf("heatLevel が負になった: %d", d.HeatLevel)
+			}
+		}
 	}
 }
