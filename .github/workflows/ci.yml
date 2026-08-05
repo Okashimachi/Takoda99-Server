@@ -55,3 +55,24 @@ jobs:
         uses: golangci/golangci-lint-action@v7
         with:
           version: v2.6.2
+
+  deploy-assets:
+    name: デプロイ資材の検査（systemd unit）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # systemd は知らないキーを見つけても【エラーにせず黙って無視する】。
+      # 例: "-EnvironmentFile=" のように値に付ける "-" をキー側へ書くと、その行ごと
+      # 無視されて env が一切読まれない（DATABASE_URL が渡らず内蔵デフォルトで起動する）。
+      # 本番で実際に踏んだ（#83）ので、CI で拾う。
+      #
+      # ExecStart のバイナリはCI上に存在しないので verify 自体の終了コードは見ない。
+      # "Unknown key" / "Unknown lvalue" だけを失敗条件にする。
+      - name: systemd unit に無視されるキーが無いこと
+        run: |
+          out=$(systemd-analyze verify deploy/takoda99.service 2>&1 || true)
+          echo "$out"
+          if echo "$out" | grep -qiE 'unknown key|unknown lvalue'; then
+            echo "::error file=deploy/takoda99.service::systemd が無視するキーがあります"
+            exit 1
+          fi
