@@ -5,6 +5,9 @@
 > **依存**: Plan-01（基盤移行）。試合進行ログ（§2.3）は Plan-05 の公開 getter が前提。
 > **参照**: なし（新規）
 
+> ⚠ **本書は Render 時代の設計**（ログ閲覧が Render ダッシュボード前提）。
+> GCP + journald での実施版は `docs/plan/plan-17_observability実装.md`。
+
 ---
 
 ## 0. 前提知識
