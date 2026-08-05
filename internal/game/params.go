@@ -223,15 +223,15 @@ func DefaultParameters() GameParameters {
 			MinFill:          99,
 		},
 		Credit: CreditParams{
-			InitialLife: 3,
+			InitialLife: 20,
 			LeaveLoss:   LeaveLoss{Normal: 1, Bonus: 1, Claimer: 1, Buzz: 2},
 		},
 		Customer: CustomerParams{
 			Total:   300,
-			Normal:  AttributeSpec{Attribute: proto.AttrNormal, Weight: 70, PatienceBaseMs: 8000, OrderCount: 2},
-			Bonus:   AttributeSpec{Attribute: proto.AttrBonus, Weight: 15, PatienceBaseMs: 9000, OrderCount: 2},
-			Claimer: AttributeSpec{Attribute: proto.AttrClaimer, Weight: 10, PatienceBaseMs: 6000, OrderCount: 1},
-			Buzz:    AttributeSpec{Attribute: proto.AttrBuzz, Weight: 5, PatienceBaseMs: 12000, OrderCount: 4},
+			Normal:  AttributeSpec{Attribute: proto.AttrNormal, Weight: 70, PatienceBaseMs: 16000, OrderCount: 2},
+			Bonus:   AttributeSpec{Attribute: proto.AttrBonus, Weight: 15, PatienceBaseMs: 18000, OrderCount: 2},
+			Claimer: AttributeSpec{Attribute: proto.AttrClaimer, Weight: 10, PatienceBaseMs: 12000, OrderCount: 1},
+			Buzz:    AttributeSpec{Attribute: proto.AttrBuzz, Weight: 5, PatienceBaseMs: 24000, OrderCount: 4},
 		},
 		Eval: EvalParams{
 			EmaAlpha:        0.3,
@@ -260,8 +260,8 @@ func DefaultParameters() GameParameters {
 			MaxLevel: 17,
 		},
 		Storm: StormParams{
-			IntervalTicks: 40,
-			WarnTicks:     10,
+			IntervalTicks: 140,
+			WarnTicks:     30,
 			ThresholdPct:  0.10,
 		},
 		Distribution: DistributionParams{
