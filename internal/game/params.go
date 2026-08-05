@@ -129,7 +129,13 @@ type HeatParams struct {
 	PhaseEarly   int     `json:"phaseEarly"`
 	PhaseMid     int     `json:"phaseMid"`
 	PhaseLate    int     `json:"phaseLate"`
-	MaxLevel     int     `json:"maxLevel"`
+	// MaxLevel は heatLevel の上限（stepHeat で clamp する）。
+	//
+	// **お題辞書に語彙がある最大段階と揃える**こと。超えて設定しても WordSource が
+	// 下の段階へ降りるだけで難度は変わらず、クライアントへ配る heatLevel だけが
+	// 実態と食い違う（#75）。game は odai を import できない（層の依存が逆流するため）ので、
+	// 辞書側の `odai.MaxWordLevel` と数値で揃える運用にしている。
+	MaxLevel int `json:"maxLevel"`
 }
 
 // StormParams: 下位淘汰（定期的に下位%を強制脱落）。
@@ -250,7 +256,8 @@ func DefaultParameters() GameParameters {
 			PhaseEarly:   0,
 			PhaseMid:     3,
 			PhaseLate:    8,
-			MaxLevel:     20,
+			// odai.MaxWordLevel（辞書の上端）と一致させる。
+			MaxLevel: 17,
 		},
 		Storm: StormParams{
 			IntervalTicks: 40,

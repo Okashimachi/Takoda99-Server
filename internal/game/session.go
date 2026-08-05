@@ -601,6 +601,20 @@ func (s *Session) stepHeat(out []Outbound) []Outbound {
 		newHeat += hp.PhaseLate
 	}
 
+	// 上下限で挟む。
+	//
+	// 上限: heat.maxLevel はお題辞書に語彙がある最大段階に合わせて設定する値。
+	// 超えても WordSource が下の段階へ降りるだけで難度は変わらないが、クライアントへ
+	// 配る heatLevel が実態と食い違い、運営UIの maxLevel が「効かないツマミ」になる。
+	// 下限: heat.base に負値が入ると heatLevel が負になり、WordSource の下降ループが
+	// 1回も回らずフォールバック語だけが出続ける（試合として壊れる）。
+	if hp.MaxLevel > 0 && newHeat > hp.MaxLevel {
+		newHeat = hp.MaxLevel
+	}
+	if newHeat < 0 {
+		newHeat = 0
+	}
+
 	if newHeat != s.heatLevel {
 		s.heatLevel = newHeat
 		out = append(out, broadcastMsg(proto.DifficultyUpdate{HeatLevel: s.heatLevel}))
