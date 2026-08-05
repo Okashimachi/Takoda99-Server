@@ -48,7 +48,7 @@
       ```
 - [ ] お題単語が入っている（`GET /api/words` が空でない）
 - [ ] `ALLOWED_ORIGINS` にクライアントの本番オリジンが入っている
-- [ ] WebFront / Unity の接続先が `wss://takoda99.mooo.com/ws` を向いている
+- [ ] Unity クライアントの接続先が `wss://takoda99.mooo.com/ws` を向いている
 - [ ] `cmd/loadtest` で99接続を1回通す（Plan-18）
 - [ ] **egress の残量を確認**（1試合645MB・無料枠月1GB。何試合やるか決める）
 

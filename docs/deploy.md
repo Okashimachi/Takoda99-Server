@@ -165,10 +165,13 @@ sudo systemctl restart caddy
 curl https://takoda99.mooo.com/healthz
 ```
 
-## 8. フロントの接続先を変える
+## 8. クライアントの接続先を変える
 
-Takoda99-WebFront の環境変数を `wss://takoda99.mooo.com/ws` に向ける
-（Vercel なら Settings → Environment Variables → 再デプロイ）。
+`Takoda99-Unity` の接続先を `wss://takoda99.mooo.com/ws` に向ける。
+WebGL ビルドの場合はブラウザのオリジンが `ALLOWED_ORIGINS` に入っている必要がある（→ Plan-21）。
+
+> ⚠ 旧記述は `Takoda99-WebFront`（Vercel の環境変数）だったが、**同リポジトリは廃止・凍結**され、
+> クライアントは Unity のみ。
 
 ---
 

@@ -41,7 +41,7 @@ Unity WebGL ビルドの**配信元オリジン**を `ALLOWED_ORIGINS` に足す
 
 ```bash
 sudo nano /etc/takoda99.env
-# ALLOWED_ORIGINS=http://localhost:5173,https://<webfront>.vercel.app,https://<unity-host>
+# ALLOWED_ORIGINS=http://localhost:5173,https://<unity-host>
 ```
 
 ```bash
