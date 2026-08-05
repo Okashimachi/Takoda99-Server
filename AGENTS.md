@@ -207,7 +207,14 @@ golangci-lint run                      # depguard で依存ルールを機械検
 
 go run ./cmd/server --mode match       # 本番同等（マッチングプール起動）
 go run ./cmd/server --mode solo        # ローカル1人＋Bot（マッチング迂回）
+
+go run ./cmd/matchsim                             # ヘッドレス1試合（バランス調整用・99店）
+go run ./cmd/matchsim --runs 20 --quiet           # 20回まわして決着時間の統計
+go run ./cmd/matchsim --profile uniform --seed 42 # 実力分布を変える／結果を再現する
 ```
+
+- `cmd/matchsim` は **バランス調整**の道具（メモリ内・大きい dt で高速）。
+  99接続を捌けるかの**性能検証**は別物で、そちらは Plan-18 の負荷テストが担う（4.1）。
 
 - `go test ./internal/game/...` が常時グリーンであることがコアの安全保証。
 - 依存ルール（game が部品/スパインを import しない等）は depguard で機械強制済み。CI で自動的に弾かれる。
