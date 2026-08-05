@@ -18,8 +18,7 @@ Unity はそれを **C# でミラーする**のが最短で、ゼロから設計
 |---|---|
 | `Takoda99-WebFront` | TS 実装。**参照元** |
 | `Takoda99-Client-Docs` | クライアント設計（アーキテクチャ・状態管理・打鍵判定・画面遷移）。**設計の正典** |
-| `docs/client-integration.md` | ワイヤ仕様（サーバー視点） |
-| `Takoda99-Proto` | メッセージ契約（Go/TS/**C#** ミラーあり） |
+| `Takoda99-Proto` | メッセージ契約の正典（Go/TS/**C#** ミラーあり） |
 
 ---
 
@@ -81,7 +80,7 @@ OrderServed   （＋ MatchmakingJoin / MatchmakingLeave）
 
 ### 2.3 やってはいけないこと
 
-`docs/client-integration.md` §6 のチェックリストがそのまま適用される。特に:
+`Takoda99-Client-Docs` のチェックリストがそのまま適用される。特に:
 
 - ❌ 我慢ゲージが 0 になったらローカルで客を消す → `CustomerLeft` を待つ
 - ❌ `OrderServed` 送信直後にローカルで客を消す → サーバーの確定を待つ
@@ -92,11 +91,17 @@ OrderServed   （＋ MatchmakingJoin / MatchmakingLeave）
 
 ## 3. 結合テストの段取り
 
-### 段階1: Unity 単独（solo）
+### 段階1: Unity 単独
+
+Plan-15 の手順で `matching.minPlayers=1` にしてから、**本番と同じエンドポイント**へ:
 
 ```
-wss://takoda99-solo.mooo.com/ws
+wss://takoda99.mooo.com/ws
 ```
+
+> **単独検証のやり方**: 専用の solo エンドポイントは**作らない**（Plan-15 で方式Cを採用）。
+> 本番と同じ `wss://takoda99.mooo.com/ws` に対し、config で `matching.minPlayers=1` /
+> `startCountdownMs=2000` にすると1接続で試合が始まる。**検証が終わったら必ず戻す**（Plan-16）。
 
 - [ ] 接続 → `MatchStart` → `CustomerArrived` → 打つ → `OrderServed` → `EvaluationUpdate`
 - [ ] 放置 → `CustomerLeft` → `CreditUpdate` でライフが減る

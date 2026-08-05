@@ -54,22 +54,25 @@ func main() {
 
 ### Step 2: メトリクスカウンタ
 
+**接続数のカウンタは新設しない。** `connLimiter` が既に持っている:
+
+```bash
+grep -n "func (cl \*connLimiter) active" cmd/server/main.go
+```
+
+```go
+limiter.active()   // ← 現在の同時接続数。これをそのまま使う
+```
+
+`activeConns` を別に作ると `acquire` / `release` / `releaseOnDisconnect` の3箇所と
+二重管理になり、必ずズレる。**試合数だけ新設する**:
+
 ```go
 var (
-	activeConns   atomic.Int64
 	activeMatches atomic.Int64
 	startTime     = time.Now()
 )
 ```
-
-`/ws` ハンドラで増減させる。**接続数は Plan-09 の接続リミッターと同じ場所で管理する**ので、
-リミッターの acquire/release にカウンタを寄せると二重管理にならない。
-
-```bash
-grep -n "connLimiter\|acquire\|release" cmd/server/main.go
-```
-
-既にリミッターがあるなら、その中で `activeConns` を増減する。
 
 ### Step 3: 旧 log.Printf を置換
 
@@ -159,7 +162,8 @@ slog.Info("matchmaking_start",
 ### Step 7: 定期メトリクス
 
 ```go
-func startMetrics(ctx context.Context) {
+// limiter は main で作った connLimiter を渡す（接続数の単一情報源）。
+func startMetrics(ctx context.Context, limiter *connLimiter) {
 	go func() {
 		t := time.NewTicker(30 * time.Second)
 		defer t.Stop()
@@ -171,7 +175,7 @@ func startMetrics(ctx context.Context) {
 				var ms runtime.MemStats
 				runtime.ReadMemStats(&ms)
 				slog.Info("metrics",
-					"activeConnections", activeConns.Load(),
+					"activeConnections", limiter.active(),
 					"activeMatches", activeMatches.Load(),
 					"goroutines", runtime.NumGoroutine(),
 					"heapMB", ms.HeapAlloc/1024/1024)
@@ -191,7 +195,7 @@ http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"status":            "ok",
-		"activeConnections": activeConns.Load(),
+		"activeConnections": limiter.active(),
 		"activeMatches":     activeMatches.Load(),
 		"goroutines":        runtime.NumGoroutine(),
 		"uptime":            time.Since(startTime).Round(time.Second).String(),
@@ -304,6 +308,7 @@ grep -n "log\.Printf\|log\.Fatal" cmd/server/main.go || echo "OK: 旧ログな�
 - [ ] `phase_change` / `store_eliminated` / `match_end` が matchId 付きで出る
 - [ ] `config_load_failed` / `result_save_failed` が `slog.Error` で出る
 - [ ] 30秒ごとに `metrics`（接続数・試合数・goroutine数・heapMB）が出る
+- [ ] 接続数は `connLimiter.active()` を単一情報源にしている（カウンタを二重に持たない）
 - [ ] `/healthz` が JSON で接続数・試合数・goroutines・uptime を返す
 - [ ] `internal/game/` が `log/slog` を import していない
 - [ ] `docs/deploy.md` の運用コマンドに `journalctl` + `jq` のフィルタ例が追記されている

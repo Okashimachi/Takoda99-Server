@@ -1,157 +1,150 @@
-# Plan-15: Webフロント単独結合テスト用の solo モード起動構成（GCP）
+# Plan-15: Webフロント単独結合テスト用の起動構成
 
-> **目的**: `Takoda99-WebFront` の開発者が**1接続だけで MatchStart 以降の全メッセージを検証できる**エンドポイントを用意する。
+> **目的**: `Takoda99-WebFront` の開発者が**1接続だけで MatchStart 以降の全メッセージを検証できる**ようにする。
 > **対応issue**: #36
 > **優先度**: **高**。WebFront の開発を現在ブロックしている。
 > **依存**: なし（サーバー本体は稼働中）
-> **参照**: `docs/deploy.md`, `deploy/takoda99.service`, `deploy/Caddyfile`
+> **参照**: `internal/matchmaking/matchmaking.go`, `cmd/server/main.go`, `docs/deploy.md`
 
 ---
 
-## 0. なぜ要るか
+## 0. 結論 — **config で minPlayers を下げるだけでよい**
 
-現状の本番は `--mode match` で、`Matching.MinPlayers`（既定20）に達してカウントダウンが済むまで試合が始まらない。
-WebFront 開発者が1人で繋いでも `MatchmakingStatus` が届き続けるだけで、**`MatchStart` 以降を一切検証できない**。
-
-`--mode solo` は `/ws` 接続ごとに「人間1＋Bot」で即試合を開始するので、単独で最後まで通せる。
-
-現在の稼働状況:
+インフラ作業は要らない。**サーバーの再起動もSSHも不要**。
 
 ```
-wss://takoda99.mooo.com/ws   … --mode match（本番）
+matching.minPlayers      = 1
+matching.startCountdownMs = 2000   （待ち時間を短く。0でも可）
 ```
+
+config-front から保存すると**数秒で反映**され、1接続で試合が始まる。
+検証が終わったら値を戻すだけ。
+
+当初は「別ポートに2つ目の solo インスタンスを常駐させる」案を検討したが、
+**matching 系パラメータが動的リロードになった**ことで不要になった。以下その根拠。
 
 ---
 
-## 1. 方式の選択 — **方式Bを採用する**
+## 1. なぜ config だけで足りるのか（コードの裏取り）
 
-### 方式A: 本番VMの systemd を一時的に solo へ切り替える
+### 1.1 matching パラメータは毎回読み直される
 
-```bash
-sudo sed -i 's|--mode match|--mode solo --bots 5|' /etc/systemd/system/takoda99.service
-sudo systemctl daemon-reload && sudo systemctl restart takoda99
+`cmd/server/main.go` の match モード:
+
+```go
+mm := matchmaking.New(matchmaking.Config{
+    GetParams: func() game.MatchingParams {
+        p, _ := provider.Load(ctx)     // ← 呼ばれるたびに設定を取り直す
+        m := p.Matching
+        if botsExplicit {
+            m.MinFill = *bots
+        }
+        if m.MinFill == 0 {
+            m.MinFill = game.DefaultParameters().Matching.MinFill
+        }
+        return m
+    },
+    ...
+})
 ```
 
-- 手軽。だが**本番と同じエンドポイントが solo になる**
-- 戻し忘れると「イベント当日に1人接続しただけで試合が始まる」という致命的な事故
-- **Textro で実際に「検証のため一時的に solo」のまま放置された前例がある**
+`GetParams` は `Matchmaker.Run` の中で:
 
-### 方式B: 同一VMに solo 用の2つ目のインスタンスを常駐（**採用**）
+- **1秒ごとの ticker**（`update(true)`）
+- join / leave のたび（`update(false)`）
+- 試合開始時（`startMatch`）
 
-別ポート（8081）で `--mode solo --bots 5` を常駐させ、Caddy で別サブドメインへ振る。
+から呼ばれる。つまり **`minPlayers` / `maxPlayers` / `startCountdownMs` / `minFill` は起動時スナップショットではない**。
 
-- 本番の match モードを**一度も触らない** → 戻し忘れが構造的に起こり得ない
-- メモリ実測は server 21MB。2プロセスでも 1GB に対して余裕（実測は `docs/deploy.md`）
-- unit ファイルと Caddy のブロックを1つずつ増やすだけ
+反映の遅れは「マッチングループ周期(1秒) ＋ `ConfigStore` の2秒キャッシュ」で**おおむね3秒以内**。
 
-### 方式C: `minPlayers` を 1 に下げる
+### 1.2 Bot 補完数も config 由来
 
-config-front から変更でき、**matching 系も再起動不要で数秒で反映される**（`docs/deploy.md`）。
-ただし**本番の設定そのものを触る**ことになり、戻し忘れのリスクは方式Aと同じ。採らない。
-
-> **結論: 方式B**。これにより Plan-16（#37「本番前に match へ戻す」）は不要になり、close できる。
-
----
-
-## 2. 実装手順
-
-### Step 1: solo 用サブドメインを取る
-
-FreeDNS (afraid.org) で本番と同じ静的IPに向けたサブドメインを追加する。
-
-1. Subdomains →「Add」
-2. サブドメイン名 `takoda99-solo`、公開ドメイン `mooo.com`
-3. Destination に **本番と同じ VM の静的外部IP**
-
-```bash
-dig +short takoda99-solo.mooo.com    # 本番と同じIPが返ればOK
-```
-
-### Step 2: solo 用の systemd unit を作る
-
-`deploy/takoda99-solo.service`（新規・リポジトリに置く）:
-
-```ini
-# deploy/takoda99-solo.service — WebFront 単独結合テスト用の solo インスタンス。
-#
-# 本番（takoda99.service / :8080 / --mode match）とは別プロセス・別ポートで常駐する。
-# 本番の起動モードを一切触らないので「solo のまま本番当日を迎える」事故が起きない（#36 方式B）。
-#
-#   sudo cp deploy/takoda99-solo.service /etc/systemd/system/
-#   sudo systemctl daemon-reload && sudo systemctl enable --now takoda99-solo
-#
-# バイナリは本番と同じ /opt/takoda99/server を共有する（デプロイは1回で両方に反映）。
-
-[Unit]
-Description=Takoda99 game server (solo mode for client integration)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=takoda99
-Group=takoda99
-ExecStart=/opt/takoda99/server --mode solo --bots 5
-WorkingDirectory=/opt/takoda99
-
-# 本番と同じ秘密を使う（DB は共有。設定・お題を本番と同条件で検証できる）。
--EnvironmentFile=/etc/takoda99.env
-
-# 本番(8080)と衝突しないポート。EnvironmentFile の後に置いて上書きする。
-Environment=PORT=8081
-Environment=GOGC=200
-Environment=GOMAXPROCS=1
-
-Restart=always
-RestartSec=2
-KillSignal=SIGTERM
-TimeoutStopSec=20
-
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-
-[Install]
-WantedBy=multi-user.target
-```
-
-> **`Environment=PORT=8081` は `-EnvironmentFile=` より後に書く**。systemd は後勝ちなので、
-> env ファイルに PORT があっても 8081 が優先される。順序を逆にすると本番と同じポートを
-> 掴もうとして起動に失敗する。
-
-> **`GOMAXPROCS=1`**: solo は検証用で負荷が軽い。本番(2)とCPUを奪い合わないよう絞る。
-
-### Step 3: Caddy に solo 用ブロックを足す
-
-`deploy/Caddyfile` を更新:
-
-```
-takoda99.mooo.com {
-	reverse_proxy localhost:8080
-}
-
-# WebFront 単独結合テスト用の solo インスタンス（#36 方式B）。
-# 本番(:8080/match)とは別プロセス。ここが solo でも本番は match のまま。
-takoda99-solo.mooo.com {
-	reverse_proxy localhost:8081
+```go
+func (m *Matchmaker) startMatch(pool []Player, params game.MatchingParams) {
+    players := append([]Player(nil), pool...)
+    for len(players) < params.MinFill && m.cfg.NewBot != nil {
+        players = append(players, m.cfg.NewBot())
+    }
+    ...
 }
 ```
 
-### Step 4: VM に反映
+`MinFill` の既定は **99**。`minPlayers=1` にすれば、**1人＋Bot98体**で試合が始まる。
+これは `--mode solo --bots 5` より**本番に近い条件**で検証できるという利点もある。
+
+> ⚠ `botsExplicit`: systemd の `ExecStart` に `--bots` を書くと config の `MinFill` を上書きする。
+> 現在の `deploy/takoda99.service` は `--mode match` のみで `--bots` を渡していないので、
+> **config 側が効く**。`--bots` を足すとこの手が使えなくなるので足さないこと。
+
+---
+
+## 2. 方式の比較（なぜ他を採らないか）
+
+| | 作業 | 反映 | 戻し方 | 検証のしやすさ |
+|---|---|---|---|---|
+| **C: config で minPlayers=1**（採用） | config-front で2値変更 | 約3秒 | 値を戻す（UI） | **どのクライアントからも見える** |
+| A: systemd を solo に書き換え | SSH + sed + restart | 再起動 | SSH + sed + restart | SSH が要る |
+| B: 別ポートに2つ目のインスタンス | ドメイン取得・unit追加・Caddy追加 | — | 不要 | — |
+
+### 方式A を採らない理由
+
+`systemctl restart` が要る＝**進行中の試合が消える**。SSH できる人しか操作できず、
+戻し忘れの確認にも SSH が要る。方式Cは全ての面で上位互換。
+
+### 方式B を採らない理由
+
+「本番を触らない」点は魅力だが、コストが釣り合わない:
+
+- サブドメイン取得・DNS 設定
+- 2つ目の systemd unit
+- Caddy のブロック追加
+- **DB は結局共有**（config を変えれば両方に効くので「本番を触らない」は部分的にしか成立しない）
+- デプロイのたびに2プロセス再起動
+
+方式Cなら**これら全部が不要**で、しかも戻し忘れの検知は方式Bより簡単（§4）。
+
+---
+
+## 3. 手順
+
+### Step 1: config を変更
+
+config-front で:
+
+| キー | 値 | 元の値（戻す時用に控える） |
+|---|---|---|
+| `matching.minPlayers` | `1` | 20（当日の想定人数） |
+| `matching.startCountdownMs` | `2000` | 15000 |
+
+`minFill` は**触らない**（99 のまま。Bot が98体入る）。
+Bot を減らして軽くしたいなら `minFill` を 10 等にする。
+
+### Step 2: 反映を確認
 
 ```bash
-sudo cp deploy/takoda99-solo.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now takoda99-solo
+curl -s https://takoda99.mooo.com/api/params | jq '.matching'
 ```
 
 ```bash
-sudo cp deploy/Caddyfile /etc/caddy/Caddyfile
-sudo systemctl reload caddy
+websocat wss://takoda99.mooo.com/ws
 ```
 
-### Step 5: `ALLOWED_ORIGINS` に WebFront を追加
+`MatchmakingStatus` の `minPlayers` が 1 になっていること。**接続しただけで見える**のが重要（§4）。
+
+### Step 3: WebFront に接続してもらう
+
+接続先は**本番と同じ**:
+
+```
+wss://takoda99.mooo.com/ws
+```
+
+WebFront 側は接続後に `MatchmakingJoin` を送る（§5）。
+
+### Step 4: `ALLOWED_ORIGINS` に WebFront を追加
+
+これだけは環境変数なので再起動が要る。**試合の合間に行う**。
 
 ```bash
 sudo nano /etc/takoda99.env
@@ -159,71 +152,101 @@ sudo nano /etc/takoda99.env
 ```
 
 ```bash
-sudo systemctl restart takoda99 takoda99-solo
+sudo systemctl restart takoda99
 ```
 
-> 本番も再起動されるので**試合中は避ける**。
+> 未設定なら**全許可**（既定）。開発中は未設定のままでもよく、その場合この手順は不要。
+> 本番前に絞る。
+
+### Step 5: 検証が終わったら戻す
+
+config-front で `minPlayers` / `startCountdownMs` を元の値へ。**再起動不要**。
 
 ---
 
-## 3. 動作確認
+## 4. 戻し忘れ対策（方式Cで一番大事なところ）
 
-```bash
-curl https://takoda99-solo.mooo.com/healthz
-```
+方式Cの唯一の弱点は「戻し忘れると当日1人で試合が始まる」こと。
+ただし**方式A より検知がずっと簡単**。
 
-```bash
-websocat wss://takoda99-solo.mooo.com/ws
-```
+### 検知が容易な理由
 
-期待: **接続直後に `MatchStart` が届く**（`MatchmakingStatus` を待たない）。
+`minPlayers` は `MatchmakingStatus` で**全待機者にブロードキャストされる**。
+つまり**接続すれば誰でも見える**。systemd の `ExecStart`（SSH が要る）とは根本的に違う。
 
-本番が影響を受けていないことも必ず確認する:
+### 当日の確認手順（Plan-19 のチェックリストに入れる）
 
 ```bash
 websocat wss://takoda99.mooo.com/ws
 ```
 
-期待: `MatchmakingStatus` が届き続ける（＝match のまま）。
+```json
+{"type":"MatchmakingStatus","payload":{"waitingCount":1,"minPlayers":20}}
+```
+
+`minPlayers` が当日の想定人数なら OK。**1 になっていたら戻し忘れ**。
+
+API からも確認できる:
+
+```bash
+curl -s https://takoda99.mooo.com/api/params | jq '.matching.minPlayers'
+```
+
+### 運用ルール
+
+- **検証が終わったらその場で戻す**（次の作業に移る前に）
+- 当日の朝、Plan-19 の前日/当日チェックで必ず確認する
+- config-front の画面上でも `minPlayers` は一目で見える
 
 ---
 
-## 4. WebFront への周知
+## 5. WebFront 側の注意点
 
-伝えること:
+### 接続直後に `MatchmakingJoin` を送る必要がある
+
+サーバーは接続を受けると `awaitJoinName(conn, joinTimeout)` で
+**最初の1メッセージを最大3秒待つ**（`cmd/server/main.go`）。
+
+```go
+const joinTimeout = 3 * time.Second
+```
+
+期待するのは `MatchmakingJoin`:
+
+```json
+{ "type": "MatchmakingJoin", "payload": { "displayName": "たこ焼き太郎" } }
+```
+
+- **送らないと3秒待たされ**、表示名は空になる（フォールバック名が割り当てられる）
+- 別種のメッセージを最初に送っても同じ（空名で続行）
+- 表示名は最大24文字・制御文字は除去される（`SanitizeDisplayName`）
+
+**接続したらすぐ `MatchmakingJoin` を送る**のが正しい実装。
+
+### 伝えること
 
 | 項目 | 値 |
 |---|---|
-| 結合テスト用 | `wss://takoda99-solo.mooo.com/ws` … 1接続で即試合開始 |
-| 本番 | `wss://takoda99.mooo.com/ws` … 20人揃うまで待機 |
-| プロトコル | Takoda99-Proto v0.3.0（`matchTimeLimitMs` は削除済み） |
-| 結合ガイド | `docs/client-integration.md` |
+| 接続先 | `wss://takoda99.mooo.com/ws`（本番と同じ） |
+| 最初に送る | `MatchmakingJoin`（`displayName` 付き）— **接続直後すぐ** |
+| 検証中の設定 | `minPlayers=1` なので1接続で試合が始まる |
+| 本番の設定 | `minPlayers` は当日人数。`MatchmakingStatus` 待機の画面が要る |
+| プロトコル | Takoda99-Proto v0.3.0 |
+| クライアント設計 | `Takoda99-Client-Docs` リポジトリ |
 
-**両方のシーケンスに対応して作ってもらう**こと（本番は match なので `MatchmakingStatus` 待機の画面が要る）。
-
----
-
-## 5. 運用上の注意
-
-- solo インスタンスは**本番と同じ DB を見る**。config-front でパラメータを変えると両方に効く。これは意図的（本番と同条件で検証したいため）
-- solo は常駐させたままでよい。当日も動いていて問題ない（本番とポートもドメインも別）
-- デプロイ時は両方を再起動する:
-  ```bash
-  sudo systemctl restart takoda99 takoda99-solo
-  ```
-  `docs/deploy.md` の「2回目以降のデプロイ」にこれを追記する
+**本番は match なので、待機画面（`MatchmakingStatus` の表示）も必ず作ってもらう。**
 
 ---
 
 ## 6. 完了条件
 
-- [ ] 方式Bを採用（本番の起動モードを触らない）
-- [ ] `takoda99-solo.mooo.com` が VM の静的IPを向いている
-- [ ] `deploy/takoda99-solo.service` がリポジトリにあり、VM で有効化されている
-- [ ] `deploy/Caddyfile` に solo 用ブロックがあり、TLS が張れている
-- [ ] `wss://takoda99-solo.mooo.com/ws` に1接続すると**即 `MatchStart` が届く**
-- [ ] `wss://takoda99.mooo.com/ws` は **`MatchmakingStatus` のまま**（本番が無傷）
-- [ ] `ALLOWED_ORIGINS` に WebFront の dev/本番オリジンが入っている
-- [ ] WebFront 開発者が1接続で `MatchStart → CustomerArrived → OrderServed → MatchEnd` まで到達できる
-- [ ] `docs/deploy.md` にデプロイ時の両プロセス再起動が追記されている
-- [ ] **Plan-16（#37）を不要として close する**
+- [ ] `matching.minPlayers=1` / `startCountdownMs` を config-front から変更できる
+- [ ] 変更が**再起動なしで数秒以内に反映**されることを実測で確認
+- [ ] 1接続で `MatchStart` → `CustomerArrived` → `OrderServed` → `MatchEnd` まで到達できる
+- [ ] `ALLOWED_ORIGINS` に WebFront の dev/本番オリジンが入っている（または未設定＝全許可）
+- [ ] WebFront に「接続直後に `MatchmakingJoin` を送る」ことを伝えた
+- [ ] WebFront が `MatchmakingStatus` の待機画面も実装している（本番は match のため）
+- [ ] 検証後に `minPlayers` / `startCountdownMs` を元の値へ戻した
+- [ ] Plan-19 の当日チェックリストに `minPlayers` の確認が入っている
+- [ ] **`deploy/takoda99.service` に `--bots` を足していない**（config の `MinFill` が効かなくなるため）
+- [ ] 方式B（2つ目のインスタンス）は採らない判断を記録した

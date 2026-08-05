@@ -3,7 +3,7 @@
 > **目的**: イベント当日に「誰が見ても同じ手順で回せる」運用手順を確定する。
 > **対応issue**: #46
 > **優先度**: 中〜高。当日の事故を防ぐ。
-> **依存**: Plan-15（solo構成）, Plan-17（ログ）
+> **依存**: Plan-16（検証用設定の復帰）, Plan-17（ログ）
 > **前身**: `docs/plan/plan-10_デプロイ戦略.md`（Render前提）。**デプロイ手順自体は `docs/deploy.md` が正典**
 
 ---
@@ -38,12 +38,14 @@
 
 - [ ] `git log origin/main -1` と本番のバイナリが一致（最新がデプロイ済み）
 - [ ] `curl https://takoda99.mooo.com/healthz` → 200
-- [ ] `systemctl cat takoda99 | grep ExecStart` が `--mode match`
-- [ ] 単独接続で `MatchmakingStatus` 止まり（＝solo になっていない）
+- [ ] `systemctl cat takoda99 | grep ExecStart` が `--mode match`（`--bots` が付いていない）
+- [ ] config-front から `matching.minPlayers` を**当日の想定人数**に設定
+- [ ] `matching.startCountdownMs` が本番値（検証用に短くしたまま放置していないか）
+- [ ] **単独接続で試合が始まらない**ことを実際に確認（＝`minPlayers` の戻し忘れ検知）
       ```bash
       websocat wss://takoda99.mooo.com/ws
+      # MatchmakingJoin を送る → MatchmakingStatus が届き、MatchStart は来ないこと
       ```
-- [ ] config-front から `matching.minPlayers` を**当日の想定人数**に設定
 - [ ] お題単語が入っている（`GET /api/words` が空でない）
 - [ ] `ALLOWED_ORIGINS` にクライアントの本番オリジンが入っている
 - [ ] WebFront / Unity の接続先が `wss://takoda99.mooo.com/ws` を向いている
@@ -80,7 +82,7 @@
 | 接続できない | `curl /healthz` | 200 が返らなければ `sudo systemctl restart takoda99` |
 | ブラウザから繋がらない（curlはOK） | ブラウザのコンソール | `ALLOWED_ORIGINS` にオリジンを追加 → restart |
 | 試合が始まらない | `/healthz` の activeConnections | `minPlayers` を下げる（再起動不要） |
-| 1人で試合が始まってしまう | `systemctl cat takoda99` | `--mode solo` になっている → Plan-16 で match へ戻す |
+| 1人で試合が始まってしまう | `curl .../api/params \| jq .matching.minPlayers` | 検証用の `minPlayers=1` が残っている → config で戻す（**再起動不要**・Plan-16） |
 | 試合が終わらない | `journalctl` で `store_eliminated` が出ているか | 出ていなければ storm が動いていない。**Plan-14 の決着保証テストで事前に潰しておく** |
 | サーバーが落ちた | `systemctl status takoda99` | `Restart=always` で自動復帰。参加者に再接続を案内 |
 | 動作が重い | `/healthz` の goroutines / `metrics` の heapMB | goroutine が単調増加ならリーク。試合の合間に restart |
@@ -127,13 +129,15 @@ sudo cp /opt/takoda99/server.prev /opt/takoda99/server && sudo systemctl restart
 
 ### 1.7 デモ用構成（審査員向け）
 
-少人数で即試合を見せたい場合、**本番を触らずに solo エンドポイントを使う**:
+少人数で即試合を見せたい場合は **config で `matching.minPlayers` を人数に合わせる**。
 
 ```
-wss://takoda99-solo.mooo.com/ws    ← 1接続で即開始（Plan-15）
+matching.minPlayers      = 2       （審査員2人で即開始）
+matching.startCountdownMs = 3000
 ```
 
-本番の `minPlayers` を下げる必要はない。
+再起動不要で約3秒で反映される。**デモが終わったら必ず戻す**（Plan-16）。
+Bot は `minFill`（既定99）まで自動で埋まるので、少人数でも盤面は賑やかになる。
 
 ---
 
@@ -155,7 +159,7 @@ wss://takoda99-solo.mooo.com/ws    ← 1接続で即開始（Plan-15）
 - [ ] トラブル対応表がある（症状→確認→対処の3列）
 - [ ] 緊急時コマンド集がある（コピペで動く）
 - [ ] ロールバック手順があり、**1回はテスト済み**
-- [ ] デモ用構成（solo エンドポイント）が書かれている
+- [ ] デモ用構成（config で `minPlayers` を下げる手順）が書かれている
 - [ ] 「試合中にデプロイしない」「minPlayers 変更に再起動は不要」が明記されている
 - [ ] `plan-10` に正典の所在が追記されている
 - [ ] チーム内で読み合わせ済み

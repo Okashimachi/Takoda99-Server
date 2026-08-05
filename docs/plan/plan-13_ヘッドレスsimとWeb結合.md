@@ -327,10 +327,28 @@ WebFront 側で以下が確認できること:
 - [ ] 最後に `MatchEnd` が届き、`finalRank` が表示できる
 - [ ] `StoreListUpdate` でミニ盤面が更新される
 
-### 2.4 client-integration.md の確認
+### 2.4 クライアント側ドキュメントの確認
 
-`docs/client-integration.md` は既にたこ焼き版へ刷新済み。結合時に食い違いが見つかったら
-**ドキュメントではなくサーバーの実挙動を正**として、doc を直す。
+ワイヤ仕様・クライアント設計は **`Takoda99-Client-Docs` リポジトリ**が正典
+（server 側の `docs/client-integration.md` は重複解消のため削除済み）。
+結合時に食い違いが見つかったら**ドキュメントではなくサーバーの実挙動を正**として
+Client-Docs を直す。
+
+### 2.5 接続直後のハンドシェイク（見落としやすい）
+
+サーバーは接続を受けると `awaitJoinName(conn, joinTimeout)` で
+**最初の1メッセージを最大3秒待つ**（`cmd/server/main.go` / `joinTimeout = 3 * time.Second`）。
+
+```json
+{ "type": "MatchmakingJoin", "payload": { "displayName": "たこ焼き太郎" } }
+```
+
+- **送らないと3秒待たされ**、表示名が空になる（フォールバック名が割り当てられる）
+- 別種のメッセージを最初に送っても同じ扱い
+- 表示名は最大24文字・制御文字は除去される（`matchmaking.SanitizeDisplayName`）
+
+**接続したらすぐ `MatchmakingJoin` を送る**のが正しい実装。
+盤面に名前が出ない不具合の大半はこれ。
 
 ---
 
@@ -378,5 +396,7 @@ go test ./cmd/matchsim/
 - [ ] 膠着時（max-ticks 到達）に異常終了して分かる
 - [ ] **シミュレータで目安2〜3分の決着が安定して出る**（出ない場合はパラメータ調整の材料を出す）
 - [ ] Web フロントで1試合を接続〜リザルトまで遊べる
-- [ ] `ALLOWED_ORIGINS` に WebFront のオリジンが入っている
+- [ ] `ALLOWED_ORIGINS` に WebFront のオリジンが入っている（または未設定＝全許可）
+- [ ] WebFront が接続直後に `MatchmakingJoin`（`displayName` 付き）を送っている
+- [ ] 盤面に表示名が正しく出る（空名フォールバックになっていない）
 - [ ] proto バージョンと接続手順をクライアント担当へ周知済み

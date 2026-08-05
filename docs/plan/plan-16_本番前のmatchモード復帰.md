@@ -1,56 +1,100 @@
-# Plan-16: 本番前に solo → match モードへ戻す（GCP）
+# Plan-16: 本番前に検証用設定を戻す
 
-> **目的**: 結合テストのために本番を solo に切り替えた場合、イベント前に必ず match へ戻す。
+> **目的**: 結合テストのために下げた `minPlayers` 等を、イベント前に必ず本番値へ戻す。
 > **対応issue**: #37
-> **優先度**: 中（**ただし Plan-15 で方式Bを採るなら不要 — その場合この issue は close する**）
-> **依存**: Plan-15（#36）の方式決定
+> **優先度**: 中。**作業自体は数十秒**だが、忘れると致命的。
+> **依存**: Plan-15（#36）
 > **参照**: `docs/deploy.md`, `deploy/takoda99.service`
 
 ---
 
-## 0. このプランが要るかどうかの判定
+## 0. 何を戻すのか（Plan-15 の方式Cを前提）
 
-**まず Plan-15 でどの方式を採ったかを確認する。**
+Plan-15 で **config の `minPlayers` を下げる方式**を採ったので、戻す対象は
+**systemd ではなく config**。SSH も再起動も要らない。
 
-| Plan-15 の方式 | 本プラン |
-|---|---|
-| **B: solo 用の2つ目のインスタンス**（推奨・採用予定） | **不要**。本番の起動モードを一度も触らないので戻す作業が発生しない。issue #37 は close |
-| A: 本番VMの systemd を直接書き換え | **必要**。以下を実施 |
-| C: `minPlayers` を1に下げる | **必要**。ただし戻す対象は systemd ではなく config（§3） |
+| キー | 検証中 | 本番 |
+|---|---|---|
+| `matching.minPlayers` | 1 | 当日の想定人数（例 20） |
+| `matching.startCountdownMs` | 2000 | 15000 |
 
-```bash
-# 判定コマンド: solo 用インスタンスが居るか
-systemctl list-units --type=service | grep takoda99
-```
-
-`takoda99-solo.service` が居れば方式B → 本プランは不要。
+> issue #37 は元々「`--mode solo` から `--mode match` へ戻す」という内容だったが、
+> Plan-15 が**起動モードを一切触らない方式**を採ったので、対象が config に変わった。
+> 起動モードは常に `--mode match` のまま。
 
 ---
 
 ## 1. なぜ危険か
 
-戻し忘れは「**イベント当日に1人接続しただけで試合が始まってしまう**」という致命的な事故になる。
-99人で始めるはずの試合が、最初に繋いだ1人＋Bot5体で勝手に始まり、残り98人は次の試合を待つことになる。
+戻し忘れると「**イベント当日に1人接続しただけで試合が始まってしまう**」。
+99人で始めるはずの試合が、最初に繋いだ1人＋Bot98体で勝手に始まり、
+残り98人は次の試合を待つことになる。
 
-Textro でも「検証のため一時的に solo」という render.yaml のコメントが**そのまま放置されていた前例がある**。
-人間の注意力に頼る運用は失敗するので、**構造的に起こり得ない方式B（Plan-15）を推奨**している。
-本プランは方式Aを採ってしまった場合の保険。
+Textro でも「検証のため一時的に solo」という設定が**そのまま放置された前例がある**。
+人間の注意力に頼る運用は失敗する前提で、**確認手順を機械的にする**。
 
 ---
 
-## 2. 方式Aを採った場合の戻し手順
+## 2. 戻す手順
 
-### Step 1: systemd unit を match へ戻す
+### Step 1: config を本番値へ
+
+config-front で:
+
+- `matching.minPlayers` → 当日の想定人数
+- `matching.startCountdownMs` → 15000
+
+**再起動不要**。約3秒で反映される（マッチングループ1秒 ＋ ConfigStore の2秒キャッシュ）。
+
+> ⚠ **この目的で `systemctl restart` してはいけない**。進行中の試合が消える。
+
+### Step 2: API で確認
 
 ```bash
-sudo sed -i 's|--mode solo --bots 5|--mode match|' /etc/systemd/system/takoda99.service
+curl -s https://takoda99.mooo.com/api/params | jq '.matching'
 ```
+
+```json
+{
+  "minPlayers": 20,
+  "maxPlayers": 99,
+  "startCountdownMs": 15000,
+  "minFill": 99
+}
+```
+
+### Step 3: 実際に接続して確認（これが本命）
+
+**API だけでなく、クライアントから見える値を確認する。**
+`ConfigStore` に2秒キャッシュがあるので、API の値と実際の挙動が一瞬ズレうる。
 
 ```bash
-sudo systemctl daemon-reload && sudo systemctl restart takoda99
+websocat wss://takoda99.mooo.com/ws
 ```
 
-### Step 2: 実際の ExecStart を確認
+接続後、`MatchmakingJoin` を送る:
+
+```json
+{"type":"MatchmakingJoin","payload":{"displayName":"check"}}
+```
+
+期待:
+
+```json
+{"type":"MatchmakingStatus","payload":{"waitingCount":1,"minPlayers":20}}
+```
+
+- `minPlayers` が当日の想定人数
+- **`MatchStart` が来ない**（1人では始まらない）
+
+`MatchStart` が届いたら**まだ戻っていない**。Step 1 からやり直す。
+
+---
+
+## 3. 起動モードの確認（念のため）
+
+Plan-15 の方式Cなら触っていないはずだが、誰かが方式A（systemd 書き換え）を
+やってしまった可能性を潰す。
 
 ```bash
 systemctl cat takoda99 | grep ExecStart
@@ -62,77 +106,50 @@ systemctl cat takoda99 | grep ExecStart
 ExecStart=/opt/takoda99/server --mode match
 ```
 
-### Step 3: リポジトリと実機の一致を確認
-
-リポジトリの `deploy/takoda99.service` は**既定が `--mode match`**。実機がこれと一致していること。
-
-```bash
-diff <(systemctl cat takoda99 | tail -n +2) deploy/takoda99.service
-```
-
-差分が出たら、実機を直すのではなく**リポジトリを正としてコピーし直す**:
+`--mode solo` になっていたら:
 
 ```bash
 sudo cp deploy/takoda99.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl restart takoda99
 ```
 
-### Step 4: 単独接続で試合が始まらないことを確認
+リポジトリの `deploy/takoda99.service` は**既定が `--mode match`** なので、
+迷ったら実機を直すのではなく**リポジトリからコピーし直す**。
+
+### `--bots` が付いていないことも確認
 
 ```bash
-websocat wss://takoda99.mooo.com/ws
+systemctl cat takoda99 | grep -c "\-\-bots" || echo "OK: --bots なし"
 ```
 
-期待: `MatchmakingStatus` が届き続け、**`MatchStart` が来ない**。
-
-```json
-{"type":"MatchmakingStatus","payload":{"waitingCount":1,"minPlayers":20}}
-```
-
-`MatchStart` が届いたら **まだ solo のまま**。Step 1 からやり直す。
+`--bots` が付いていると config の `minFill` が無視される（`botsExplicit`）。
+Plan-15 の手が使えなくなるので付けない。
 
 ---
 
-## 3. 方式Cを採った場合（`minPlayers` を下げていた）
+## 4. 当日チェックリストへの組み込み
 
-systemd ではなく **config を戻す**。
+Plan-19（当日オペレーション手順）の前日/当日チェックに以下を入れる。**必須**。
 
-1. config-front で `matching.minPlayers` を本番想定値へ戻す
-2. matching 系は**再起動不要で数秒で反映される**（`docs/deploy.md`）
-3. 確認:
-
-```bash
-websocat wss://takoda99.mooo.com/ws
 ```
+[ ] curl -s https://takoda99.mooo.com/api/params | jq '.matching.minPlayers'
+    → 当日の想定人数（1 になっていないこと）
 
-`MatchmakingStatus.minPlayers` が戻っていること。
+[ ] websocat wss://takoda99.mooo.com/ws → MatchmakingJoin を送る
+    → MatchmakingStatus が届き、MatchStart が来ないこと
 
-> ⚠ **この目的で `systemctl restart` してはいけない**。再起動すると進行中の試合が消える。
-> matching 系は再起動なしで反映されるので、config を変えるだけでよい。
-
----
-
-## 4. 当日の直前チェックへの組み込み
-
-Plan-19（当日オペレーション手順）の事前チェックリストに以下を必ず入れる:
-
-- [ ] `systemctl cat takoda99 | grep ExecStart` が `--mode match`
-- [ ] 単独接続で `MatchmakingStatus` 止まりになる
-- [ ] `MatchmakingStatus.minPlayers` が当日の想定人数
+[ ] systemctl cat takoda99 | grep ExecStart
+    → --mode match（--bots が付いていない）
+```
 
 ---
 
 ## 5. 完了条件
 
-**方式Bを採った場合:**
-
-- [ ] `takoda99-solo.service` が存在し、本番 `takoda99.service` の ExecStart が `--mode match` のまま一度も変更されていない
-- [ ] issue #37 を「方式Bにより不要」として close
-
-**方式A/Cを採った場合:**
-
-- [ ] 実機の ExecStart が `--mode match`
+- [ ] `matching.minPlayers` が当日の想定人数に戻っている
+- [ ] `matching.startCountdownMs` が本番値に戻っている
+- [ ] **単独接続で試合が始まらず `MatchmakingStatus` を受信し続ける**
+- [ ] `systemctl cat takoda99` の ExecStart が `--mode match`（`--bots` なし）
 - [ ] リポジトリの `deploy/takoda99.service` と実機が一致
-- [ ] 単独接続で試合が始まらず `MatchmakingStatus` を受信し続ける
-- [ ] `minPlayers` が当日の想定値
-- [ ] Plan-19 の当日チェックリストに確認項目が入っている
+- [ ] Plan-19 のチェックリストに上記の確認が入っている
+- [ ] 戻す作業で `systemctl restart` を使っていない（config 変更のみ）

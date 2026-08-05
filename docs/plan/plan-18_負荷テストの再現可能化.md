@@ -50,7 +50,9 @@ ls cmd/     # → server のみ。matchsim も loadtest も無い
 ### 2.1 やること
 
 1. 99本の WebSocket を**並行に**張る
-2. `--mode match` なら全員 `MatchmakingJoin` を送る
+2. **接続直後に全員 `MatchmakingJoin`（`displayName` 付き）を送る**
+   サーバーは `awaitJoinName` で最初の1メッセージを**最大3秒待つ**（`joinTimeout = 3 * time.Second`）。
+   送らないと**99接続 × 3秒**の待ちが入り、接続→MatchStart の計測が丸ごと壊れる
 3. 全員が `MatchStart` を受けるまで待つ（計測ポイント①）
 4. Bot として振る舞う（`CustomerArrived` → 待つ → `OrderServed`）
 5. 全員が `MatchEnd` を受けるまで待つ（計測ポイント②）
@@ -127,7 +129,11 @@ func main() {
 func (c *client) run(ctx context.Context, serveMs int, missRate float64, rep *report) {
 	defer c.conn.Close(websocket.StatusNormalClosure, "")
 
-	_ = c.send(proto.TypeMatchmakingJoin, proto.MatchmakingJoin{})
+	// 接続直後に必ず送る。サーバーは awaitJoinName でこれを最大3秒待っており、
+	// 送らないと1接続あたり3秒の空白が入って計測が無意味になる。
+	_ = c.send(proto.TypeMatchmakingJoin, proto.MatchmakingJoin{
+		DisplayName: fmt.Sprintf("load-%d", c.idx),
+	})
 
 	for {
 		typ, payload, n, err := c.read(ctx)
@@ -218,7 +224,11 @@ go run ./cmd/loadtest --url ws://localhost:8080/ws --clients 99
 ```
 
 > ⚠ **本番に撃つ時は必ず事前に周知する**。試合が1本走るので、他の人が繋いでいると巻き込む。
-> `minPlayers` が 99 未満だと loadtest の途中で試合が始まってしまう点にも注意。
+>
+> ⚠ **`minPlayers` を 99 に合わせてから撃つこと**。既定の 20 のままだと、
+> 20本目が繋がった時点でカウントダウンが始まり、**99本揃う前に試合が開始**してしまう。
+> 遅れて繋いだクライアントは次の試合待ちになり、「MatchStart 99/99」が永久に揃わない。
+> config-front で `minPlayers=99` にしてから実行し、終わったら戻す（Plan-16）。
 
 ---
 
@@ -266,7 +276,7 @@ sudo journalctl -u takoda99 -o cat | jq -c 'select(.msg=="metrics")' | tail -20
 | 項目 | 目標 | 2026-08-05 実測 |
 |---|---|---|
 | 接続成功 | 99/99 | 99/99 ✅ |
-| 接続 → MatchStart | **3秒以内** | 未計測（本プランで取る） |
+| 接続 → MatchStart | **3秒以内** | 未計測（本プランで取る）※`startCountdownMs`(既定15秒)を含まない値で見る |
 | MatchEnd 受信 | 99/99 | 99/99 ✅ |
 | CPU | e2-micro の 0.25 vCPU 以内 | 0.135 (54%) ✅ |
 | メモリ | 1GB 以内 | 70MB (7%) ✅ |
@@ -283,6 +293,8 @@ sudo journalctl -u takoda99 -o cat | jq -c 'select(.msg=="metrics")' | tail -20
 
 - [ ] `cmd/loadtest` が存在し、`go run ./cmd/loadtest --url ... --clients 99` で実行できる
 - [ ] 99本の WebSocket を並行に張り、全員の `MatchStart` / `MatchEnd` を待てる
+- [ ] 接続直後に `MatchmakingJoin`（`displayName` 付き）を送っている（3秒待ちが入らない）
+- [ ] 実行前に `minPlayers=99` にする手順が書かれている（途中で試合が始まらない）
 - [ ] 接続 → MatchStart の所要時間が計測・出力される（目標3秒以内）
 - [ ] 受信バイト数が**メッセージ type 別の内訳付き**で出る
 - [ ] 失敗時に exit code 1 で終わる（手動実行でも判定が明確）
