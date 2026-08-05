@@ -205,7 +205,11 @@ sudo journalctl -u takoda99 -f
 
 - **試合系パラメータ**（credit/customer/eval/phase/heat/storm/distribution/patience）:
   config-front で編集すると**次の試合から**再起動なしで反映。
-- **matching 系**（minPlayers/maxPlayers/startCountdownMs）: 起動時スナップショットなので**再起動が要る**。
+- **matching 系**（minPlayers/maxPlayers/startCountdownMs/minFill）: **再起動不要。数秒で反映される**。
+  matchmaking の `GetParams` が待機ループのたびに `provider.Load` を呼ぶ（`cmd/server/main.go`）。
+  反映は「マッチングループ周期(1秒) ＋ ConfigStore の2秒キャッシュ」でおおむね3秒以内。
+  ⚠ 当日「人が集まらないので `minPlayers` を下げる」は**サーバーを触らずに config から実施できる**。
+  再起動すると進行中の試合が消えるので、**この目的で再起動してはいけない**。
 - **環境変数**: `/etc/takoda99.env` を書き換えて `sudo systemctl restart takoda99`。
 
 ## 環境変数一覧

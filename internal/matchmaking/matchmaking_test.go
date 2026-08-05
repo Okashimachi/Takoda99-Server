@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -159,5 +160,75 @@ func TestSanitizeDisplayName(t *testing.T) {
 	}
 	if n := len([]rune(SanitizeDisplayName(long))); n != MaxDisplayNameLen {
 		t.Fatalf("切り詰め後のルーン数=%d, want %d", n, MaxDisplayNameLen)
+	}
+}
+
+// GetParams は待機ループのたびに呼ばれる（＝config の変更が再起動なしで反映される）。
+//
+// 当日「人が集まらないので minPlayers を下げる」は最優先の運用シナリオで、
+// これが起動時スナップショットだと運営はサーバーを再起動してしまい、
+// **進行中の試合を消してしまう**。ドキュメントに書くだけでは再発するのでテストで固定する。
+func TestMatchmaker_ReloadsParamsWithoutRestart(t *testing.T) {
+	var mu sync.Mutex
+	minPlayers := 5
+	calls := 0
+
+	started := make(chan int, 1)
+	tick := make(chan time.Time, 4)
+
+	m := New(Config{
+		GetParams: func() game.MatchingParams {
+			mu.Lock()
+			defer mu.Unlock()
+			calls++
+			return game.MatchingParams{MinPlayers: minPlayers, MaxPlayers: 99, StartCountdownMs: 0, MinFill: 0}
+		},
+		After:  func(time.Duration) <-chan time.Time { return tick },
+		Start:  func(p []Player) { started <- len(p) },
+		NewBot: nil,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go m.Run(ctx)
+
+	// 2人だけ参加させる。minPlayers=5 なのでまだ始まらない。
+	srv1, _ := transport.Pipe()
+	srv2, _ := transport.Pipe()
+	m.Join(Player{Id: "p-1", Conn: srv1})
+	m.Join(Player{Id: "p-2", Conn: srv2})
+
+	select {
+	case n := <-started:
+		t.Fatalf("minPlayers=5 なのに %d人で開始した", n)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	// 運営が config から minPlayers を 2 に下げる（サーバーは再起動していない）。
+	mu.Lock()
+	minPlayers = 2
+	mu.Unlock()
+
+	// カウントダウンを発火させる。再読み込みされていれば、この時点で成立する。
+	tick <- time.Now()
+
+	select {
+	case n := <-started:
+		if n != 2 {
+			t.Fatalf("2人で開始するはず: %d人", n)
+		}
+	case <-time.After(2 * time.Second):
+		mu.Lock()
+		c := calls
+		mu.Unlock()
+		t.Fatalf("minPlayers を下げても試合が始まらない（起動時スナップショットになっている）。GetParams 呼び出し回数=%d", c)
+	}
+
+	// 何度も読み直していること（1回だけなら実質スナップショット）。
+	mu.Lock()
+	c := calls
+	mu.Unlock()
+	if c < 2 {
+		t.Fatalf("GetParams が %d 回しか呼ばれていない（毎ループ読み直していない）", c)
 	}
 }
