@@ -51,17 +51,21 @@ bot.baseElapsedMs / bot.baseAccuracy / heat.maxLevel
 storm.intervalTicks / storm.thresholdPct / phase.midAliveThreshold
 ```
 
-**まだ弾いていない項目**（ここが穴）:
+**まだ弾いていない項目**（ここが穴）。詳細と対応は **issue #70**:
 
-| キー | 0 になると |
+| キー | 0/範囲外になると |
 |---|---|
-| `distribution.queueRefillThreshold` | **客が1人も配られない**。`len(queue) < 0` は常に偽なので分配候補が空になり、試合は始まるが誰も何もできない |
-| `matching.minPlayers` | 待機0人でもカウントダウンが始まりうる |
-| `eval.emaAlpha` | `evalRaw` が更新されず全店が同値。評価が機能しない |
-| `session.publishIntervalMs` | 盤面が毎tick配信され帯域が跳ねる |
+| `distribution.queueRefillThreshold` | **客が1人も配られない**。`ql < threshold` が常に偽で分配候補が空になり、試合は始まるが誰も何もできない |
+| `customer.*.patienceBaseMs` | **全客が到着した瞬間に離脱**。`patienceLeftMs=0` で最初の tick に `<= 0` 判定 → 全店が即座に信用を失う |
+| `customer.*.orderCount` | **客を永久に捌けない**。`words` が空配列で発行され、提供のしようがないまま我慢切れを待つだけになる |
+| `matching.minPlayers` | **人間0人の試合が始まる**。`len(pool) >= 0` が常に真で、空プールでもカウントダウンが走る |
+| `eval.emaAlpha` | `evalRaw` が更新されず全店が同値。評価が機能しない（>1 でも発散して不安定） |
 
-> `patience.lateMul` は `stepPatience` 側に `> 0` のガードがあるので**0除算は起きない**
-> （Late での短縮が効かなくなるだけ）。全部が全部むき出しではない。
+> **既にガードがあって安全な項目**（"ついでに直す"必要はない）:
+> `patience.lateMul` は `stepPatience` に `> 0` のガードあり、
+> `session.publishIntervalMs` は `NewFullPublisher` が `<= 0` を 250 にフォールバック、
+> `matching.maxPlayers` / `minFill` も呼び出し側でガード済み、
+> 属性の `weight` 全0も `rollAttribute` が保険を持つ。
 
 **config-front で保存ボタンを押した瞬間に本番が壊れる**類の事故になるのは上表の項目。
 
@@ -74,18 +78,9 @@ storm.intervalTicks / storm.thresholdPct / phase.midAliveThreshold
 
 先送りする代わりに、以下で被害を抑える:
 
-1. **`Validate()` に未検証の項目を足す** — 上表の4つ。
+1. **`Validate()` に未検証の項目を足す**（上表の5つ）→ **issue #70 で別途対応**。
    これは proto と無関係にサーバー側だけで完結し、**最も費用対効果が高い**。
-   ```go
-   if gp.Distribution.QueueRefillThreshold <= 0 {
-       return fmt.Errorf("distribution.queueRefillThreshold は正である必要 (got %d)",
-           gp.Distribution.QueueRefillThreshold)
-   }
-   if gp.Matching.MinPlayers <= 0 { ... }
-   if gp.Eval.EmaAlpha <= 0 || gp.Eval.EmaAlpha > 1 { ... }
-   if gp.Session.PublishIntervalMs <= 0 { ... }
-   ```
-   POST が 400 で弾かれれば、壊れた値は保存されない。
+   POST が 400 で弾かれれば、壊れた値はそもそも保存されない。
 2. **パラメータを増やしたら Plan-20 の突き合わせを必ず実施**
 3. **§4 の代替案（スキーマ一致テスト）を先に検討** — proto を触らずにズレを検出できる
 
