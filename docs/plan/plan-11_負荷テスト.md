@@ -5,6 +5,9 @@
 > **依存**: Plan-05（1試合が最後まで回る）, Plan-09（スパイク対策）
 > **参照**: Textro99-Server の cmd/balancesim・cmd/matchsim パターン
 
+> ⚠ **本書は Render 時代の設計**。実施版は `docs/plan/plan-18_負荷テストの再現可能化.md`。
+> 99人の実機計測結果は `docs/deploy.md` にある。
+
 ---
 
 ## 1. 前提知識

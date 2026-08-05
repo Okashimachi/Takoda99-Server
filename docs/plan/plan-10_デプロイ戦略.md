@@ -3,12 +3,15 @@
 > ⚠ **この plan は Render 前提で書かれているが、ホスティングは GCP Compute Engine（e2-micro）に変更済み**。
 > 以降の「Render」「render.yaml」「Starter プラン」「ダッシュボードで手動デプロイ」に関する記述は**無効**。
 > 実際の構成・手順は **`docs/deploy.md`（GCP + systemd + Caddy）** が正典。
-> 本文はモード/設定反映タイミング/当日オペレーションの考え方の部分だけ有効。
+> 本文はモード/当日オペレーションの考え方の部分だけ有効。
+> ⚠ **§1.2 の「マッチングパラメータは再起動が必要」も誤り**（下記で訂正済み）。
 
 > **目的**: ハッカソン本番に向けたデプロイ構成・手順・当日オペレーションを定め、試合運営を円滑に行う。
 > **対応issue**: #37, #41 + 新規
 > **依存**: Plan-01（基盤移行）, Plan-06（DB/config-front）
 > **参照**: render.yaml, マッチング仕様 $4
+
+> 当日オペレーションの実施版は `docs/plan/plan-19_当日オペレーション手順.md`。
 
 ---
 
@@ -28,9 +31,12 @@
 サーバーは `loadDeps()` をマッチ生成のたびに呼ぶ設計になっている（`cmd/server/main.go` L49-59）:
 
 - **試合系パラメータ**（credit/customer/eval/phase/heat/storm/distribution/patience）: config-front で編集すると**次の試合から**再起動なしで反映
-- **マッチングパラメータ**（minPlayers/maxPlayers/startCountdownMs）: 起動時のスナップショットを使用。**変更には再起動が必要**
-  - ただし config-front で minPlayers を変更 → Render 手動デプロイで即反映できる
-- **環境変数の変更**: Render ダッシュボードで変更後に手動デプロイが必要
+- ~~**マッチングパラメータ**（minPlayers/maxPlayers/startCountdownMs）: 起動時のスナップショットを使用。**変更には再起動が必要**~~
+  → ❌ **誤り。訂正**: `GetParams` が待機ループのたびに `provider.Load` を呼ぶため **再起動不要**で、
+  おおむね3秒以内に反映される（tako-J の再配線で動的リロード対応になった）。正典は `docs/deploy.md`。
+  当日「人が集まらないので minPlayers を下げる」ためにサーバーを再起動すると、
+  **進行中の試合が消える**。回帰テスト `TestMatchmaker_ReloadsParamsWithoutRestart` で固定済み。
+- **環境変数の変更**: `/etc/takoda99.env` を書き換えて `systemctl restart takoda99`（試合の合間に）
 
 ### 1.3 状態のライフサイクル
 
