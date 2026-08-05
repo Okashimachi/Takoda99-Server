@@ -1,10 +1,14 @@
-# Plan-15: Webフロント単独結合テスト用の起動構成
+# Plan-15: クライアント単独結合テスト用の起動構成
 
-> **目的**: `Takoda99-WebFront` の開発者が**1接続だけで MatchStart 以降の全メッセージを検証できる**ようにする。
+> **目的**: クライアント開発者が**1接続だけで MatchStart 以降の全メッセージを検証できる**ようにする。
 > **対応issue**: #36
-> **優先度**: **高**。WebFront の開発を現在ブロックしている。
+> **優先度**: **高**。クライアント開発を現在ブロックしている。
 > **依存**: なし（サーバー本体は稼働中）
 > **参照**: `internal/matchmaking/matchmaking.go`, `cmd/server/main.go`, `docs/deploy.md`
+
+> ⚠ **訂正（2026-08-05）**: 本文中の `Takoda99-WebFront` は**廃止・凍結**された。
+> Web先行戦略をやめ **Unity 単独**開発に変わったので、「WebFront」はすべて
+> **`Takoda99-Unity`** と読み替えること。`minPlayers` を下げる手順そのものは変わらない。
 
 ---
 
@@ -132,7 +136,7 @@ websocat wss://takoda99.mooo.com/ws
 
 `MatchmakingStatus` の `minPlayers` が 1 になっていること。**接続しただけで見える**のが重要（§4）。
 
-### Step 3: WebFront に接続してもらう
+### Step 3: Unity クライアントに接続してもらう
 
 接続先は**本番と同じ**:
 
@@ -140,15 +144,15 @@ websocat wss://takoda99.mooo.com/ws
 wss://takoda99.mooo.com/ws
 ```
 
-WebFront 側は接続後に `MatchmakingJoin` を送る（§5）。
+クライアント側は接続後に `MatchmakingJoin` を送る（§5）。
 
-### Step 4: `ALLOWED_ORIGINS` に WebFront を追加
+### Step 4: `ALLOWED_ORIGINS` にクライアントのオリジンを追加
 
 これだけは環境変数なので再起動が要る。**試合の合間に行う**。
 
 ```bash
 sudo nano /etc/takoda99.env
-# ALLOWED_ORIGINS=http://localhost:5173,https://<webfront>.vercel.app
+# ALLOWED_ORIGINS=http://localhost:5173,https://<unity-host>
 ```
 
 ```bash
@@ -200,7 +204,7 @@ curl -s https://takoda99.mooo.com/api/params | jq '.matching.minPlayers'
 
 ---
 
-## 5. WebFront 側の注意点
+## 5. クライアント側の注意点
 
 ### 接続直後に `MatchmakingJoin` を送る必要がある
 
@@ -243,9 +247,9 @@ const joinTimeout = 3 * time.Second
 - [ ] `matching.minPlayers=1` / `startCountdownMs` を config-front から変更できる
 - [ ] 変更が**再起動なしで数秒以内に反映**されることを実測で確認
 - [ ] 1接続で `MatchStart` → `CustomerArrived` → `OrderServed` → `MatchEnd` まで到達できる
-- [ ] `ALLOWED_ORIGINS` に WebFront の dev/本番オリジンが入っている（または未設定＝全許可）
-- [ ] WebFront に「接続直後に `MatchmakingJoin` を送る」ことを伝えた
-- [ ] WebFront が `MatchmakingStatus` の待機画面も実装している（本番は match のため）
+- [ ] `ALLOWED_ORIGINS` にクライアントの dev/本番オリジンが入っている（または未設定＝全許可）
+- [ ] クライアント担当に「接続直後に `MatchmakingJoin` を送る」ことを伝えた
+- [ ] クライアントが `MatchmakingStatus` の待機画面も実装している（本番は match のため）
 - [ ] 検証後に `minPlayers` / `startCountdownMs` を元の値へ戻した
 - [ ] Plan-19 の当日チェックリストに `minPlayers` の確認が入っている
 - [ ] **`deploy/takoda99.service` に `--bots` を足していない**（config の `MinFill` が効かなくなるため）
