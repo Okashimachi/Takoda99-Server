@@ -179,15 +179,60 @@ WebGL ビルドの場合はブラウザのオリジンが `ALLOWED_ORIGINS` に�
 
 手元でビルドして送り、再起動するだけ。
 
+> **`gcloud` CLI はこの環境に入っていない。**実際に使うのは下の「コンソール経由」の手順。
+> `gcloud` を入れてある場合のみ、末尾の gcloud 版が使える。
+
+### 手元でビルド
+
 ```bash
-GOWORK=off CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o /tmp/server ./cmd/server
+GOWORK=off CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/server ./cmd/server
 ```
+
+`-ldflags="-s -w"` はシンボルを落として 16MB → 11MB にするため（コンソールのアップローダを通すので効く）。
+
+ビルドしたものが「どのコミットか」は後から確認できる。デプロイ後に「今動いているのはいつのビルドか」
+分からなくなったら、バイナリを手元に持ってきてこれを見る:
+
+```bash
+go version -m /tmp/server | head -5
+```
+
+`mod takoda99 v0.0.0-<日時>-<コミット>` と `dep github.com/Okashimachi/Takoda99-Proto v0.x.y` が出る。
+
+### 転送（GCPコンソール経由）
+
+GCPコンソール → VM の **SSH** ボタン → 右上の **⚙ → ファイルをアップロード** で
+バイナリ（または tgz）を選ぶ。ホームディレクトリに入る。
+
+### 差し替えて再起動
+
+```bash
+sudo install -o takoda99 -g takoda99 -m 755 ~/server /opt/takoda99/server && sudo systemctl restart takoda99
+```
+
+### 反映確認
+
+```bash
+sudo journalctl -u takoda99 -n 5 --no-pager | grep config
+```
+
+**`config: Postgres から取得（DATABASE_URL）`** が出ていること。
+`config: 内蔵デフォルトで起動` なら **`DATABASE_URL` が渡っていない**（DB接続失敗ではない）。
+→ 下のトラブルシューティング参照。
+
+### unit ファイルは毎回コピーしなくてよい
+
+`deploy/takoda99.service` に変更が無いなら**触らない**。差し替えると、サーバー上で手を入れた
+設定を上書きする。変更した時だけ:
+
+```bash
+sudo cp deploy/takoda99.service /etc/systemd/system/ && sudo systemctl daemon-reload
+```
+
+### gcloud CLI がある場合
 
 ```bash
 gcloud compute scp /tmp/server takoda99-server:/tmp/server --zone us-west1-b
-```
-
-```bash
 gcloud compute ssh takoda99-server --zone us-west1-b --command 'sudo install -o takoda99 -g takoda99 -m 755 /tmp/server /opt/takoda99/server && sudo systemctl restart takoda99'
 ```
 
@@ -282,6 +327,29 @@ DNS 未反映（A レコードが VM の IP を指していない）が大半。
 
 **サーバーが起動しない** — `sudo journalctl -u takoda99 -n 50`。
 `/etc/takoda99.env` の権限（600）と `/opt/takoda99/server` の実行権限（755）を確認。
+
+**`config: 内蔵デフォルトで起動` が出て `/api/params` が JSON を返さない** — DB接続の失敗ではなく
+**`DATABASE_URL` が渡っていない**。このログは `chooseProvider` が env も `CONFIG_URL` も空だった時にだけ出る
+（接続失敗なら `config: DB接続失敗のため設定は内蔵デフォルト: ...` と理由付きで出る）。
+また ConfigStore が無いと `/api/params` のハンドラ自体が登録されず 404 本文が返るので、
+`json.load` が「Expecting value」で落ちる。
+
+まず unit が env ファイルを読めているか見る:
+
+```bash
+sudo journalctl -u takoda99 --no-pager | grep -i 'unknown key\|environmentfile'
+sudo systemctl show takoda99 -p EnvironmentFiles
+```
+
+`Unknown key '-EnvironmentFile'` が出ていたら unit の構文ミス。**`-` はキーではなく値に付ける**:
+
+```
+EnvironmentFile=-/etc/takoda99.env     ← 正
+-EnvironmentFile=/etc/takoda99.env     ← 誤（systemd が行ごと黙って無視する）
+```
+
+systemd は知らないキーをエラーにせず無視するので、**起動は成功したように見える**。
+2026-08-05 に本番で実際に踏んだ（#83）。CI に検査を入れてある。
 
 **WSS は繋がるが試合が始まらない** — `--mode match` は minPlayers 到達＋カウントダウンが要る。
 1人で確認したいなら `--mode solo`（unit の `ExecStart` を一時的に変更）。

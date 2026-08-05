@@ -20,9 +20,13 @@ ExecStart=/opt/takoda99/server --mode match
 WorkingDirectory=/opt/takoda99
 
 # 秘密はここから読む（git に入れない。権限600・所有者root）。
-# 先頭の "-" は「無ければ無視して起動する」の意味。サーバーは DATABASE_URL が無くても
+# 値の先頭の "-" は「無ければ無視して起動する」の意味。サーバーは DATABASE_URL が無くても
 # 内蔵デフォルトで動く設計なので、env ファイル未作成でサービスごと起動不能にしない。
--EnvironmentFile=/etc/takoda99.env
+#
+# ⚠ "-" は【値】に付ける。"-EnvironmentFile=" とキー側に書くと systemd は
+#    "Unknown key" として行ごと黙って無視し、env が一切読まれない（DATABASE_URL が
+#    渡らず内蔵デフォルトで起動する）。エラーにならないので気付きにくい。
+EnvironmentFile=-/etc/takoda99.env
 
 # 一斉接続で小さい alloc が大量に出るため GC のトリガ間隔を広げる（Plan-09）。
 Environment=GOGC=200
