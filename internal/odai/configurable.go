@@ -44,6 +44,21 @@ func NewConfigurablePool(entries []WordEntry) *ConfigurablePool {
 	}
 }
 
+// MaxLevel は語彙が存在する最大の難易度段階を返す（意味は StaticPool.MaxLevel と同じ）。
+// DB 由来の語彙が空ならフォールバック側の段階を返す。
+func (p *ConfigurablePool) MaxLevel() int {
+	max := 0
+	for lvl, words := range p.wordsByLevel {
+		if len(words) > 0 && lvl > max {
+			max = lvl
+		}
+	}
+	if max == 0 && len(p.wordsByLevel) == 0 {
+		return p.fallback.MaxLevel()
+	}
+	return max
+}
+
 func (p *ConfigurablePool) Next(effectiveLevel int, rng *rand.Rand) game.Word {
 	list := p.wordsByLevel[effectiveLevel]
 	for l := effectiveLevel - 1; l >= 0 && len(list) == 0; l-- {

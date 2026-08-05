@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"io"
+
+	"takoda99/internal/sim"
 )
 
 // report.go は計測結果の出力。パラメータ調整の材料になる粒度で出す。
@@ -18,53 +20,53 @@ func seconds(ms int64) float64 { return float64(ms) / 1000 }
 // reportRun は1試合ぶんの詳細を出す。
 func reportRun(w io.Writer, r runResult, index int) {
 	p := printer{w}
-	p.f("\n=== match %d (profile=%s seed=%d stores=%d) ===\n", index, r.profile, r.seed, r.stores)
+	p.f("\n=== match %d (profile=%s seed=%d stores=%d) ===\n", index, r.Profile, r.seed, r.Stores)
 
-	if r.stalled {
-		p.f("膠着       : %d tick / %.1f 秒で決着せず（生存 %d 店）\n", r.ticks, seconds(r.elapsedMs), r.aliveAtEnd)
+	if r.Stalled {
+		p.f("膠着       : %d tick / %.1f 秒で決着せず（生存 %d 店）\n", r.Ticks, seconds(r.ElapsedMs), r.AliveAtEnd)
 	} else {
-		p.f("決着       : %d tick / %.1f 秒（tickIntervalMs=%d）\n", r.ticks, seconds(r.elapsedMs), r.tickMs)
+		p.f("決着       : %d tick / %.1f 秒（tickIntervalMs=%d）\n", r.Ticks, seconds(r.ElapsedMs), r.TickMs)
 	}
-	p.f("最終フェーズ : %s\n", r.finalPhase)
-	p.f("最終heatLevel: %d\n", r.finalHeat)
-	if r.winner != "" {
-		p.f("優勝       : %s (msPerKey=%d missRate=%.3f)\n", r.winner, r.winnerMsPerKey, r.winnerMissRate)
+	p.f("最終フェーズ : %s\n", r.FinalPhase)
+	p.f("最終heatLevel: %d\n", r.HeatLevel)
+	if r.Winner != "" {
+		p.f("優勝       : %s (msPerKey=%d missRate=%.3f)\n", r.Winner, r.WinnerMsPerKey, r.WinnerMissRate)
 	}
 	// 自滅が0だと「決着が下位淘汰100%頼み」＝我慢ゲージが効いていない兆候なので必ず出す。
-	p.f("脱落内訳   : 自滅 %d / 淘汰 %d\n", r.selfCollapses, r.culls)
-	p.f("客の捌き   : 提供 %d / 離脱 %d\n", r.servedTotal, r.leftTotal)
-	if r.rejected > 0 {
-		p.f("⚠ 弾かれた提供報告: %d（ダミー店の行列が session とズレている）\n", r.rejected)
+	p.f("脱落内訳   : 自滅 %d / 淘汰 %d\n", r.SelfCollapses, r.Culls)
+	p.f("客の捌き   : 提供 %d / 離脱 %d\n", r.Served, r.Left)
+	if r.Rejected > 0 {
+		p.f("⚠ 弾かれた提供報告: %d（ダミー店の行列が session とズレている）\n", r.Rejected)
 	}
 
-	if len(r.phaseEvents) > 0 {
+	if len(r.PhaseChanges) > 0 {
 		p.f("\nフェーズ推移:\n")
-		for _, e := range r.phaseEvents {
-			p.f("  →%-5s : tick %4d (%6.1fs) alive=%d\n", e.phase, e.tick, seconds(e.elapsedMs), e.alive)
+		for _, e := range r.PhaseChanges {
+			p.f("  →%-5s : tick %4d (%6.1fs) alive=%d\n", e.Phase, e.Tick, seconds(e.ElapsedMs), e.Alive)
 		}
 	}
 
 	p.f("\n生存数の推移（10%%刻み）:\n")
 	for _, s := range aliveDeciles(r) {
-		p.f("  tick %5d (%6.1fs)  alive %d\n", s.tick, seconds(s.elapsedMs), s.alive)
+		p.f("  tick %5d (%6.1fs)  alive %d\n", s.Tick, seconds(s.ElapsedMs), s.Alive)
 	}
 }
 
 // aliveDeciles は生存数が店舗数の 100%,90%,…,10% を初めて割った時点を拾う。
-func aliveDeciles(r runResult) []aliveSample {
-	var out []aliveSample
+func aliveDeciles(r runResult) []sim.AlivePoint {
+	var out []sim.AlivePoint
 	seen := make(map[int]bool, 11)
 	for k := 0; k <= 10; k++ {
-		target := r.stores * (10 - k) / 10
+		target := r.Stores * (10 - k) / 10
 		if target < 1 {
 			target = 1
 		}
-		for _, s := range r.aliveTimeline {
-			if s.alive > target {
+		for _, s := range r.AliveCurve {
+			if s.Alive > target {
 				continue
 			}
-			if !seen[s.tick] {
-				seen[s.tick] = true
+			if !seen[s.Tick] {
+				seen[s.Tick] = true
 				out = append(out, s)
 			}
 			break
@@ -100,23 +102,23 @@ func reportSummary(w io.Writer, results []runResult, targetMinSec, targetMaxSec 
 	)
 
 	for _, r := range results {
-		heatSum += r.finalHeat
-		if r.finalHeat > heatMax {
-			heatMax = r.finalHeat
+		heatSum += r.HeatLevel
+		if r.HeatLevel > heatMax {
+			heatMax = r.HeatLevel
 		}
-		selfSum += r.selfCollapses
-		cullSum += r.culls
-		servedSum += r.servedTotal
-		leftSum += r.leftTotal
-		rejectSum += r.rejected
+		selfSum += r.SelfCollapses
+		cullSum += r.Culls
+		servedSum += r.Served
+		leftSum += r.Left
+		rejectSum += r.Rejected
 
-		if r.stalled {
+		if r.Stalled {
 			stalled++
 			continue
 		}
 		finished++
 
-		sec := seconds(r.elapsedMs)
+		sec := seconds(r.ElapsedMs)
 		secSum += sec
 		if secMin < 0 || sec < secMin {
 			secMin = sec
@@ -124,12 +126,12 @@ func reportSummary(w io.Writer, results []runResult, targetMinSec, targetMaxSec 
 		if sec > secMax {
 			secMax = sec
 		}
-		tickSum += r.ticks
-		if tickMin < 0 || r.ticks < tickMin {
-			tickMin = r.ticks
+		tickSum += r.Ticks
+		if tickMin < 0 || r.Ticks < tickMin {
+			tickMin = r.Ticks
 		}
-		if r.ticks > tickMax {
-			tickMax = r.ticks
+		if r.Ticks > tickMax {
+			tickMax = r.Ticks
 		}
 		if sec >= targetMinSec && sec <= targetMaxSec {
 			inTarget++
@@ -137,7 +139,7 @@ func reportSummary(w io.Writer, results []runResult, targetMinSec, targetMaxSec 
 	}
 
 	n := len(results)
-	p.f("\n=== %d runs / profile=%s / stores=%d ===\n", n, results[0].profile, results[0].stores)
+	p.f("\n=== %d runs / profile=%s / stores=%d ===\n", n, results[0].Profile, results[0].Stores)
 	if finished > 0 {
 		f := float64(finished)
 		p.f("決着時間     : 平均 %.1fs / 最短 %.1fs / 最長 %.1fs\n", secSum/f, secMin, secMax)

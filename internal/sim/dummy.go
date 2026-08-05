@@ -1,4 +1,4 @@
-package main
+package sim
 
 import (
 	"fmt"
@@ -12,19 +12,25 @@ import (
 // dummy.go はシミュレータ内の仮想プレイヤー（ダミー店）。
 // 実力を (1打鍵あたりのms, 打鍵ごとのミス率) の2値で表し、人間の分布を模す。
 
-// profile は99店の実力分布のプリセット。
-type profile string
+// Profile は店舗の実力分布のプリセット。
+type Profile string
 
 const (
-	profileUniform profile = "uniform" // 全員同じ実力（膠着の最悪ケース）
-	profileNormal  profile = "normal"  // 正規分布（現実に近い）
-	profileBipolar profile = "bipolar" // 二極化（上手い/下手がはっきり）
-	profileWide    profile = "wide"    // 実力差が非常に大きい
+	ProfileUniform Profile = "uniform" // 全員同じ実力（膠着の最悪ケース）
+	ProfileNormal  Profile = "normal"  // 正規分布（現実に近い）
+	ProfileBipolar Profile = "bipolar" // 二極化（上手い/下手がはっきり）
+	ProfileWide    Profile = "wide"    // 実力差が非常に大きい
 )
 
-func parseProfile(s string) (profile, error) {
-	switch p := profile(s); p {
-	case profileUniform, profileNormal, profileBipolar, profileWide:
+// AllProfiles は全プリセット。決着保証テストが「どれでも終わること」を確認する。
+func AllProfiles() []Profile {
+	return []Profile{ProfileUniform, ProfileNormal, ProfileBipolar, ProfileWide}
+}
+
+// ParseProfile は文字列を Profile に解決する。
+func ParseProfile(s string) (Profile, error) {
+	switch p := Profile(s); p {
+	case ProfileUniform, ProfileNormal, ProfileBipolar, ProfileWide:
 		return p, nil
 	default:
 		return "", fmt.Errorf("未知の profile %q（uniform|normal|bipolar|wide）", s)
@@ -155,24 +161,24 @@ func countKeystrokes(words []string) int {
 }
 
 // buildStores は n 店ぶんの実力をプリセットに従って割り当てる。
-func buildStores(n int, p profile, rng *rand.Rand) []*dummyStore {
+func buildStores(n int, p Profile, rng *rand.Rand) []*dummyStore {
 	stores := make([]*dummyStore, n)
 	for i := range stores {
 		var msPerKey int
 		var missRate float64
 		switch p {
-		case profileUniform:
+		case ProfileUniform:
 			msPerKey, missRate = 200, 0.05
-		case profileNormal:
+		case ProfileNormal:
 			msPerKey = 200 + int(rng.NormFloat64()*50)
 			missRate = clamp(0.05+rng.NormFloat64()*0.02, 0, 0.5)
-		case profileBipolar:
+		case ProfileBipolar:
 			if i%2 == 0 {
 				msPerKey, missRate = 130, 0.02
 			} else {
 				msPerKey, missRate = 300, 0.10
 			}
-		case profileWide:
+		case ProfileWide:
 			msPerKey = 100 + rng.Intn(400)
 			missRate = rng.Float64() * 0.2
 		}

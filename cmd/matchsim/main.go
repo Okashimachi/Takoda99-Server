@@ -1,12 +1,8 @@
-// Command matchsim は1試合をヘッドレスに tick 駆動して決着時間を測る、バランス調整用の
-// シミュレータ（Plan-13 / issue #12）。
+// Command matchsim は1試合をヘッドレスに tick 駆動して決着時間を測る、バランス調整用の CLI
+// （Plan-13 / issue #12）。
 //
-// room / transport / bot は通さず game.Session を直接叩く。room は実時計(ticker)で回るので
-// 「1試合を数秒で」が成立しないため。Bot の代わりに、打鍵速度とミス率の2値で実力を表した
-// ダミー店（dummy.go）を sim 内に持ち、ApplyOrderServed を直接呼ぶ。
-//
-// これは **バランス調整** の道具であって性能検証ではない。99接続の WebSocket を捌けるか
-// （実時間・実配信）は別物で、Plan-18 の負荷テストが担う。
+// シミュレータ本体は `internal/sim`。ここはフラグを解釈してレポートを出すだけの薄い層で、
+// 同じ `sim.Simulate` を Plan-14（#34）の決着保証テストが CI から呼んでいる。
 package main
 
 import (
@@ -18,6 +14,7 @@ import (
 	"time"
 
 	"takoda99/internal/game"
+	"takoda99/internal/sim"
 )
 
 func main() {
@@ -37,10 +34,16 @@ func main() {
 	}
 }
 
+// runResult はレポート用に Result へシード（再現に要る）を添えたもの。
+type runResult struct {
+	sim.Result
+	seed int64
+}
+
 func run(w io.Writer, stores int, prof string, runs int, seed int64, maxTicks int, quiet bool,
 	targetMinSec, targetMaxSec float64) error {
 
-	p, err := parseProfile(prof)
+	p, err := sim.ParseProfile(prof)
 	if err != nil {
 		return err
 	}
@@ -54,7 +57,7 @@ func run(w io.Writer, stores int, prof string, runs int, seed int64, maxTicks in
 		return fmt.Errorf("--max-ticks は1以上である必要 (got %d)", maxTicks)
 	}
 
-	// 調整値は GameParameters が正典。sim 側で数値を作らない。
+	// 調整値は GameParameters が正典。CLI 側で数値を作らない。
 	params := game.DefaultParameters()
 	if err := params.Validate(); err != nil {
 		return fmt.Errorf("DefaultParameters が不正: %w", err)
@@ -63,8 +66,16 @@ func run(w io.Writer, stores int, prof string, runs int, seed int64, maxTicks in
 	results := make([]runResult, 0, runs)
 	for i := 0; i < runs; i++ {
 		s := seed + int64(i)
-		r := simulate(params, stores, p, rand.New(rand.NewSource(s)), maxTicks)
-		r.seed = s
+		r := runResult{
+			Result: sim.Simulate(sim.Config{
+				Params:   params,
+				Stores:   stores,
+				Profile:  p,
+				Rng:      rand.New(rand.NewSource(s)),
+				MaxTicks: maxTicks,
+			}),
+			seed: s,
+		}
 		results = append(results, r)
 		if !quiet {
 			reportRun(w, r, i+1)
@@ -77,7 +88,7 @@ func run(w io.Writer, stores int, prof string, runs int, seed int64, maxTicks in
 
 	// 膠着は「決着が保証されていない」ことなので、気付かず素通りさせない。
 	for _, r := range results {
-		if r.stalled {
+		if r.Stalled {
 			return fmt.Errorf("膠着: max-ticks(%d) に到達した試行がある。決着が保証されていない", maxTicks)
 		}
 	}
