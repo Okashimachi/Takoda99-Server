@@ -47,6 +47,8 @@ linters:
               desc: "game はマッチングを知らない。"
             - pkg: "takoda99/internal/transport"
               desc: "game は通信を知らない（純粋なコアに保つ）。"
+            - pkg: "takoda99/internal/sim"
+              desc: "game はシミュレータを知らない。sim が game を駆動する一方向。"
 
         # ── ルール2: コア game は I/O・通信の具象に依存しない ──
         # 純粋・Tick(dt)駆動に保ち、Goでヘッドレスにシミュレートできる状態を維持する。
@@ -88,6 +90,31 @@ linters:
               desc: "configapi はマッチングに依存しない。"
             - pkg: "takoda99/internal/transport"
               desc: "configapi は WS 通信層に依存しない。"
+
+        # ── ルール2.7: シミュレータ sim は game をヘッドレスに駆動するだけ ──
+        # internal/sim は game.Session を直接 tick 駆動する開発ツール（バランス調整・決着保証テスト）。
+        # 実時計・通信・永続化を挟むと「1試合を数秒で」が壊れるので、スパインと db には依存させない。
+        # 依存の向きは sim → game の一方向（game 側は上の game-core-isolation で sim を deny 済み）。
+        sim-drives-core-only:
+          files:
+            - "**/internal/sim/**"
+          allow:
+            - "$gostd"
+            - "takoda99/internal/game"
+            - "takoda99/internal/proto"
+            - "takoda99/internal/odai"
+            - "takoda99/internal/sim"
+          deny:
+            - pkg: "takoda99/internal/room"
+              desc: "sim は room を通さない。room は実時計(ticker)で回るのでヘッドレスにならない。"
+            - pkg: "takoda99/internal/transport"
+              desc: "sim は通信を挟まない（99接続の性能検証は Plan-18 の負荷テストの担当）。"
+            - pkg: "takoda99/internal/matchmaking"
+              desc: "sim は試合の中身だけを回す。マッチングは対象外。"
+            - pkg: "takoda99/internal/db"
+              desc: "sim は永続化に触らない。パラメータは Config で注入する。"
+            - pkg: "takoda99/internal/bot"
+              desc: "sim は独自のダミー店モデルを持つ（bot は Connection 越しの自動入力で別物）。"
 
         # ── ルール3: 層3部品は game/proto へ向かうのみ ──
         # targeting/odai/config は game(ports実装のため)・proto・標準ライブラリだけに依存する。

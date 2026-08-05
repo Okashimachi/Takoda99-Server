@@ -107,6 +107,9 @@ internal/
   bot/                 … 【層3部品】CPUの自動入力（OrderServed を内部生成）
   store/               … 【層3部品】試合結果永続化の口
 
+  sim/                 … 【開発ツール】game.Session を直接 tick 駆動するヘッドレスシミュレータ
+                       …   バランス調整(cmd/matchsim)と決着保証テストが共有。sim → game の一方向
+
   room/                … 【スパイン】tickループ駆動。session.Tick を回し入力適用・配信
   matchmaking/         … 【スパイン】待機プール・人数下限＋カウントダウン・Bot補完
   transport/           … 【スパイン】coder/websocket・状態配信（間引き）・接続ライフサイクル
@@ -217,6 +220,9 @@ go run ./cmd/server --mode solo        # ローカル1人＋Bot（マッチン�
 go run ./cmd/matchsim                             # ヘッドレス1試合（バランス調整用・99店）
 go run ./cmd/matchsim --runs 20 --quiet           # 20回まわして決着時間の統計
 go run ./cmd/matchsim --profile uniform --seed 42 # 実力分布を変える／結果を再現する
+
+go test ./internal/sim/                              # 決着保証テスト（CI 常設）
+go test -v ./internal/sim/ -run ReportTiming         # 決着時間の実測表
 ```
 
 - `cmd/matchsim` は **バランス調整**の道具（メモリ内・大きい dt で高速）。

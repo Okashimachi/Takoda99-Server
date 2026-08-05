@@ -22,6 +22,21 @@ func NewStaticPool() *StaticPool {
 	}
 }
 
+// MaxLevel は語彙が存在する最大の難易度段階を返す。
+//
+// Next はこの段階より上を要求されても下へ降りて探すため、`heatLevel > MaxLevel()` の
+// 領域では**火力を上げてもお題が変わらない**（＝難度が頭打ち）。決着保証の検証で
+// 「上端に張り付いたまま試合が終わらない」状態を検出するのに要る。
+func (p *StaticPool) MaxLevel() int {
+	max := 0
+	for lvl, words := range p.wordsByLevel {
+		if len(words) > 0 && lvl > max {
+			max = lvl
+		}
+	}
+	return max
+}
+
 // Next は指定段階の候補から乱択で1語返す。
 func (p *StaticPool) Next(effectiveLevel int, rng *rand.Rand) game.Word {
 	list := p.wordsByLevel[effectiveLevel]
