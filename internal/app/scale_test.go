@@ -23,9 +23,9 @@ func TestScale_99Bots_RunsToCompletion(t *testing.T) {
 	}
 
 	params := game.DefaultParameters()
-	params.Session.TickIntervalMs = 15     // 高頻度tick
+	params.Session.TickIntervalMs = 15 // 高頻度tick
 	params.Session.PublishIntervalMs = 60
-	params.Customer.Total = 50             // 少ない客で早期収束
+	params.Customer.Total = 50 // 少ない客で早期収束
 
 	const n = 99
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)

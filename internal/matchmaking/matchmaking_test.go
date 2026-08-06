@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -80,8 +81,10 @@ func TestMatchmaker_CountdownAndBotFill(t *testing.T) {
 func TestMatchmaker_MaxPlayersImmediateStart(t *testing.T) {
 	started := make(chan []Player, 1)
 	m := New(Config{
-		GetParams: func() game.MatchingParams { return game.MatchingParams{MinPlayers: 2, MaxPlayers: 2, StartCountdownMs: 15000} },
-		Start:  func(p []Player) { started <- p },
+		GetParams: func() game.MatchingParams {
+			return game.MatchingParams{MinPlayers: 2, MaxPlayers: 2, StartCountdownMs: 15000}
+		},
+		Start: func(p []Player) { started <- p },
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -107,9 +110,11 @@ func TestMatchmaker_LeaveBelowMinCancelsCountdown(t *testing.T) {
 	afterCh := make(chan time.Time, 1)
 	started := make(chan []Player, 1)
 	m := New(Config{
-		GetParams: func() game.MatchingParams { return game.MatchingParams{MinPlayers: 2, MaxPlayers: 99, StartCountdownMs: 15000} },
-		After:  func(time.Duration) <-chan time.Time { return afterCh },
-		Start:  func(p []Player) { started <- p },
+		GetParams: func() game.MatchingParams {
+			return game.MatchingParams{MinPlayers: 2, MaxPlayers: 99, StartCountdownMs: 15000}
+		},
+		After: func(time.Duration) <-chan time.Time { return afterCh },
+		Start: func(p []Player) { started <- p },
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -230,5 +235,73 @@ func TestMatchmaker_ReloadsParamsWithoutRestart(t *testing.T) {
 	mu.Unlock()
 	if c < 2 {
 		t.Fatalf("GetParams が %d 回しか呼ばれていない（毎ループ読み直していない）", c)
+	}
+}
+
+// 表示名は MaxDisplayNameLen（6ルーン）で切り詰められること。
+//
+// クライアントはマッチング画面に99枠のグリッドを描いており、長い名前が1つでも
+// 混ざるとレイアウトが崩れる。自クライアントの入力欄に上限を掛けても
+// **別クライアントや直接接続から長い名前を送られる**ので、サーバー側で揃える。
+func TestSanitizeDisplayName_TruncatesToMax(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"6文字ちょうどは切らない", "たこやき太郎", "たこやき太郎"},
+		{"7文字は6文字に切る", "たこやき次郎丸", "たこやき次郎"},
+		{"ASCII も同じ", "abcdefghij", "abcdef"},
+		{"全角/半角を混ぜても文字数で数える", "あaいiうu", "あaいiうu"},
+		{"短い名前はそのまま", "たこ", "たこ"},
+		{"空は空", "", ""},
+		{"前後の空白は落とす", "  たこ  ", "たこ"},
+		{"制御文字は落とす", "た\nこ\tや\rき", "たこやき"},
+		{"切り詰め後の末尾空白も落とす", "たこやき  次郎", "たこやき"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := SanitizeDisplayName(c.in)
+			if got != c.want {
+				t.Fatalf("SanitizeDisplayName(%q) = %q, want %q", c.in, got, c.want)
+			}
+			if n := len([]rune(got)); n > MaxDisplayNameLen {
+				t.Fatalf("%d ルーン返した（上限 %d）", n, MaxDisplayNameLen)
+			}
+		})
+	}
+}
+
+// どんな入力でも上限を超えないこと（表示崩れの最終防波堤）。
+func TestSanitizeDisplayName_NeverExceedsMax(t *testing.T) {
+	inputs := []string{
+		strings.Repeat("あ", 100),
+		strings.Repeat("a", 1000),
+		strings.Repeat("👨‍👩‍👧", 20),
+		strings.Repeat("が", 50),
+		"🎌🎌🎌🎌🎌🎌🎌🎌🎌🎌",
+	}
+	for _, in := range inputs {
+		got := SanitizeDisplayName(in)
+		if n := len([]rune(got)); n > MaxDisplayNameLen {
+			t.Fatalf("入力 %q → %d ルーン（上限 %d）", in, n, MaxDisplayNameLen)
+		}
+	}
+}
+
+// 切り詰めで宙に浮いた結合文字を末尾に残さないこと。
+//
+// ルーン単位で切ると絵文字の合字（ZWJ 連結）や異体字セレクタの途中で切れる。
+// 末尾に単独では意味を持たない文字が残ると、受け手によって豆腐や別の絵文字に化ける。
+func TestSanitizeDisplayName_NoDanglingJoiner(t *testing.T) {
+	// 👨‍👩‍👧 は [👨, ZWJ, 👩, ZWJ, 👧] の5ルーン。2つ繋ぐと6ルーン目が ZWJ になる。
+	got := SanitizeDisplayName("👨‍👩‍👧‍👦")
+	for _, r := range []rune{0x200D, 0xFE0E, 0xFE0F} {
+		if rs := []rune(got); len(rs) > 0 && rs[len(rs)-1] == r {
+			t.Fatalf("末尾に結合用の文字が残った: %q (U+%04X)", got, r)
+		}
+	}
+	if n := len([]rune(got)); n > MaxDisplayNameLen {
+		t.Fatalf("%d ルーン（上限 %d）", n, MaxDisplayNameLen)
 	}
 }
