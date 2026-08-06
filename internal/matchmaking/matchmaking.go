@@ -9,6 +9,7 @@ package matchmaking
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 	"unicode"
@@ -80,6 +81,27 @@ func trimDanglingJoiners(rs []rune) []rune {
 		}
 	}
 	return rs
+}
+
+// FallbackDisplayName は名前を送らなかったプレイヤーと Bot に割り当てる表示名。
+//
+// **MaxDisplayNameLen（6文字）に必ず収まること。** クライアントはマッチング画面に99枠の
+// グリッドを描いており、ここが溢れるとレイアウトが崩れる。しかも崩れるのは
+// 「名前を入力しなかった人」と Bot だけなので、**手元のテストでは気付かず本番で初めて出る**。
+//
+// 採番は**試合内の通し番号**（1..99）。接続IDの `p-1234` を使うと試合数が増えるほど桁が伸びて
+// 6文字を超える（`p-12345` で7文字）。試合内番号なら `ゲスト99` / `CPU99` の5文字で頭打ちになる。
+//
+//	名前なしの人間 : ゲスト1 〜 ゲスト99  （最大5文字）
+//	Bot            : CPU1   〜 CPU99    （最大5文字）
+//
+// **待機中の participants と試合開始後の stores[] で同じ名前になる**ことが重要。
+// startMatch が待機プールの順をそのまま席順にするので、待機プールの添字+1 を渡せば一致する。
+func FallbackDisplayName(isBot bool, seat int) string {
+	if isBot {
+		return fmt.Sprintf("CPU%d", seat)
+	}
+	return fmt.Sprintf("ゲスト%d", seat)
 }
 
 // Config は matchmaking の依存と数値。
@@ -217,25 +239,51 @@ func (m *Matchmaker) startMatch(pool []Player, params game.MatchingParams) {
 }
 
 // broadcast は待機者へ現在の MatchmakingStatus を配信する。
+// broadcast は待機者へ現在の MatchmakingStatus を配る。
+//
+// ⚠ **宛先ごとに内容が違う**（SelfStoreId が受信者自身を指すため）。
+// 参加者一覧は全員で共通なので1回だけ組み立て、封筒だけ宛先ごとに作り直す。
+//
+// 帯域: 99人 × (id + 6文字の名前 + JSON) ≒ 5KB/通。1秒ティッカー × 99宛先で約490KB/秒。
+// ただし minPlayers 到達で即カウントダウンに入るため「99人が長時間待つ」状態は起きず、
+// 実質カウントダウンの窓（既定15秒）だけ。1試合あたり約7MB で、試合中の
+// StoreListUpdate（645MB）の約1%。
 func (m *Matchmaker) broadcast(pool []Player, counting bool, countdownStart time.Time, params game.MatchingParams) {
-	status := proto.MatchmakingStatus{
-		WaitingCount: len(pool),
-		MinPlayers:   params.MinPlayers,
-	}
+	var countdown *int
 	if counting {
 		remaining := params.StartCountdownMs - int(time.Since(countdownStart).Milliseconds())
 		if remaining < 0 {
 			remaining = 0
 		}
-		status.CountdownMs = &remaining
+		countdown = &remaining
 	}
-	data, err := json.Marshal(status)
-	if err != nil {
-		return
+
+	// 名前は待機プールの添字から決める。startMatch が pool の順をそのまま席順にするので、
+	// ここで割り当てた名前は試合開始後の stores[] と一致する。
+	participants := make([]proto.MatchmakingParticipant, 0, len(pool))
+	for i, p := range pool {
+		name := p.Name
+		if name == "" {
+			name = FallbackDisplayName(p.IsBot, i+1)
+		}
+		participants = append(participants, proto.MatchmakingParticipant{
+			StoreId:     string(p.Id),
+			DisplayName: name,
+		})
 	}
-	env := proto.Envelope{Type: proto.TypeMatchmakingStatus, Payload: data}
+
 	for _, p := range pool {
-		_ = p.Conn.Send(env)
+		data, err := json.Marshal(proto.MatchmakingStatus{
+			WaitingCount: len(pool),
+			MinPlayers:   params.MinPlayers,
+			CountdownMs:  countdown,
+			SelfStoreId:  string(p.Id),
+			Participants: participants,
+		})
+		if err != nil {
+			continue
+		}
+		_ = p.Conn.Send(proto.Envelope{Type: proto.TypeMatchmakingStatus, Payload: data})
 	}
 }
 

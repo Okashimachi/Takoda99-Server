@@ -56,7 +56,7 @@ func RunMatch(ctx context.Context, d Deps, players []matchmaking.Player) {
 	for i, p := range players {
 		name := p.Name
 		if name == "" {
-			name = fallbackName(p.IsBot, i+1)
+			name = matchmaking.FallbackDisplayName(p.IsBot, i+1)
 		}
 		inits = append(inits, game.PlayerInit{Id: p.Id, DisplayName: name})
 		conns[p.Id] = p.Conn
@@ -123,26 +123,6 @@ func saveResults(ctx context.Context, d Deps, sess *game.Session, matchId string
 }
 
 // NewBotPlayer は Bot 枠を1つ作る。
-// fallbackName は名前を送らなかったプレイヤーと Bot に割り当てる表示名。
-//
-// **matchmaking.MaxDisplayNameLen（6文字）に必ず収まること。** クライアントは
-// マッチング画面に99枠のグリッドを描いており、ここが溢れるとレイアウトが崩れる。
-// しかも崩れるのは「名前を入力しなかった人」と Bot だけなので、
-// **手元のテストでは気付かず本番で初めて出る**種類の不具合になる。
-//
-// 採番は**試合内の通し番号**（1..99）。接続IDの `p-1234` を使うと試合数が増えるほど
-// 桁が伸びて6文字を超える（`p-12345` で7文字）。試合内番号なら最大 `ゲスト99` / `CPU99` の
-// 5文字で頭打ちになる。
-//
-//	名前なしの人間 : ゲスト1 〜 ゲスト99  （最大5文字）
-//	Bot            : CPU1   〜 CPU99    （最大5文字）
-func fallbackName(isBot bool, seat int) string {
-	if isBot {
-		return fmt.Sprintf("CPU%d", seat)
-	}
-	return fmt.Sprintf("ゲスト%d", seat)
-}
-
 func NewBotPlayer(ctx context.Context, id game.PlayerId, cfg bot.Config) matchmaking.Player {
 	srv, cli := transport.Pipe()
 	b := bot.New(cli, cfg, newRng())

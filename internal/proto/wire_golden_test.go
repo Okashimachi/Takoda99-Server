@@ -65,9 +65,15 @@ func TestWireGolden(t *testing.T) {
 		{"MatchEnd/自滅（reason あり）",
 			MatchEnd{FinalRank: 57, Reason: ElimSelfCollapse, MatchElapsedMs: 90000},
 			`{"finalRank":57,"stats":{"servedCount":0,"avgAccuracy":0,"avgElapsedMs":0,"leftCount":0,"totalKeystrokes":0,"totalMisses":0,"fastestMs":0,"slowestMs":0,"normal":{"served":0,"left":0},"bonus":{"served":0,"left":0},"claimer":{"served":0,"left":0},"buzz":{"served":0,"left":0}},"reason":"SelfCollapse","matchElapsedMs":90000,"creditLeft":0,"evalRaw":0,"evalNormalized":0}`},
-		{"MatchmakingStatus/待機",
-			MatchmakingStatus{WaitingCount: 3, MinPlayers: 20},
-			`{"waitingCount":3,"minPlayers":20}`},
+		{"MatchmakingStatus/待機（宛先ごとに selfStoreId が違う）",
+			MatchmakingStatus{
+				WaitingCount: 2, MinPlayers: 20, SelfStoreId: "p-2",
+				Participants: []MatchmakingParticipant{
+					{StoreId: "p-1", DisplayName: "たこ焼き"},
+					{StoreId: "p-2", DisplayName: "ゲスト2"},
+				},
+			},
+			`{"waitingCount":2,"minPlayers":20,"selfStoreId":"p-2","participants":[{"storeId":"p-1","displayName":"たこ焼き"},{"storeId":"p-2","displayName":"ゲスト2"}]}`},
 
 		// ── C2S ──
 		{"OrderServed",

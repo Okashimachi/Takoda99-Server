@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -303,5 +304,130 @@ func TestSanitizeDisplayName_NoDanglingJoiner(t *testing.T) {
 	}
 	if n := len([]rune(got)); n > MaxDisplayNameLen {
 		t.Fatalf("%d ルーン（上限 %d）", n, MaxDisplayNameLen)
+	}
+}
+
+// 待機者へ配る MatchmakingStatus に参加者一覧と「自分がどれか」が入ること（#REQ-03）。
+//
+// マッチング画面が99枠のグリッドに参加者を並べ、自分だけ強調表示するために要る。
+// **宛先ごとに selfStoreId が違う**ので、全員に同じ封筒を配ってはいけない。
+func TestMatchmaker_StatusCarriesParticipantsAndSelf(t *testing.T) {
+	tick := make(chan time.Time, 4)
+	m := New(Config{
+		GetParams: func() game.MatchingParams {
+			return game.MatchingParams{MinPlayers: 99, MaxPlayers: 99, StartCountdownMs: 0}
+		},
+		After: func(time.Duration) <-chan time.Time { return tick },
+		Start: func([]Player) {},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go m.Run(ctx)
+
+	srv1, cli1 := transport.Pipe()
+	srv2, cli2 := transport.Pipe()
+	m.Join(Player{Id: "p-1", Conn: srv1, Name: "たこ焼き"})
+	m.Join(Player{Id: "p-2", Conn: srv2}) // 名前なし → フォールバック名が付くはず
+
+	// 1秒ティッカー相当の定期配信を待つ。
+	s1 := readStatus(t, cli1)
+	s2 := readStatus(t, cli2)
+
+	// 自分の識別子は宛先ごとに違う。
+	if s1.SelfStoreId != "p-1" {
+		t.Errorf("p-1 が受け取った selfStoreId = %q, want p-1", s1.SelfStoreId)
+	}
+	if s2.SelfStoreId != "p-2" {
+		t.Errorf("p-2 が受け取った selfStoreId = %q, want p-2", s2.SelfStoreId)
+	}
+
+	// 参加者一覧は全員で共通。
+	for _, s := range []proto.MatchmakingStatus{s1, s2} {
+		if len(s.Participants) != 2 {
+			t.Fatalf("participants = %d 件, want 2: %+v", len(s.Participants), s.Participants)
+		}
+		if s.Participants[0].StoreId != "p-1" || s.Participants[0].DisplayName != "たこ焼き" {
+			t.Errorf("participants[0] = %+v", s.Participants[0])
+		}
+		// 名前を送らなかった人にもサーバーがフォールバック名を付ける
+		// （クライアント側で生成・補完しない取り決めのため）。
+		if s.Participants[1].StoreId != "p-2" {
+			t.Errorf("participants[1].storeId = %q", s.Participants[1].StoreId)
+		}
+		if got, want := s.Participants[1].DisplayName, FallbackDisplayName(false, 2); got != want {
+			t.Errorf("名前なしの参加者 = %q, want %q", got, want)
+		}
+		if n := len([]rune(s.Participants[1].DisplayName)); n > MaxDisplayNameLen {
+			t.Errorf("フォールバック名が %d ルーン（上限 %d）", n, MaxDisplayNameLen)
+		}
+	}
+}
+
+// 待機中の並び順が試合開始後の席順と一致すること。
+//
+// クライアントはマッチング画面で並べた位置を試合開始後もそのまま使う。
+// ここがズレるとグリッドが試合開始時に総入れ替えになる。
+func TestMatchmaker_ParticipantOrderMatchesSeatOrder(t *testing.T) {
+	tick := make(chan time.Time, 4)
+	started := make(chan []Player, 1)
+	m := New(Config{
+		GetParams: func() game.MatchingParams {
+			return game.MatchingParams{MinPlayers: 3, MaxPlayers: 99, StartCountdownMs: 0, MinFill: 0}
+		},
+		After: func(time.Duration) <-chan time.Time { return tick },
+		Start: func(p []Player) { started <- p },
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go m.Run(ctx)
+
+	var clis []transport.Connection
+	for i := 1; i <= 3; i++ {
+		srv, cli := transport.Pipe()
+		clis = append(clis, cli)
+		m.Join(Player{Id: game.PlayerId("p-" + strconv.Itoa(i)), Conn: srv})
+	}
+
+	status := readStatus(t, clis[0])
+	tick <- time.Now() // カウントダウン満了 → 試合開始
+
+	var players []Player
+	select {
+	case players = <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("試合が始まらない")
+	}
+
+	if len(status.Participants) != len(players) {
+		t.Fatalf("participants %d 件 / players %d 人", len(status.Participants), len(players))
+	}
+	for i := range players {
+		if string(players[i].Id) != status.Participants[i].StoreId {
+			t.Fatalf("並び順がズレている: 席%d は %q だが participants[%d] は %q",
+				i+1, players[i].Id, i, status.Participants[i].StoreId)
+		}
+	}
+}
+
+func readStatus(t *testing.T, c transport.Connection) proto.MatchmakingStatus {
+	t.Helper()
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case env, ok := <-c.Receive():
+			if !ok {
+				t.Fatal("接続が閉じた")
+			}
+			if env.Type != proto.TypeMatchmakingStatus {
+				continue
+			}
+			var s proto.MatchmakingStatus
+			if err := json.Unmarshal(env.Payload, &s); err != nil {
+				t.Fatalf("MatchmakingStatus をデコードできない: %v", err)
+			}
+			return s
+		case <-deadline:
+			t.Fatal("MatchmakingStatus が届かない")
+		}
 	}
 }
