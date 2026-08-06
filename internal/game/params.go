@@ -223,7 +223,7 @@ func DefaultParameters() GameParameters {
 			MinFill:          99,
 		},
 		Credit: CreditParams{
-			InitialLife: 20,
+			InitialLife: 3,
 			LeaveLoss:   LeaveLoss{Normal: 1, Bonus: 1, Claimer: 1, Buzz: 2},
 		},
 		Customer: CustomerParams{
