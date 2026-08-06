@@ -193,7 +193,7 @@
 {
   "matchId": "m-3",
   "selfStoreId": "p-42",
-  "params": { "initialLife": 20, "maxStores": 99, "stormThresholdPct": 0.1,
+  "params": { "initialLife": 3, "maxStores": 99, "stormThresholdPct": 0.1,
               "finalStageAliveThreshold": 20, "finalRushAliveThreshold": 10 },
   "phase": "Early",
   "stores": [ { "storeId": "p-1", "displayName": "…", "evalNormalized": 0,
