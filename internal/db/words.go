@@ -17,6 +17,7 @@ type WordStore struct {
 func NewWordStore(pool *pgxpool.Pool) *WordStore { return &WordStore{pool: pool} }
 
 // Migrate は words テーブルを作成し、空なら data.go のフォールバック語彙で seed する（冪等）。
+// また、コード側の辞書バージョンが上がった場合は upsert で差分を取り込む。
 func (s *WordStore) Migrate(ctx context.Context) error {
 	const ddl = `CREATE TABLE IF NOT EXISTS words (
 		id              SERIAL PRIMARY KEY,
@@ -26,19 +27,34 @@ func (s *WordStore) Migrate(ctx context.Context) error {
 		level           INT NOT NULL DEFAULT 0,
 		category        TEXT NOT NULL DEFAULT 'general',
 		UNIQUE(text, level)
-	)`
+	);
+	CREATE TABLE IF NOT EXISTS word_seed_version (
+		version INT PRIMARY KEY
+	);
+	`
 	if _, err := s.pool.Exec(ctx, ddl); err != nil {
 		return fmt.Errorf("db: words migrate: %w", err)
 	}
 
-	var count int
-	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM words`).Scan(&count); err != nil {
-		return fmt.Errorf("db: words count: %w", err)
+	const currentSeedVersion = 1
+
+	var v int
+	err := s.pool.QueryRow(ctx, `SELECT version FROM word_seed_version ORDER BY version DESC LIMIT 1`).Scan(&v)
+	if err != nil && err.Error() != "no rows in result set" {
+		return fmt.Errorf("db: words version check: %w", err)
 	}
-	if count > 0 {
-		return nil
+
+	if v < currentSeedVersion {
+		entries := FallbackEntries()
+		// version 0 (初期化時) または更新時は upsert を使う
+		if err := s.saveAll(ctx, entries, "upsert"); err != nil {
+			return fmt.Errorf("db: words upsert fallback: %w", err)
+		}
+		if _, err := s.pool.Exec(ctx, `INSERT INTO word_seed_version (version) VALUES ($1) ON CONFLICT (version) DO NOTHING`, currentSeedVersion); err != nil {
+			return fmt.Errorf("db: words version bump: %w", err)
+		}
 	}
-	return s.seedFallback(ctx)
+	return nil
 }
 
 func (s *WordStore) seedFallback(ctx context.Context) error {

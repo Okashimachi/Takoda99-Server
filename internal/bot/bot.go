@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"time"
 
+	"takoda99/internal/game"
 	"takoda99/internal/proto"
 	"takoda99/internal/transport"
 )
@@ -45,7 +46,7 @@ func (b *Bot) Run(ctx context.Context) {
 	defer func() { _ = b.conn.Close() }()
 	iv := time.Duration(b.cfg.BaseElapsedMs) * time.Millisecond
 	if iv <= 0 {
-		iv = 3000 * time.Millisecond
+		iv = time.Duration(game.DefaultParameters().Bot.BaseElapsedMs) * time.Millisecond
 	}
 	ticker := time.NewTicker(iv)
 	defer ticker.Stop()

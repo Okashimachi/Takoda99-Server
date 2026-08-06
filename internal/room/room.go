@@ -55,7 +55,7 @@ type Room struct {
 // New は Room を作る。conns は playerId→接続。tickMs は tick 周期(ms)。
 func New(session *game.Session, conns map[game.PlayerId]transport.Connection, tickMs int, clock Clock, publisher transport.StatePublisher) *Room {
 	if tickMs <= 0 {
-		tickMs = 150
+		tickMs = game.DefaultParameters().Session.TickIntervalMs
 	}
 	return &Room{
 		session: session, conns: conns, tickMs: tickMs, clock: clock, publisher: publisher,

@@ -1,6 +1,9 @@
 package odai
 
-import "testing"
+import (
+	"testing"
+	"takoda99/internal/game"
+)
 
 // keystrokes が正準ローマ字打鍵数を返す（issue #11 の最短系）。
 func TestKeystrokes(t *testing.T) {
@@ -83,5 +86,11 @@ func TestPlaceholderWords_DifficultyIsMonotonic(t *testing.T) {
 func TestStaticPool_MaxLevelMatchesDictionary(t *testing.T) {
 	if got := NewStaticPool().MaxLevel(); got != MaxWordLevel {
 		t.Fatalf("MaxLevel = %d, want %d", got, MaxWordLevel)
+	}
+}
+
+func TestMaxWordLevelMatchesGame(t *testing.T) {
+	if MaxWordLevel != game.DefaultParameters().Heat.MaxLevel {
+		t.Fatalf("MaxWordLevel=%d, but game.DefaultParameters().Heat.MaxLevel=%d", MaxWordLevel, game.DefaultParameters().Heat.MaxLevel)
 	}
 }
