@@ -190,7 +190,63 @@ func TestCORS_Wildcard_And_Empty(t *testing.T) {
 	}
 }
 
-// GET/POST が現在の設定のハッシュを返すこと（#68 / plan-23）。
+// GET/POST が configHash をボディに含めること（plan-23 §3 案B）。
+//
+// config-front はこれで「保存した値がサーバーに乗ったか」を照合する。
+// **既存フィールドを壊さない**ことが受入条件なので、12セクションが残っているかも見る。
+func TestParams_ConfigHashInBody(t *testing.T) {
+	gp := game.DefaultParameters()
+	h := NewHandler(&fakeStore{gp: gp}, tok, nil)
+
+	w := do(h, http.MethodGet, "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(w.Body.Bytes(), &m); err != nil {
+		t.Fatalf("レスポンスが JSON オブジェクトでない: %v", err)
+	}
+	var got string
+	if err := json.Unmarshal(m["configHash"], &got); err != nil {
+		t.Fatalf("configHash が無い/文字列でない: %v", err)
+	}
+	if want := gp.ConfigHash(); got != want {
+		t.Fatalf("configHash = %q, want %q", got, want)
+	}
+	for _, k := range []string{"session", "matching", "credit", "customer", "eval",
+		"phase", "heat", "storm", "distribution", "patience", "presentation", "bot"} {
+		if _, ok := m[k]; !ok {
+			t.Errorf("既存セクション %q が消えた", k)
+		}
+	}
+}
+
+// configHash を含んだ JSON をそのまま POST し返しても 400 にならないこと。
+// config-front は GET したものを編集して送り返すので、ここが 400 だと保存できない。
+func TestParams_PostAcceptsBodyWithConfigHash(t *testing.T) {
+	fs := &fakeStore{gp: game.DefaultParameters()}
+	h := NewHandler(fs, tok, nil)
+
+	got := do(h, http.MethodGet, "", nil).Body.Bytes()
+	w := do(h, http.MethodPost, tok, got)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", w.Code, w.Body.String())
+	}
+	if fs.saved == nil {
+		t.Fatal("保存されていない")
+	}
+	if fs.saved.Credit.InitialLife != game.DefaultParameters().Credit.InitialLife {
+		t.Fatalf("往復で値が壊れた: %+v", fs.saved.Credit)
+	}
+	// 保存後のレスポンスにも configHash が入ること。
+	var m map[string]json.RawMessage
+	_ = json.Unmarshal(w.Body.Bytes(), &m)
+	if _, ok := m["configHash"]; !ok {
+		t.Fatal("POST のレスポンスに configHash が無い")
+	}
+}
+
+// GET/POST が現在の設定のハッシュをヘッダでも返すこと（plan-23 §3 案C・併用）。
 //
 // config-front は「保存した値がサーバーに乗ったか」をこれで照合する。
 // ボディではなくヘッダにしているので、CORS の Expose-Headers に載っていないと
