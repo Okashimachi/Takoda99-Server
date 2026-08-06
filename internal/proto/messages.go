@@ -48,6 +48,7 @@ type (
 	StoreSummary               = canon.StoreSummary
 	CustomerView               = canon.CustomerView
 	MatchStats                 = canon.MatchStats
+	AttributeTally             = canon.AttributeTally
 	GameParametersPublicSubset = canon.GameParametersPublicSubset
 	Envelope                   = canon.Envelope
 )
