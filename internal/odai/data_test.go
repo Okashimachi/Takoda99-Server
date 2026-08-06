@@ -2,6 +2,7 @@ package odai
 
 import (
 	"testing"
+
 	"takoda99/internal/game"
 )
 
@@ -89,8 +90,14 @@ func TestStaticPool_MaxLevelMatchesDictionary(t *testing.T) {
 	}
 }
 
+// 辞書の上端と heat.maxLevel の既定が一致すること。
+//
+// game は odai を import できない（依存が逆流する）ので、この2つは手で揃えるしかない。
+// ズレると heatLevel が辞書に無い段階まで上がり、火力を上げてもお題が変わらなくなる（#75）。
+// 機械的な保証はここだけなので消さないこと。
 func TestMaxWordLevelMatchesGame(t *testing.T) {
-	if MaxWordLevel != game.DefaultParameters().Heat.MaxLevel {
-		t.Fatalf("MaxWordLevel=%d, but game.DefaultParameters().Heat.MaxLevel=%d", MaxWordLevel, game.DefaultParameters().Heat.MaxLevel)
+	if got, want := MaxWordLevel, game.DefaultParameters().Heat.MaxLevel; got != want {
+		t.Fatalf("odai.MaxWordLevel=%d だが game.DefaultParameters().Heat.MaxLevel=%d。"+
+			"辞書に段階を足したら params.go の Heat.MaxLevel も揃えること", got, want)
 	}
 }

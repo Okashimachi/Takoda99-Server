@@ -243,7 +243,7 @@ func (h *wordsHandler) patchWord(w http.ResponseWriter, r *http.Request, idStr s
 	}
 
 	var p odai.WordPatch
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&p); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&p); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
@@ -254,11 +254,16 @@ func (h *wordsHandler) patchWord(w http.ResponseWriter, r *http.Request, idStr s
 	}
 
 	if err := h.store.Update(r.Context(), id, p); err != nil {
-		if errors.Is(err, odai.ErrNotFound) {
+		switch {
+		case errors.Is(err, odai.ErrNotFound):
 			http.Error(w, err.Error(), http.StatusNotFound)
-			return
+		case errors.Is(err, odai.ErrConflict):
+			// (text, level) が既存の語とぶつかった。運営UIが「その組み合わせは既にある」と
+			// 出せるよう 409 で返す（500 だと原因が分からない）。
+			http.Error(w, err.Error(), http.StatusConflict)
+		default:
+			http.Error(w, "update failed: "+err.Error(), http.StatusInternalServerError)
 		}
-		http.Error(w, "update failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

@@ -17,7 +17,12 @@ type WordEntry struct {
 	Category       string `json:"category"`
 }
 
-var ErrNotFound = errors.New("odai: word not found")
+var (
+	// ErrNotFound は指定 id の語が無いこと。呼び出し側は 404 を返す。
+	ErrNotFound = errors.New("odai: word not found")
+	// ErrConflict は (text, level) が既存の語と衝突すること。呼び出し側は 409 を返す。
+	ErrConflict = errors.New("odai: word already exists with the same text and level")
+)
 
 // WordPatch は words の部分更新。nil のフィールドは変更しない。
 type WordPatch struct {
