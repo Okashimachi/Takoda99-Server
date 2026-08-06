@@ -230,6 +230,10 @@ UTF-16 単位で数えるので**完全一致はしない**。**サーバーの�
 - `selfStoreId` で `stores[]` の中の自分を特定する
 - **`params` の値を表示に使う。** 信用ゲージの最大値は `initialLife`、順位バーの淘汰圏は `stormThresholdPct`
 - `finalStageAliveThreshold` / `finalRushAliveThreshold` は**演出の切り替え専用**。ゲーム進行には影響しない
+- **`patienceLateMul`**（既定 0.6）— **Late 以降は我慢ゲージが `1/patienceLateMul` 倍速で減る**。
+  `patienceMaxMs` は書き換わらず**減る速度だけ**が変わり、行列内の来店済みの客にも即座に効く。
+  **これを使わないと Late 突入以降ゲージが約1.67倍ズレる**（§3.3 も参照）
+- `patienceAlertMs`（既定 2000）— 「もうすぐ帰る」警告へ切り替える残り時間。**表示専用**でサーバーは判定に使わない
 
 ### 3.3 `CustomerArrived`（= `CustomerView`）
 
@@ -253,6 +257,10 @@ UTF-16 単位で数えるので**完全一致はしない**。**サーバーの�
 
 **★行列に入った瞬間から減る。** 対応中（先頭）の客だけでなく、**待っている客も同時に減っている**。
 これが「行列を溜めること自体のコスト」。
+
+**★Late フェーズでは減る速度が変わる。** `dt / patienceLateMul`（既定 0.6 → 約1.67倍速）で減る。
+`patienceMaxMs` は書き換わらないので、**線形にカウントダウンすると Late 以降ズレ続ける**。
+`PhaseChange` で Late を知ったら、そこから先は倍率を掛けて進めること。
 
 ### 3.4 `CustomerLeft` → `CreditUpdate`
 
@@ -343,10 +351,54 @@ storm（下位淘汰）の予告。**1周期に1回だけ**届く。
 ### 3.11 `MatchEnd`
 
 ```json
-{ "finalRank": 1, "stats": { "servedCount": 34, "avgAccuracy": 0.94, "avgElapsedMs": 3100 } }
+{
+  "finalRank": 1,
+  "reason": "",
+  "matchElapsedMs": 145000,
+  "creditLeft": 8,
+  "evalRaw": 0.72,
+  "evalNormalized": 1,
+  "stats": {
+    "servedCount": 34, "avgAccuracy": 0.94, "avgElapsedMs": 3100,
+    "leftCount": 6, "totalKeystrokes": 1180, "totalMisses": 71,
+    "fastestMs": 2100, "slowestMs": 5400,
+    "normal":  { "served": 24, "left": 4 },
+    "bonus":   { "served": 6,  "left": 1 },
+    "claimer": { "served": 2,  "left": 1 },
+    "buzz":    { "served": 2,  "left": 0 }
+  }
+}
 ```
 
 **脱落済みの店にも届く。** 最終順位は**脱落順のみ**で決まる（評価は使わない）。
+
+| フィールド | 意味 |
+|---|---|
+| `finalRank` | 最終順位。1が優勝 |
+| `reason` | `SelfCollapse`（信用0）/ `Cull`（下位淘汰）。**優勝ならキーごと出ない** |
+| `matchElapsedMs` | 試合の総経過時間。**途中で脱落しても試合が終わるまでの時間**が入る |
+| `creditLeft` | 終了時点の残り信用。自滅なら 0 |
+| `evalRaw` / `evalNormalized` | 最終評価。**順位計算には使われない**表示用の値 |
+
+`stats` は**自店ぶんのみ**。
+
+| フィールド | 意味 |
+|---|---|
+| `servedCount` / `leftCount` | 捌けた客 / 我慢切れで帰られた客 |
+| `avgAccuracy` | **客ごとの精度の平均**（0..1） |
+| `totalKeystrokes` / `totalMisses` | 打鍵の生の合計。**「全体で何打鍵中いくつミスしたか」はこちらで出す**（客ごとに打鍵数が違うので `avgAccuracy` からは出せない） |
+| `avgElapsedMs` / `fastestMs` / `slowestMs` | 1客を捌くのに要した平均・最短・最長。提供0なら全て 0 |
+| `normal` / `bonus` / `claimer` / `buzz` | 属性別の `{ served, left }` |
+
+属性別の合計は全体と一致する（`normal.served + bonus.served + … == servedCount`）。
+
+> **★最大コンボはサーバーから返らない。** サーバーは**打鍵列を受け取らない**（`OrderServed` は
+> 客1人ぶんの `elapsedMs` と `missCount` だけ）ので、連続無ミス数を知る手段が無い。
+> 加えて「コンボ」は企画転換で概念ごと廃止されている。
+> **リザルトに出すならクライアント側で自前に数えること。**
+
+> **全店の最終順位表は `MatchEnd` に入らない。** `StoreListUpdate` の最後のスナップショットに
+> 99店分が `finalRank` 込みで入っているので、それを保持しておけば順位表を描ける。
 
 ---
 

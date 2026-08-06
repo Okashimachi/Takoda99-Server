@@ -1539,3 +1539,167 @@ func TestStepHeat_NeverGoesNegative(t *testing.T) {
 		}
 	}
 }
+
+// リザルト統計が実試合の集計と一致すること（Unity のリザルト画面用）。
+//
+// 提供・取りこぼしを属性込みで数える。ここがズレるとリザルトの数字が嘘になる。
+func TestMatchStats_CountsServedAndLeftByAttribute(t *testing.T) {
+	params := DefaultParameters()
+	params.Customer.Total = 0 // 自動分配を止めて、置いた客だけを見る
+	s := newTestSessionWith(params, 2)
+	s.Start()
+
+	// 提供する客（Normal 2人・Buzz 1人）と、放置して帰らせる客（Claimer 1人）。
+	placeAssigned(s, "c-1", "s-1", proto.AttrNormal, 2, 10)
+	placeAssigned(s, "c-2", "s-1", proto.AttrNormal, 2, 20)
+	placeAssigned(s, "c-3", "s-1", proto.AttrBuzz, 4, 30)
+	placeAssigned(s, "c-4", "s-1", proto.AttrClaimer, 1, 5)
+
+	// 行列の先頭から順に提供する（先頭以外は弾かれる）。
+	s.ApplyOrderServed("s-1", proto.OrderServed{CustomerId: "c-1", ElapsedMs: 2000, MissCount: 1})
+	s.ApplyOrderServed("s-1", proto.OrderServed{CustomerId: "c-2", ElapsedMs: 4000, MissCount: 3})
+	s.ApplyOrderServed("s-1", proto.OrderServed{CustomerId: "c-3", ElapsedMs: 3000, MissCount: 0})
+
+	// 残った Claimer を我慢切れにする。
+	s.customers["c-4"].patienceLeftMs = 1
+	s.Tick(params.Session.TickIntervalMs)
+
+	got := s.buildMatchStats(s.stores["s-1"])
+
+	if got.ServedCount != 3 {
+		t.Errorf("ServedCount = %d, want 3", got.ServedCount)
+	}
+	if got.LeftCount != 1 {
+		t.Errorf("LeftCount = %d, want 1", got.LeftCount)
+	}
+	if got.TotalKeystrokes != 60 {
+		t.Errorf("TotalKeystrokes = %d, want 60 (10+20+30)", got.TotalKeystrokes)
+	}
+	if got.TotalMisses != 4 {
+		t.Errorf("TotalMisses = %d, want 4 (1+3+0)", got.TotalMisses)
+	}
+	if got.FastestMs != 2000 {
+		t.Errorf("FastestMs = %d, want 2000", got.FastestMs)
+	}
+	if got.SlowestMs != 4000 {
+		t.Errorf("SlowestMs = %d, want 4000", got.SlowestMs)
+	}
+
+	if got.Normal.Served != 2 || got.Normal.Left != 0 {
+		t.Errorf("Normal = %+v, want {Served:2 Left:0}", got.Normal)
+	}
+	if got.Buzz.Served != 1 {
+		t.Errorf("Buzz.Served = %d, want 1", got.Buzz.Served)
+	}
+	if got.Claimer.Left != 1 || got.Claimer.Served != 0 {
+		t.Errorf("Claimer = %+v, want {Served:0 Left:1}", got.Claimer)
+	}
+	if got.Bonus.Served != 0 || got.Bonus.Left != 0 {
+		t.Errorf("Bonus = %+v, want ゼロ", got.Bonus)
+	}
+
+	// 属性別の合計が全体と一致すること（数え漏れ・二重計上の検出）。
+	sumServed, sumLeft := 0, 0
+	for _, a := range []proto.AttributeTally{got.Normal, got.Bonus, got.Claimer, got.Buzz} {
+		sumServed += a.Served
+		sumLeft += a.Left
+	}
+	if sumServed != got.ServedCount {
+		t.Errorf("属性別の提供合計 %d != ServedCount %d", sumServed, got.ServedCount)
+	}
+	if sumLeft != got.LeftCount {
+		t.Errorf("属性別の離脱合計 %d != LeftCount %d", sumLeft, got.LeftCount)
+	}
+}
+
+// 1件も提供していない店でもゼロ除算せず、取りこぼしは返ること。
+func TestMatchStats_NoServeIsSafe(t *testing.T) {
+	params := DefaultParameters()
+	params.Customer.Total = 0
+	s := newTestSessionWith(params, 2)
+	s.Start()
+
+	placeAssigned(s, "c-1", "s-1", proto.AttrNormal, 1, 5)
+	s.customers["c-1"].patienceLeftMs = 1
+	s.Tick(params.Session.TickIntervalMs)
+
+	got := s.buildMatchStats(s.stores["s-1"])
+	if got.ServedCount != 0 || got.AvgAccuracy != 0 || got.AvgElapsedMs != 0 {
+		t.Errorf("提供0なのに平均が入っている: %+v", got)
+	}
+	if got.LeftCount != 1 {
+		t.Errorf("LeftCount = %d, want 1（提供0でも取りこぼしは返す）", got.LeftCount)
+	}
+	if got.FastestMs != 0 {
+		t.Errorf("FastestMs = %d, want 0", got.FastestMs)
+	}
+}
+
+// MatchEnd が試合の経過時間・残信用・脱落理由を載せること。
+// 優勝した店は reason が空（「優勝なのに脱落理由が付く」状態を作らない）。
+func TestMatchEnd_CarriesResultContext(t *testing.T) {
+	params := DefaultParameters()
+	params.Customer.Total = 0
+	s := newTestSessionWith(params, 2)
+	s.Start()
+
+	// s-2 を自滅させて決着させる。
+	s.stores["s-2"].creditLife = 0
+	s.resolveCollapses([]*storeState{s.stores["s-2"]}, nil)
+
+	// 優勝する店に脱落理由が残っている状態を作る。checkFinish がこれを消すこと。
+	// （全滅時に最強の1店を生存させる経路など、生存店に理由が付いたまま来る可能性がある。
+	//  ここを消さないと「優勝なのに自滅と表示される」リザルトになる）
+	s.stores["s-1"].elimination = string(proto.ElimCull)
+
+	out := s.checkFinish(nil)
+
+	ends := map[PlayerId]proto.MatchEnd{}
+	for _, o := range out {
+		if m, ok := o.Msg.(proto.MatchEnd); ok {
+			ends[o.To.PlayerId] = m
+		}
+	}
+	if len(ends) != 2 {
+		t.Fatalf("MatchEnd が %d 通（脱落済みの店にも届くはず）", len(ends))
+	}
+
+	win := ends["s-1"]
+	if win.FinalRank != 1 {
+		t.Errorf("優勝店の finalRank = %d, want 1", win.FinalRank)
+	}
+	if win.Reason != "" {
+		t.Errorf("優勝店に脱落理由が付いている: %q", win.Reason)
+	}
+	if win.CreditLeft != params.Credit.InitialLife {
+		t.Errorf("CreditLeft = %d, want %d", win.CreditLeft, params.Credit.InitialLife)
+	}
+
+	lose := ends["s-2"]
+	if lose.Reason != proto.ElimSelfCollapse {
+		t.Errorf("自滅店の reason = %q, want %q", lose.Reason, proto.ElimSelfCollapse)
+	}
+	if lose.CreditLeft != 0 {
+		t.Errorf("自滅店の CreditLeft = %d, want 0", lose.CreditLeft)
+	}
+	if win.MatchElapsedMs != lose.MatchElapsedMs {
+		t.Errorf("経過時間が店ごとに違う: %d / %d", win.MatchElapsedMs, lose.MatchElapsedMs)
+	}
+}
+
+// 公開パラメータに patience 2項目が載ること（Unity REQ-02）。
+// これが無いと Late 以降クライアントの我慢ゲージが約1.67倍ズレる。
+func TestPublicParams_CarriesPatience(t *testing.T) {
+	params := DefaultParameters()
+	params.Patience.LateMul = 0.5
+	params.Patience.AlertMs = 3000
+	s := newTestSessionWith(params, 2)
+
+	got := s.publicParams()
+	if got.PatienceLateMul != 0.5 {
+		t.Errorf("PatienceLateMul = %v, want 0.5", got.PatienceLateMul)
+	}
+	if got.PatienceAlertMs != 3000 {
+		t.Errorf("PatienceAlertMs = %d, want 3000", got.PatienceAlertMs)
+	}
+}

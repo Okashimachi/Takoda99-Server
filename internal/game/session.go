@@ -54,10 +54,47 @@ type customer struct {
 }
 
 // servedStats は1店の提供集計（リザルト用）。
+//
+// accuracySum は「客ごとの精度の平均」を出すためのもので、
+// **全体の打鍵数に対するミス率とは別物**（客ごとに打鍵数が違うため）。
+// 後者を出すには keystrokes/misses の生の合計が要るので両方持つ。
 type servedStats struct {
 	count       int
 	accuracySum float64
 	elapsedSum  int64
+
+	keystrokes int // 提供した客の打鍵数の合計
+	misses     int // 同ミス数の合計
+	fastestMs  int // 1客を捌いた最短(ms)。未提供なら 0
+	slowestMs  int // 同最長(ms)
+
+	// leftCount は我慢切れで帰られた客の数（取りこぼし）。
+	leftCount int
+
+	// byAttr は属性ごとの捌き／取りこぼしの内訳。添字は attrIndex。
+	byAttr [attrCount]proto.AttributeTally
+}
+
+// 属性の添字。proto.CustomerAttribute は文字列なので、集計配列の添字へ写す。
+const (
+	attrIdxNormal = iota
+	attrIdxBonus
+	attrIdxClaimer
+	attrIdxBuzz
+	attrCount
+)
+
+func attrIndex(a proto.CustomerAttribute) int {
+	switch a {
+	case proto.AttrBonus:
+		return attrIdxBonus
+	case proto.AttrClaimer:
+		return attrIdxClaimer
+	case proto.AttrBuzz:
+		return attrIdxBuzz
+	default:
+		return attrIdxNormal
+	}
 }
 
 // storeState は1店分の権威状態。
@@ -69,10 +106,10 @@ type storeState struct {
 	buzzBonus      float64
 	evalNormalized float64
 	rank           int
-	served      servedStats
-	alive       bool
-	finalRank   int
-	elimination string
+	served         servedStats
+	alive          bool
+	finalRank      int
+	elimination    string
 
 	// prevStar は前回 EvaluationUpdate を出した時の starRating。starDelta の算出に使う。
 	prevStar float64
@@ -211,6 +248,15 @@ func (s *Session) ApplyOrderServed(from PlayerId, r proto.OrderServed) []Outboun
 	st.served.count++
 	st.served.accuracySum += accuracy
 	st.served.elapsedSum += int64(elapsed)
+	st.served.keystrokes += keys
+	st.served.misses += miss
+	if st.served.fastestMs == 0 || elapsed < st.served.fastestMs {
+		st.served.fastestMs = elapsed
+	}
+	if elapsed > st.served.slowestMs {
+		st.served.slowestMs = elapsed
+	}
+	st.served.byAttr[attrIndex(c.attribute)].Served++
 
 	s.releaseToRest(r.CustomerId)
 
@@ -498,6 +544,8 @@ func (s *Session) processLeave(store PlayerId, cid proto.CustomerId, out []Outbo
 	loss := s.params.Credit.LeaveLoss.For(c.attribute)
 	st := s.stores[store]
 	st.creditLife -= loss
+	st.served.leftCount++
+	st.served.byAttr[attrIndex(c.attribute)].Left++
 
 	out = append(out, to(store, proto.CreditUpdate{
 		Life:   st.creditLife,
@@ -814,22 +862,38 @@ func (s *Session) checkFinish(out []Outbound) []Outbound {
 	for _, pid := range s.order {
 		st := s.stores[pid]
 		out = append(out, to(pid, proto.MatchEnd{
-			FinalRank: st.finalRank,
-			Stats:     s.buildMatchStats(st),
+			FinalRank:      st.finalRank,
+			Stats:          s.buildMatchStats(st),
+			Reason:         proto.EliminationReason(st.elimination),
+			MatchElapsedMs: s.elapsedMs,
+			CreditLeft:     st.creditLife,
+			EvalRaw:        s.evalScore(st),
+			EvalNormalized: st.evalNormalized,
 		}))
 	}
 	return out
 }
 
 func (s *Session) buildMatchStats(st *storeState) proto.MatchStats {
-	if st.served.count == 0 {
-		return proto.MatchStats{}
+	v := st.served
+	stats := proto.MatchStats{
+		ServedCount:     v.count,
+		LeftCount:       v.leftCount,
+		TotalKeystrokes: v.keystrokes,
+		TotalMisses:     v.misses,
+		FastestMs:       v.fastestMs,
+		SlowestMs:       v.slowestMs,
+		Normal:          v.byAttr[attrIdxNormal],
+		Bonus:           v.byAttr[attrIdxBonus],
+		Claimer:         v.byAttr[attrIdxClaimer],
+		Buzz:            v.byAttr[attrIdxBuzz],
 	}
-	return proto.MatchStats{
-		ServedCount:  st.served.count,
-		AvgAccuracy:  st.served.accuracySum / float64(st.served.count),
-		AvgElapsedMs: int(st.served.elapsedSum / int64(st.served.count)),
+	// 平均は提供0だとゼロ除算になる。取りこぼしだけの店でも leftCount は返す。
+	if v.count > 0 {
+		stats.AvgAccuracy = v.accuracySum / float64(v.count)
+		stats.AvgElapsedMs = int(v.elapsedSum / int64(v.count))
 	}
+	return stats
 }
 
 // ── 客システム ──────────────────────────────────────────────
@@ -963,8 +1027,13 @@ func (s *Session) publicParams() proto.GameParametersPublicSubset {
 	return proto.GameParametersPublicSubset{
 		InitialLife: s.params.Credit.InitialLife,
 		MaxStores:   len(s.order),
+		// Late は我慢が dt/LateMul で減る（既定 0.6 → 約1.67倍速）。patienceMaxMs は
+		// 書き換わらず速度だけ変わるので、これを配らないとクライアントのゲージが
+		// Late 突入以降ズレ続ける。alertMs はサーバーが判定に使わない表示専用値。
+		PatienceLateMul: s.params.Patience.LateMul,
+		PatienceAlertMs: s.params.Patience.AlertMs,
 		// 順位バーに「淘汰圏」の帯を常時描くために配る（既存の storm 設定をそのまま公開）。
-		StormThresholdPct: s.params.Storm.ThresholdPct,
+		StormThresholdPct:        s.params.Storm.ThresholdPct,
 		FinalStageAliveThreshold: s.params.Presentation.FinalStageAliveThreshold,
 		FinalRushAliveThreshold:  s.params.Presentation.FinalRushAliveThreshold,
 	}
