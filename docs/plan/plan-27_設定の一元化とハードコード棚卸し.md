@@ -148,7 +148,7 @@ if tickMs <= 0 {
 | `internal/transport/connection.go:22` | `writeTimeout = 10s` | 1送信の上限 | 低 |
 | `internal/transport/connection.go:57` | `sendBuffer = 64` | 遅いクライアントを切る閾値 | **中**。会場の回線次第で切断が増える |
 | `internal/transport/connection.go:53` | `recvBuffer = 16` | 受信バッファ | 低 |
-| `internal/matchmaking/matchmaking.go:31` | `MaxDisplayNameLen = 24` | 表示名の上限 | 低。ただし**クライアントに伝わっていない**（下記） |
+| `internal/matchmaking/matchmaking.go` | `MaxDisplayNameLen = 6` | 表示名の上限 | 低。~~クライアントに伝わっていない~~ → **解決済み**（下記） |
 | `internal/configapi/handler.go:24` | `maxBodyBytes = 64KiB` | リクエスト上限 | 低（安全弁） |
 
 #### 方針: `GameParameters` には入れない。可変にするなら環境変数
@@ -181,13 +181,17 @@ config-front の改修も、`GameParameters` の `==` 比較可能制約の心�
 > `GameParameters` はサーバー内部の型。ここに項目を足しても、`publicParams()` に書き足さない限り
 > クライアントには一切出ない。**proto 承認が要るのは下の `MaxDisplayNameLen` の件だけ。**
 
-#### `MaxDisplayNameLen` は別件（proto 変更＝要承認）
+#### ~~`MaxDisplayNameLen` は別件（proto 変更＝要承認）~~ → 解決済み（2026-08-06）
 
-24文字という制約が**クライアントに伝わっていない**。Unity 側は上限を知らずに入力欄を作ることになる。
-配るなら `GameParametersPublicSubset` に足す＝**proto 変更なので人間承認が要る**（AGENTS §1.2）。
+~~24文字という制約がクライアントに伝わっていない。~~
 
-代替として、**サーバーが黙って切り詰めている**現状（`SanitizeDisplayName`）を
-`docs/client-integration.md` に書いておけば、当面はドキュメントで足りる。
+Unity 側からの要望で **24 → 6文字**へ変更し、**`docs/client-integration.md` に上限・数え方・
+フォールバック名の書式を明記した**。proto へ足す必要は無かった（ドキュメントで足りた）。
+
+- 数え方は Unicode コードポイント（`[]rune`）と明記。Unity の `TMP_InputField.characterLimit`
+  （UTF-16 単位）とは一致しないので、**サーバーが正**と決めた
+- フォールバック名・Bot 名も6文字以内（`ゲスト{席番号}` / `CPU{席番号}`）。
+  入力名だけ絞っても**名前を入れなかった人と Bot で崩れる**ため
 
 ### 2.4 `odai.MaxWordLevel` と `heat.maxLevel` の二重管理
 

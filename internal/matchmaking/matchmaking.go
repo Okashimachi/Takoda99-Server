@@ -27,8 +27,16 @@ type Player struct {
 	IsBot bool
 }
 
-// MaxDisplayNameLen は表示名の最大文字数（ルーン単位）。
-const MaxDisplayNameLen = 24
+// MaxDisplayNameLen は表示名の最大文字数。
+//
+// **数え方は Unicode コードポイント（Go の `[]rune`）**。UTF-8 バイト数でも
+// UTF-16 コードユニット数でもない。クライアント側の入力欄（Unity の
+// TMP_InputField.characterLimit は UTF-16 単位）とは数え方が違うので完全一致しない。
+// **サーバーの数え方が正**で、クライアント側は入力補助として近い値を掛けるだけでよい。
+//
+// 6文字なのはマッチング画面の参加者一覧（9×11＝99枠）に収めるため。
+// 長い名前を送られると他プレイヤーの画面が崩れるので、サーバー側で揃える。
+const MaxDisplayNameLen = 6
 
 // SanitizeDisplayName は受信した表示名を安全化する（#79）。
 // 前後空白を除去し、制御文字（改行・タブ等）を落とし、MaxDisplayNameLen ルーンで切り詰める。
@@ -44,9 +52,34 @@ func SanitizeDisplayName(raw string) string {
 	name := strings.TrimSpace(string(cleaned))
 	rs := []rune(name)
 	if len(rs) > MaxDisplayNameLen {
-		name = strings.TrimSpace(string(rs[:MaxDisplayNameLen]))
+		rs = trimDanglingJoiners(rs[:MaxDisplayNameLen])
+		name = strings.TrimSpace(string(rs))
 	}
 	return name
+}
+
+// trimDanglingJoiners は切り詰めで宙に浮いた結合用の文字を末尾から落とす。
+//
+// ルーン単位で切ると絵文字の合字（👨‍👩‍👧 は ZWJ で3つの絵文字を繋いだもの）や
+// 異体字セレクタの途中で切れて、末尾に**単独では意味を持たない文字**が残る。
+// そのまま配ると受け手によって豆腐や別の絵文字に化けるので、末尾だけ整える。
+//
+// 完全な書記素クラスタ対応ではない（外部ライブラリが要る）。
+// 「壊れた合字を配らない」ための最小限の後始末。
+func trimDanglingJoiners(rs []rune) []rune {
+	for len(rs) > 0 {
+		r := rs[len(rs)-1]
+		switch {
+		case r == 0x200D, // ZWJ（絵文字の合字を繋ぐ）
+			r == 0xFE0E, r == 0xFE0F, // 異体字セレクタ（字形指定）
+			unicode.Is(unicode.Mn, r), // 結合マーク（濁点・アクセント等）
+			unicode.Is(unicode.Me, r):
+			rs = rs[:len(rs)-1]
+		default:
+			return rs
+		}
+	}
+	return rs
 }
 
 // Config は matchmaking の依存と数値。
@@ -159,7 +192,6 @@ func (m *Matchmaker) Run(ctx context.Context) {
 			// 人数の定期通知は下の ticker（1秒）に任せ、ここではカウントダウンの
 			// 開始/中断のような状態変化があった時だけ配信する（update 内の changed）。
 			update(false)
-
 
 		case <-ticker.C:
 			if len(pool) > 0 {

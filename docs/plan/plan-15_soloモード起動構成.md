@@ -223,7 +223,7 @@ const joinTimeout = 3 * time.Second
 
 - **送らないと3秒待たされ**、表示名は空になる（フォールバック名が割り当てられる）
 - 別種のメッセージを最初に送っても同じ（空名で続行）
-- 表示名は最大24文字・制御文字は除去される（`SanitizeDisplayName`）
+- 表示名は最大6文字（ルーン単位）・制御文字は除去される（`SanitizeDisplayName`）
 
 **接続したらすぐ `MatchmakingJoin` を送る**のが正しい実装。
 
