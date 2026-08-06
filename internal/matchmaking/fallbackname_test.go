@@ -1,10 +1,6 @@
-package app
+package matchmaking
 
-import (
-	"testing"
-
-	"takoda99/internal/matchmaking"
-)
+import "testing"
 
 // フォールバック名・Bot名も表示名の上限に収まること。
 //
@@ -14,13 +10,13 @@ import (
 func TestFallbackName_FitsDisplayLimit(t *testing.T) {
 	for seat := 1; seat <= 99; seat++ {
 		for _, isBot := range []bool{false, true} {
-			got := fallbackName(isBot, seat)
+			got := FallbackDisplayName(isBot, seat)
 			if got == "" {
-				t.Fatalf("fallbackName(isBot=%v, seat=%d) が空", isBot, seat)
+				t.Fatalf("FallbackDisplayName(isBot=%v, seat=%d) が空", isBot, seat)
 			}
-			if n := len([]rune(got)); n > matchmaking.MaxDisplayNameLen {
-				t.Fatalf("fallbackName(isBot=%v, seat=%d) = %q は %d ルーン（上限 %d）",
-					isBot, seat, got, n, matchmaking.MaxDisplayNameLen)
+			if n := len([]rune(got)); n > MaxDisplayNameLen {
+				t.Fatalf("FallbackDisplayName(isBot=%v, seat=%d) = %q は %d ルーン（上限 %d）",
+					isBot, seat, got, n, MaxDisplayNameLen)
 			}
 		}
 	}
@@ -28,14 +24,14 @@ func TestFallbackName_FitsDisplayLimit(t *testing.T) {
 
 // 人間と Bot が見分けられること。同じ名前だと盤面で区別できない。
 func TestFallbackName_DistinguishesBot(t *testing.T) {
-	if a, b := fallbackName(false, 1), fallbackName(true, 1); a == b {
+	if a, b := FallbackDisplayName(false, 1), FallbackDisplayName(true, 1); a == b {
 		t.Fatalf("人間と Bot が同じ名前になる: %q", a)
 	}
-	if got, want := fallbackName(false, 12), "ゲスト12"; got != want {
-		t.Fatalf("fallbackName(false, 12) = %q, want %q", got, want)
+	if got, want := FallbackDisplayName(false, 12), "ゲスト12"; got != want {
+		t.Fatalf("FallbackDisplayName(false, 12) = %q, want %q", got, want)
 	}
-	if got, want := fallbackName(true, 12), "CPU12"; got != want {
-		t.Fatalf("fallbackName(true, 12) = %q, want %q", got, want)
+	if got, want := FallbackDisplayName(true, 12), "CPU12"; got != want {
+		t.Fatalf("FallbackDisplayName(true, 12) = %q, want %q", got, want)
 	}
 }
 
@@ -44,7 +40,7 @@ func TestFallbackName_UniqueWithinMatch(t *testing.T) {
 	seen := map[string]bool{}
 	for seat := 1; seat <= 99; seat++ {
 		for _, isBot := range []bool{false, true} {
-			n := fallbackName(isBot, seat)
+			n := FallbackDisplayName(isBot, seat)
 			if seen[n] {
 				t.Fatalf("名前が衝突: %q", n)
 			}

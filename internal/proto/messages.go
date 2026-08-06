@@ -96,4 +96,5 @@ type (
 	StoreEliminated          = canon.StoreEliminated
 	MatchEnd                 = canon.MatchEnd
 	MatchmakingStatus        = canon.MatchmakingStatus
+	MatchmakingParticipant   = canon.MatchmakingParticipant
 )
