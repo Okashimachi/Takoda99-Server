@@ -159,7 +159,26 @@ func (s *WordStore) Delete(ctx context.Context, id int) error {
 		return fmt.Errorf("db: words delete: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("db: word id=%d not found", id)
+		return odai.ErrNotFound
+	}
+	return nil
+}
+
+// Update は指定IDの単語を部分更新する。
+func (s *WordStore) Update(ctx context.Context, id int, p odai.WordPatch) error {
+	const q = `UPDATE words SET
+		text = COALESCE($1, text),
+		reading = COALESCE($2, reading),
+		keystroke_count = COALESCE($3, keystroke_count),
+		level = COALESCE($4, level),
+		category = COALESCE($5, category)
+	WHERE id = $6`
+	tag, err := s.pool.Exec(ctx, q, p.Text, p.Reading, p.KeystrokeCount, p.Level, p.Category, id)
+	if err != nil {
+		return fmt.Errorf("db: words update: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return odai.ErrNotFound
 	}
 	return nil
 }

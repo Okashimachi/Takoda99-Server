@@ -3,6 +3,7 @@ package configapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -15,6 +16,7 @@ type WordStore interface {
 	LoadAll(ctx context.Context) ([]odai.WordEntry, error)
 	LoadFiltered(ctx context.Context, category string, level int, hasLevel bool) ([]odai.WordEntry, error)
 	SaveAll(ctx context.Context, entries []odai.WordEntry, mode string) error
+	Update(ctx context.Context, id int, p odai.WordPatch) error
 	Delete(ctx context.Context, id int) error
 }
 
@@ -59,6 +61,12 @@ func (h *wordsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		} else {
 			http.Error(w, "id required", http.StatusBadRequest)
 		}
+	case http.MethodPatch:
+		if path != "" {
+			h.patchWord(w, r, path)
+		} else {
+			http.Error(w, "id required", http.StatusBadRequest)
+		}
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -67,7 +75,7 @@ func (h *wordsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *wordsHandler) setCORS(w http.ResponseWriter, r *http.Request) {
 	head := w.Header()
 	head.Set("Vary", "Origin")
-	head.Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+	head.Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
 	head.Set("Access-Control-Allow-Headers", "Content-Type, X-Admin-Token")
 	head.Set("Access-Control-Allow-Origin", h.allowOriginFor(r.Header.Get("Origin")))
 }
@@ -209,7 +217,48 @@ func (h *wordsHandler) deleteWord(w http.ResponseWriter, r *http.Request, idStr 
 		return
 	}
 	if err := h.store.Delete(r.Context(), id); err != nil {
+		if errors.Is(err, odai.ErrNotFound) {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
 		http.Error(w, "delete failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *wordsHandler) patchWord(w http.ResponseWriter, r *http.Request, idStr string) {
+	if h.store == nil {
+		http.Error(w, "word store not available", http.StatusServiceUnavailable)
+		return
+	}
+	if h.token == "" || !tokenEqual(r.Header.Get("X-Admin-Token"), h.token) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+
+	var p odai.WordPatch
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&p); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+
+	if p.Reading != nil && *p.Reading != "" && p.KeystrokeCount == nil {
+		ks := odai.Keystrokes(*p.Reading)
+		p.KeystrokeCount = &ks
+	}
+
+	if err := h.store.Update(r.Context(), id, p); err != nil {
+		if errors.Is(err, odai.ErrNotFound) {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		http.Error(w, "update failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
