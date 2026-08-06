@@ -1,6 +1,7 @@
 package odai
 
 import (
+	"errors"
 	"math/rand"
 
 	"takoda99/internal/game"
@@ -14,6 +15,22 @@ type WordEntry struct {
 	KeystrokeCount int    `json:"keystrokeCount"`
 	Level          int    `json:"level"`
 	Category       string `json:"category"`
+}
+
+var (
+	// ErrNotFound は指定 id の語が無いこと。呼び出し側は 404 を返す。
+	ErrNotFound = errors.New("odai: word not found")
+	// ErrConflict は (text, level) が既存の語と衝突すること。呼び出し側は 409 を返す。
+	ErrConflict = errors.New("odai: word already exists with the same text and level")
+)
+
+// WordPatch は words の部分更新。nil のフィールドは変更しない。
+type WordPatch struct {
+	Text           *string `json:"text,omitempty"`
+	Reading        *string `json:"reading,omitempty"`
+	KeystrokeCount *int    `json:"keystrokeCount,omitempty"`
+	Level          *int    `json:"level,omitempty"`
+	Category       *string `json:"category,omitempty"`
 }
 
 // ConfigurablePool は DB から取得した語彙で WordSource を満たす。

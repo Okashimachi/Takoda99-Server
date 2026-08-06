@@ -3,6 +3,7 @@ package transport
 import (
 	"encoding/json"
 
+	"takoda99/internal/game"
 	"takoda99/internal/proto"
 )
 
@@ -21,7 +22,7 @@ type FullPublisher struct {
 // NewFullPublisher は配信間隔(ms)を指定して作る。<=0 は 250ms。
 func NewFullPublisher(intervalMs int) *FullPublisher {
 	if intervalMs <= 0 {
-		intervalMs = 250
+		intervalMs = game.DefaultParameters().Session.PublishIntervalMs
 	}
 	return &FullPublisher{intervalMs: int64(intervalMs)}
 }

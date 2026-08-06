@@ -2,12 +2,22 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"takoda99/internal/odai"
 )
+
+// uniqueViolation は Postgres の一意制約違反(23505)を判定する。
+// words は UNIQUE(text, level) を持つので、更新で既存行と衝突しうる。
+func uniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
 
 // WordStore は Postgres の words テーブルを管理する。
 type WordStore struct {
@@ -16,9 +26,25 @@ type WordStore struct {
 
 func NewWordStore(pool *pgxpool.Pool) *WordStore { return &WordStore{pool: pool} }
 
-// Migrate は words テーブルを作成し、空なら data.go のフォールバック語彙で seed する（冪等）。
+// CurrentSeedVersion はコード側の辞書（internal/odai/data.go）のバージョン。
+//
+// **辞書に語を足したり段階を増やしたら、この値を上げる。** 上げないと DB へ反映されない。
+// 上げると次回の Migrate で upsert が走り、既存の語は (text, level) 一致で更新、
+// 新しい語は追加される（運営が独自に足した語は消えない）。
+//
+//	1: 初版（level 0〜4 の100語）
+//	2: level 5〜17 を追加（#75 / 計360語）
+const CurrentSeedVersion = 2
+
+// Migrate は words テーブルを作成し、コード側の辞書（data.go）を DB へ取り込む（冪等）。
+//
+// 「空の時だけ seed」ではない。それだと **後からコード側に足した語が永久に入らない**（#86）。
+// 適用済みバージョンを word_seed_version に記録し、CurrentSeedVersion が上回る時だけ
+// upsert する。辞書に語を足したら CurrentSeedVersion を上げること。
 func (s *WordStore) Migrate(ctx context.Context) error {
-	const ddl = `CREATE TABLE IF NOT EXISTS words (
+	// 1文に1テーブル。複数ステートメントを1回の Exec に混ぜると、pgx が
+	// extended protocol を選んだ時に構文エラーになる（引数の有無でプロトコルが変わる）。
+	const wordsDDL = `CREATE TABLE IF NOT EXISTS words (
 		id              SERIAL PRIMARY KEY,
 		text            TEXT NOT NULL,
 		reading         TEXT NOT NULL,
@@ -27,23 +53,40 @@ func (s *WordStore) Migrate(ctx context.Context) error {
 		category        TEXT NOT NULL DEFAULT 'general',
 		UNIQUE(text, level)
 	)`
-	if _, err := s.pool.Exec(ctx, ddl); err != nil {
+	if _, err := s.pool.Exec(ctx, wordsDDL); err != nil {
 		return fmt.Errorf("db: words migrate: %w", err)
 	}
 
-	var count int
-	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM words`).Scan(&count); err != nil {
-		return fmt.Errorf("db: words count: %w", err)
+	// 適用済みの seed バージョンを1行ずつ記録する（履歴として残す）。
+	const versionDDL = `CREATE TABLE IF NOT EXISTS word_seed_version (
+		version    INT PRIMARY KEY,
+		applied_at timestamptz NOT NULL DEFAULT now()
+	)`
+	if _, err := s.pool.Exec(ctx, versionDDL); err != nil {
+		return fmt.Errorf("db: word_seed_version migrate: %w", err)
 	}
-	if count > 0 {
+
+	var applied int
+	err := s.pool.QueryRow(ctx,
+		`SELECT coalesce(max(version), 0) FROM word_seed_version`).Scan(&applied)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("db: words version check: %w", err)
+	}
+	if applied >= CurrentSeedVersion {
 		return nil
 	}
-	return s.seedFallback(ctx)
-}
 
-func (s *WordStore) seedFallback(ctx context.Context) error {
-	entries := FallbackEntries()
-	return s.saveAll(ctx, entries, "replace")
+	// upsert なので、運営が config-front で編集した語は (text, level) が一致する限り
+	// 上書きされるが、**運営が足した語は消えない**（replace と違い DELETE しない）。
+	if err := s.saveAll(ctx, FallbackEntries(), "upsert"); err != nil {
+		return fmt.Errorf("db: words upsert fallback: %w", err)
+	}
+	if _, err := s.pool.Exec(ctx,
+		`INSERT INTO word_seed_version (version) VALUES ($1) ON CONFLICT (version) DO NOTHING`,
+		CurrentSeedVersion); err != nil {
+		return fmt.Errorf("db: words version bump: %w", err)
+	}
+	return nil
 }
 
 // FallbackEntries は data.go の語彙を WordEntry として返す（seed 用）。
@@ -143,7 +186,31 @@ func (s *WordStore) Delete(ctx context.Context, id int) error {
 		return fmt.Errorf("db: words delete: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("db: word id=%d not found", id)
+		return odai.ErrNotFound
+	}
+	return nil
+}
+
+// Update は指定IDの単語を部分更新する。
+func (s *WordStore) Update(ctx context.Context, id int, p odai.WordPatch) error {
+	const q = `UPDATE words SET
+		text = COALESCE($1, text),
+		reading = COALESCE($2, reading),
+		keystroke_count = COALESCE($3, keystroke_count),
+		level = COALESCE($4, level),
+		category = COALESCE($5, category)
+	WHERE id = $6`
+	tag, err := s.pool.Exec(ctx, q, p.Text, p.Reading, p.KeystrokeCount, p.Level, p.Category, id)
+	if err != nil {
+		// (text, level) を別の語と同じ組み合わせに変えようとした場合。
+		// 呼び出し側が 409 を返せるよう、DB の生エラーを漏らさず型を揃える。
+		if uniqueViolation(err) {
+			return odai.ErrConflict
+		}
+		return fmt.Errorf("db: words update: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return odai.ErrNotFound
 	}
 	return nil
 }

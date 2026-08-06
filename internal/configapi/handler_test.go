@@ -189,3 +189,47 @@ func TestCORS_Wildcard_And_Empty(t *testing.T) {
 		t.Fatalf("空リストは * のはず: %q", got)
 	}
 }
+
+// GET/POST が現在の設定のハッシュを返すこと（#68 / plan-23）。
+//
+// config-front は「保存した値がサーバーに乗ったか」をこれで照合する。
+// ボディではなくヘッダにしているので、CORS の Expose-Headers に載っていないと
+// ブラウザから読めない（載せ忘れが一番踏みやすい）。
+func TestParams_ConfigHashHeader(t *testing.T) {
+	gp := game.DefaultParameters()
+	h := NewHandler(&fakeStore{gp: gp}, tok, []string{"https://example.test"})
+
+	w := do(h, http.MethodGet, "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	got := w.Header().Get("X-Config-Hash")
+	if got == "" {
+		t.Fatal("X-Config-Hash が付いていない")
+	}
+	if want := gp.ConfigHash(); got != want {
+		t.Fatalf("X-Config-Hash = %q, want %q", got, want)
+	}
+
+	// 設定が変われば値も変わること（＝実際に中身を見ている）。
+	other := gp
+	other.Credit.InitialLife = gp.Credit.InitialLife + 1
+	w2 := do(NewHandler(&fakeStore{gp: other}, tok, nil), http.MethodGet, "", nil)
+	if w2.Header().Get("X-Config-Hash") == got {
+		t.Fatal("設定を変えてもハッシュが同じ（中身を見ていない）")
+	}
+}
+
+// ブラウザからヘッダを読むには Expose-Headers が要る。
+func TestParams_ExposesConfigHashToBrowser(t *testing.T) {
+	h := NewHandler(&fakeStore{gp: game.DefaultParameters()}, tok, []string{"https://example.test"})
+
+	r := httptest.NewRequest(http.MethodGet, "/api/params", nil)
+	r.Header.Set("Origin", "https://example.test")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if got := w.Header().Get("Access-Control-Expose-Headers"); got != "X-Config-Hash" {
+		t.Fatalf("Expose-Headers = %q, want X-Config-Hash", got)
+	}
+}

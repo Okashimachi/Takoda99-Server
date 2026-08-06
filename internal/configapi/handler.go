@@ -64,6 +64,7 @@ func (h *handler) setCORS(w http.ResponseWriter, r *http.Request) {
 	head.Set("Vary", "Origin")
 	head.Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 	head.Set("Access-Control-Allow-Headers", "Content-Type, X-Admin-Token")
+	head.Set("Access-Control-Expose-Headers", "X-Config-Hash")
 	head.Set("Access-Control-Allow-Origin", h.allowOriginFor(r.Header.Get("Origin")))
 }
 
@@ -96,6 +97,7 @@ func (h *handler) get(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "load failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	w.Header().Set("X-Config-Hash", gp.ConfigHash())
 	writeJSON(w, http.StatusOK, gp)
 }
 
@@ -127,6 +129,7 @@ func (h *handler) post(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "save failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	w.Header().Set("X-Config-Hash", gp.ConfigHash())
 	writeJSON(w, http.StatusOK, gp) // 保存後の値を返す（config-front が反映確認できる）
 }
 
