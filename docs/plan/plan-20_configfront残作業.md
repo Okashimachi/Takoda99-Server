@@ -148,9 +148,47 @@ config を変えると**両方に効く**。これは意図的（本番と同条
 
 ---
 
+## 2.5 検証スクリプト（自動）
+
+サーバー側の受入条件は **`scripts/verify-configapi.sh`** が自動で確認する。
+
+```bash
+bash scripts/verify-configapi.sh
+```
+
+**本番には一切接続しない。** 使い捨ての Postgres を自前で立て（docker → ローカル `initdb` の順に自動選択）、
+終了時に必ず捨てる。既存のDBを使いたい場合のみ `VERIFY_DATABASE_URL` を指定する（**中身は消える**）。
+
+確認する20項目:
+
+| # | 内容 | 根拠 |
+|---|---|---|
+| 1 | 辞書が level 0〜17 の360語で seed される / `word_seed_version=2` | plan-27 §1・#86 |
+| 2 | 再起動しても増えず、運営が足した語も消えない（upsert であって replace でない） | plan-27 §1 |
+| 3 | 12セクションの値が **DB 往復後も**保持され、リーフキーが1つも欠けない | 本 plan Step 1 |
+| 4 | `customer.*.attribute` が文字列のまま保たれる | 本 plan Step 1 |
+| 5 | `configHash` がボディとヘッダの両方にあり値が一致・`Expose-Headers` に載る | plan-23 §3 |
+| 6 | `configHash` 入りのボディをそのまま POST しても 400 にならない | plan-23 §3 |
+| 7 | トークン無しは 401 / `Validate` に弾かれる値は 400 | 本 plan §2 |
+| 8 | words の upsert・PATCH（読み変更で打鍵数を再計算）・DELETE | plan-23 §1・§2 |
+| 9 | 存在しない id は 404、`(text, level)` 衝突は 409 | plan-23 |
+| 10 | `matching.minPlayers` が再起動なしで反映される | `docs/deploy.md` |
+
+> ⚠ **`POST` 直後の `GET` では往復を検証できない。**
+> `ConfigStore` は保存時に自分の2秒キャッシュを更新するので、すぐ `GET` すると
+> **DB を読まずに送った値がそのまま返る**。DB 往復でフィールドが落ちていても素通りする。
+> スクリプトはここで3秒待ってからキャッシュを跨いで再取得している。
+
+**残りの完了条件（Vercel デプロイ・UI からの操作）は人の手が要る。**
+
+---
+
 ## 3. 完了条件
 
-- [ ] `takoda99-config` の TS スキーマがサーバーの12セクションと**キー名まで一致**している
+> サーバー側の項目は `bash scripts/verify-configapi.sh` で自動確認できる（§2.5）。
+
+- [x] `takoda99-config` の TS スキーマがサーバーの12セクションと**キー名まで一致**している
+      （2026-08-05 実測: 12セクション・60リーフキーが完全一致）
 - [ ] `Presentation` セクションが config-front で編集できる
 - [ ] `takoda99-config` が Takoda 専用URLで Vercel にデプロイされている
 - [ ] `NEXT_PUBLIC_API_URL` が `https://takoda99.mooo.com` を向いている

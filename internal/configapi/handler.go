@@ -97,8 +97,7 @@ func (h *handler) get(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "load failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("X-Config-Hash", gp.ConfigHash())
-	writeJSON(w, http.StatusOK, gp)
+	writeParams(w, gp)
 }
 
 // post は受信 JSON を検証して保存する（共有トークン必須）。
@@ -129,8 +128,38 @@ func (h *handler) post(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "save failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("X-Config-Hash", gp.ConfigHash())
-	writeJSON(w, http.StatusOK, gp) // 保存後の値を返す（config-front が反映確認できる）
+	writeParams(w, gp) // 保存後の値を返す（config-front が反映確認できる）
+}
+
+// writeParams は GameParameters に configHash を1つ足して返す（plan-23 §3 案B）。
+//
+// ラッパで包む案A は config-front の既存パースを壊すので採らない。
+// トップレベルに1キー足す形なら、config-front がそのまま POST で送り返してきても
+// GameParameters のデコードは未知フィールドを無視するので壊れない。
+//
+// 併せてヘッダ X-Config-Hash でも返す（案C）。ボディをパースせずに反映確認したい場合や、
+// POST のレスポンスを読み捨てる場合に使える。CORS の Expose-Headers に載せてある。
+func writeParams(w http.ResponseWriter, gp game.GameParameters) {
+	hash := gp.ConfigHash()
+	w.Header().Set("X-Config-Hash", hash)
+
+	raw, err := json.Marshal(gp)
+	if err != nil {
+		http.Error(w, "marshal failed", http.StatusInternalServerError)
+		return
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		http.Error(w, "marshal failed", http.StatusInternalServerError)
+		return
+	}
+	hashJSON, err := json.Marshal(hash)
+	if err != nil {
+		http.Error(w, "marshal failed", http.StatusInternalServerError)
+		return
+	}
+	m["configHash"] = hashJSON
+	writeJSON(w, http.StatusOK, m)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
