@@ -151,13 +151,43 @@ if tickMs <= 0 {
 | `internal/matchmaking/matchmaking.go:31` | `MaxDisplayNameLen = 24` | 表示名の上限 | 低。ただし**クライアントに伝わっていない**（下記） |
 | `internal/configapi/handler.go:24` | `maxBodyBytes = 64KiB` | リクエスト上限 | 低（安全弁） |
 
-**修正内容の方針**: `SessionParams` を増やすのではなく、**`OpsParams`（運用値）を新設**して
-`GameParameters` に足す。ゲームバランスと運用値は寿命も触る人も違うので混ぜない。
+#### 方針: `GameParameters` には入れない。可変にするなら環境変数
 
-> ⚠ `GameParameters` に足すフィールドは **`==` 比較可能を保つ**（AGENTS §1.3）。
+当初 `OpsParams` を `GameParameters` に新設する案を書いたが、**取り下げる。**
 
-**`MaxDisplayNameLen` はクライアントにも要る値**。現在 proto の公開サブセットに無いため、
-Unity 側は24文字という制約を知らない。**proto 変更＝要承認**なので別途判断。
+**上の値はすべて起動時にしか読まれない。**
+
+```go
+limiter := newConnLimiter(maxConcurrentConnections)   // 起動時に1回だけ
+const cacheTTL = 2 * time.Second                      // コンパイル時定数
+const sendBuffer = 64                                 // 同上
+```
+
+`GameParameters` に入れると、**運営UIに項目が出るのに変えても再起動まで効かない**。
+これは #82（DBの値とコードの既定が食い違う）と**同じ種類の混乱を自分から作る**ことになる。
+
+**線引きはこう決める:**
+
+| 入れ物 | 性質 | 例 |
+|---|---|---|
+| **`GameParameters`**（DB / 運営UI） | **試合ごとに変わる。再起動不要で効く** | `minPlayers` `initialLife` `storm.*` |
+| **環境変数**（`/etc/takoda99.env`） | **起動時に決まる。再起動が要る** | `PORT` `DATABASE_URL` `ALLOWED_ORIGINS` |
+
+上表の運用値は全部が後者。可変にしたくなったら **環境変数**（`PORT` と同じ既存パターン）にする。
+config-front の改修も、`GameParameters` の `==` 比較可能制約の心配も要らない。
+
+> **`GameParameters` に足しても proto の変更は不要**（誤解しやすい点）。
+> 線に乗るのは `session.publicParams()` が手で組む `GameParametersPublicSubset` の5項目だけで、
+> `GameParameters` はサーバー内部の型。ここに項目を足しても、`publicParams()` に書き足さない限り
+> クライアントには一切出ない。**proto 承認が要るのは下の `MaxDisplayNameLen` の件だけ。**
+
+#### `MaxDisplayNameLen` は別件（proto 変更＝要承認）
+
+24文字という制約が**クライアントに伝わっていない**。Unity 側は上限を知らずに入力欄を作ることになる。
+配るなら `GameParametersPublicSubset` に足す＝**proto 変更なので人間承認が要る**（AGENTS §1.2）。
+
+代替として、**サーバーが黙って切り詰めている**現状（`SanitizeDisplayName`）を
+`docs/client-integration.md` に書いておけば、当面はドキュメントで足りる。
 
 ### 2.4 `odai.MaxWordLevel` と `heat.maxLevel` の二重管理
 
@@ -231,7 +261,7 @@ process.env.NEXT_PUBLIC_GAME_SERVER_URL ?? "https://takoda99.mooo.com"
   └─ 即応策（upsert を1回流す）だけなら今日できる
 §2.2 既定値の二重管理      ← 小さい。ついでに直せる
 §2.4 MaxWordLevel の固定   ← テスト1本。ついでに直せる
-§2.3 OpsParams の新設      ← 設計判断が要る。当日運用の要否で決める
+§2.3 運用値を env へ        ← 当日いじる必要が出たら。今は不要（判断済み）
 §3.3 config-front の既定URL ← 別リポ。事故防止として早めに
 §3.2 Caddyfile            ← ステージングを作るまで不要
 ```
@@ -242,5 +272,5 @@ process.env.NEXT_PUBLIC_GAME_SERVER_URL ?? "https://takoda99.mooo.com"
 - [ ] コード側の辞書を更新したとき、本番へ反映する経路が決まっている（§1.4 のどれか）
 - [ ] 既定値がコードの2箇所に書かれている状態が解消されている（§2.2）
 - [ ] `odai.MaxWordLevel` と `heat.maxLevel` の不一致がテストで止まる（§2.4）
-- [ ] `GameParameters` に無い運用値のうち、当日いじる可能性があるものが可変になっている（§2.3・要判断）
+- [x] 運用値の置き場所が決まっている（§2.3。`GameParameters` ではなく環境変数。当面は着手不要）
 - [ ] `takoda99-config` が env 未設定で本番へ繋がらない（§3.3）
