@@ -785,11 +785,7 @@ func (s *Session) executeCull(out []Outbound) []Outbound {
 		s.aliveCount--
 
 		for _, cid := range s.storeQueues[st.id] {
-			c := s.customers[cid]
-			if c != nil {
-				c.assignedStore = nil
-				s.restPool = append(s.restPool, cid)
-			}
+			s.releaseToRest(cid)
 		}
 		s.storeQueues[st.id] = nil
 
