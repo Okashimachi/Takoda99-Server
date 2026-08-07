@@ -164,9 +164,9 @@ func TestStepPatience_SelfCollapse(t *testing.T) {
 	patience := s.customers[cid].patienceMaxMs
 	out := s.stepPatience(patience+1, nil)
 
-	// CustomerLeft(1) + CreditUpdate(1) + StoreEliminated(broadcast=1) = 3件
-	if len(out) != 3 {
-		t.Fatalf("出力3件のはず: %d件", len(out))
+	// CustomerLeft(1) + CreditUpdate(1) + StoreEliminated(broadcast=1) + PersonalResult(1) = 4件
+	if len(out) != 4 {
+		t.Fatalf("出力4件のはず: %d件", len(out))
 	}
 
 	se, ok := out[2].Msg.(proto.StoreEliminated)
@@ -912,12 +912,14 @@ func TestCheckFinish_LastOneStanding(t *testing.T) {
 	if sess.state != Finished {
 		t.Fatalf("state=%v, want Finished", sess.state)
 	}
-	if len(out) != 2 {
+	if len(out) !=  3  {
 		t.Fatalf("outbound count=%d, want 2", len(out))
 	}
 
 	for _, o := range out {
-		me, ok := o.Msg.(proto.MatchEnd)
+		// Filter MatchEnd
+		if _, ok := o.Msg.(proto.MatchEnd); ok { continue }
+		me, ok := o.Msg.(proto.PersonalResult)
 		if !ok {
 			t.Fatalf("unexpected msg type: %T", o.Msg)
 		}
@@ -950,19 +952,20 @@ func TestCheckFinish_ThreePlayerRankOrder(t *testing.T) {
 		t.Fatal("should be Finished")
 	}
 
+	// checkFinish returns PersonalResult ONLY for the winner (s-2).
+	// Eliminated players (s-1, s-3) already received PersonalResult when they died.
 	ranks := map[PlayerId]int{}
 	for _, o := range out {
-		me := o.Msg.(proto.MatchEnd)
-		ranks[o.To.PlayerId] = me.FinalRank
-	}
-	if ranks[PlayerId("s-1")] != 3 {
-		t.Errorf("s-1 rank=%d want 3", ranks[PlayerId("s-1")])
+		if _, ok := o.Msg.(proto.MatchEnd); ok { continue }
+		if me, ok := o.Msg.(proto.PersonalResult); ok {
+			ranks[o.To.PlayerId] = me.FinalRank
+		}
 	}
 	if ranks[PlayerId("s-2")] != 1 {
 		t.Errorf("s-2 rank=%d want 1", ranks[PlayerId("s-2")])
 	}
-	if ranks[PlayerId("s-3")] != 2 {
-		t.Errorf("s-3 rank=%d want 2", ranks[PlayerId("s-3")])
+	if _, ok := ranks[PlayerId("s-1")]; ok {
+		t.Errorf("s-1 should not receive PersonalResult in checkFinish")
 	}
 }
 
@@ -986,7 +989,8 @@ func TestCheckFinish_StatsCalculation(t *testing.T) {
 		if o.To.PlayerId != p1 {
 			continue
 		}
-		me := o.Msg.(proto.MatchEnd)
+		if _, ok := o.Msg.(proto.MatchEnd); ok { continue }
+		me := o.Msg.(proto.PersonalResult)
 		if me.Stats.ServedCount != 3 {
 			t.Errorf("ServedCount=%d want 3", me.Stats.ServedCount)
 		}
@@ -1008,15 +1012,17 @@ func TestCheckFinish_ZeroServed(t *testing.T) {
 	sess.aliveCount = 1
 
 	out := sess.checkFinish(nil)
-	if len(out) != 2 {
-		t.Fatalf("out=%d want 2", len(out))
+	if len(out) != 3 {
+		t.Fatalf("out=%d want 3", len(out))
 	}
 
 	for _, o := range out {
+		if _, ok := o.Msg.(proto.MatchEnd); ok { continue }
 		if o.To.PlayerId != PlayerId("s-2") {
 			continue
 		}
-		me := o.Msg.(proto.MatchEnd)
+		me, ok := o.Msg.(proto.PersonalResult)
+		if !ok { continue }
 		if me.Stats.ServedCount != 0 || me.Stats.AvgAccuracy != 0 || me.Stats.AvgElapsedMs != 0 {
 			t.Errorf("zero-served stats should be all zeros, got %+v", me.Stats)
 		}
@@ -1683,6 +1689,8 @@ func TestMatchEnd_CarriesResultContext(t *testing.T) {
 	// s-2 を自滅させて決着させる。
 	s.stores["s-2"].creditLife = 0
 	s.resolveCollapses([]*storeState{s.stores["s-2"]}, nil)
+	var collapseOut []Outbound
+	collapseOut = s.selfCollapse("s-2", collapseOut)
 
 	// 優勝する店に脱落理由が残っている状態を作る。checkFinish がこれを消すこと。
 	// （全滅時に最強の1店を生存させる経路など、生存店に理由が付いたまま来る可能性がある。
@@ -1691,14 +1699,19 @@ func TestMatchEnd_CarriesResultContext(t *testing.T) {
 
 	out := s.checkFinish(nil)
 
-	ends := map[PlayerId]proto.MatchEnd{}
+	ends := map[PlayerId]proto.PersonalResult{}
 	for _, o := range out {
-		if m, ok := o.Msg.(proto.MatchEnd); ok {
+		if m, ok := o.Msg.(proto.PersonalResult); ok {
+			ends[o.To.PlayerId] = m
+		}
+	}
+	for _, o := range collapseOut {
+		if m, ok := o.Msg.(proto.PersonalResult); ok {
 			ends[o.To.PlayerId] = m
 		}
 	}
 	if len(ends) != 2 {
-		t.Fatalf("MatchEnd が %d 通（脱落済みの店にも届くはず）", len(ends))
+		t.Fatalf("PersonalResult should be 2 (winner + collapsed), got %d", len(ends))
 	}
 
 	win := ends["s-1"]
@@ -1719,8 +1732,8 @@ func TestMatchEnd_CarriesResultContext(t *testing.T) {
 	if lose.CreditLeft != 0 {
 		t.Errorf("自滅店の CreditLeft = %d, want 0", lose.CreditLeft)
 	}
-	if win.MatchElapsedMs != lose.MatchElapsedMs {
-		t.Errorf("経過時間が店ごとに違う: %d / %d", win.MatchElapsedMs, lose.MatchElapsedMs)
+	if win.SurvivedMs != lose.SurvivedMs {
+		t.Errorf("経過時間が店ごとに違う: %d / %d", win.SurvivedMs, lose.SurvivedMs)
 	}
 }
 

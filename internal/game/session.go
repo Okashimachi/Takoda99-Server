@@ -590,6 +590,7 @@ func (s *Session) selfCollapse(store PlayerId, out []Outbound) []Outbound {
 		Reason:    proto.ElimSelfCollapse,
 		FinalRank: st.finalRank,
 	}))
+	out = append(out, to(store, s.buildPersonalResult(st)))
 
 	return out
 }
@@ -797,6 +798,7 @@ func (s *Session) executeCull(out []Outbound) []Outbound {
 			Reason:    proto.ElimCull,
 			FinalRank: st.finalRank,
 		}))
+		out = append(out, to(st.id, s.buildPersonalResult(st)))
 	}
 
 	return out
@@ -872,17 +874,26 @@ func (s *Session) checkFinish(out []Outbound) []Outbound {
 
 	for _, pid := range s.order {
 		st := s.stores[pid]
-		out = append(out, to(pid, proto.MatchEnd{
-			FinalRank:      st.finalRank,
-			Stats:          s.buildMatchStats(st),
-			Reason:         proto.EliminationReason(st.elimination),
-			MatchElapsedMs: s.elapsedMs,
-			CreditLeft:     st.creditLife,
-			EvalRaw:        s.evalScore(st),
-			EvalNormalized: st.evalNormalized,
-		}))
+		if st.alive {
+			// 優勝者には PersonalResult と MatchEnd の両方を送る
+			out = append(out, to(pid, s.buildPersonalResult(st)))
+		}
+		// 全体へは MatchEnd (空) を送る
+		out = append(out, to(pid, proto.MatchEnd{}))
 	}
 	return out
+}
+
+func (s *Session) buildPersonalResult(st *storeState) proto.PersonalResult {
+	return proto.PersonalResult{
+		FinalRank:      st.finalRank,
+		Stats:          s.buildMatchStats(st),
+		Reason:         proto.EliminationReason(st.elimination),
+		SurvivedMs:     s.elapsedMs,
+		CreditLeft:     st.creditLife,
+		EvalRaw:        s.evalScore(st),
+		EvalNormalized: st.evalNormalized,
+	}
 }
 
 func (s *Session) buildMatchStats(st *storeState) proto.MatchStats {

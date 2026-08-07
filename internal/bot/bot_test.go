@@ -78,7 +78,7 @@ func recvOrder(t *testing.T, c transport.Connection) proto.OrderServed {
 func TestBot_StopsOnMatchEnd(t *testing.T) {
 	_, cli := transport.Pipe()
 	b := New(cli, DefaultConfig(), rand.New(rand.NewSource(1)))
-	p, _ := json.Marshal(proto.MatchEnd{FinalRank: 1})
+	p, _ := json.Marshal(proto.PersonalResult{FinalRank: 1})
 	if !b.onMessage(proto.Envelope{Type: proto.TypeMatchEnd, Payload: p}) {
 		t.Fatal("MatchEnd で終了(true)を返すべき")
 	}

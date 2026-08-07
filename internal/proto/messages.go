@@ -71,6 +71,7 @@ const (
 	TypeStoreListUpdate          = canon.TypeStoreListUpdate
 	TypeForcedEliminationWarning = canon.TypeForcedEliminationWarning
 	TypeStoreEliminated          = canon.TypeStoreEliminated
+	TypePersonalResult           = canon.TypePersonalResult
 	TypeMatchEnd                 = canon.TypeMatchEnd
 	TypeMatchmakingStatus        = canon.TypeMatchmakingStatus
 )
@@ -94,6 +95,7 @@ type (
 	StoreListUpdate          = canon.StoreListUpdate
 	ForcedEliminationWarning = canon.ForcedEliminationWarning
 	StoreEliminated          = canon.StoreEliminated
+	PersonalResult           = canon.PersonalResult
 	MatchEnd                 = canon.MatchEnd
 	MatchmakingStatus        = canon.MatchmakingStatus
 	MatchmakingParticipant   = canon.MatchmakingParticipant
