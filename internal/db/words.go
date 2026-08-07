@@ -177,7 +177,7 @@ func (s *WordStore) saveAll(ctx context.Context, entries []odai.WordEntry, mode 
 	br := tx.SendBatch(ctx, batch)
 	for i := 0; i < len(entries); i++ {
 		if _, err := br.Exec(); err != nil {
-			br.Close()
+			_ = br.Close()
 			return fmt.Errorf("db: words batch exec (index %d): %w", i, err)
 		}
 	}
