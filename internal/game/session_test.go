@@ -80,13 +80,13 @@ func TestSession_CountdownDelay(t *testing.T) {
 		t.Fatalf("カウントダウン中に出力が出てはいけない")
 	}
 
-	out = s.Tick(3000)
+	_ = s.Tick(3000)
 	if s.elapsedMs != 0 {
 		t.Fatalf("5秒後のelapsedMsが 0 になっていない: %d", s.elapsedMs)
 	}
 
 	// 0以降でティックが進めばイベントが出る
-	out = s.Tick(100)
+	_ = s.Tick(100)
 	if s.elapsedMs != 100 {
 		t.Fatalf("5.1秒後のelapsedMsが 100 になっていない: %d", s.elapsedMs)
 	}
