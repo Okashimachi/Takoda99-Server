@@ -81,7 +81,7 @@ func (b *Bot) onMessage(env proto.Envelope) bool {
 		if json.Unmarshal(env.Payload, &m) == nil {
 			b.removePending(m.CustomerId)
 		}
-	case proto.TypeMatchEnd:
+	case proto.TypeMatchEnd, proto.TypePersonalResult:
 		return true
 	}
 	return false

@@ -43,9 +43,9 @@ func TestHeadlessMatch_PlaysToFinish(t *testing.T) {
 				t.Logf("[%s] EvaluationUpdate raw=%.3f norm=%.3f rank=%d", o.To.PlayerId, m.EvalRaw, m.Normalized, m.Rank)
 			case proto.StoreEliminated:
 				t.Logf("*** Eliminated store=%s reason=%s finalRank=%d ***", m.StoreId, m.Reason, m.FinalRank)
-			case proto.MatchEnd:
+			case proto.PersonalResult:
 				matchEndRank[m.FinalRank] = o.To.PlayerId
-				t.Logf("=== MatchEnd [%s] rank=%d served=%d ===", o.To.PlayerId, m.FinalRank, m.Stats.ServedCount)
+				t.Logf("=== PersonalResult [%s] rank=%d served=%d ===", o.To.PlayerId, m.FinalRank, m.Stats.ServedCount)
 			}
 		}
 	}

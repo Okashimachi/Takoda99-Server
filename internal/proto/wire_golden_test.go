@@ -50,8 +50,8 @@ func TestWireGolden(t *testing.T) {
 		{"StoreEliminated",
 			StoreEliminated{StoreId: "s1", Reason: ElimSelfCollapse, FinalRank: 50},
 			`{"storeId":"s1","reason":"SelfCollapse","finalRank":50}`},
-		{"MatchEnd/優勝（reason は省略される）",
-			MatchEnd{
+		{"PersonalResult/優勝（reason は省略される）",
+			PersonalResult{
 				FinalRank: 1,
 				Stats: MatchStats{
 					ServedCount: 10, AvgAccuracy: 0.95, AvgElapsedMs: 2000,
@@ -59,12 +59,15 @@ func TestWireGolden(t *testing.T) {
 					FastestMs: 1500, SlowestMs: 3000,
 					Normal: AttributeTally{Served: 7, Left: 2}, Buzz: AttributeTally{Served: 3},
 				},
-				MatchElapsedMs: 145000, CreditLeft: 8, EvalRaw: 0.72, EvalNormalized: 1,
+				SurvivedMs: 145000, CreditLeft: 8, EvalRaw: 0.72, EvalNormalized: 1,
 			},
-			`{"finalRank":1,"stats":{"servedCount":10,"avgAccuracy":0.95,"avgElapsedMs":2000,"leftCount":2,"totalKeystrokes":120,"totalMisses":6,"fastestMs":1500,"slowestMs":3000,"normal":{"served":7,"left":2},"bonus":{"served":0,"left":0},"claimer":{"served":0,"left":0},"buzz":{"served":3,"left":0}},"matchElapsedMs":145000,"creditLeft":8,"evalRaw":0.72,"evalNormalized":1}`},
-		{"MatchEnd/自滅（reason あり）",
-			MatchEnd{FinalRank: 57, Reason: ElimSelfCollapse, MatchElapsedMs: 90000},
-			`{"finalRank":57,"stats":{"servedCount":0,"avgAccuracy":0,"avgElapsedMs":0,"leftCount":0,"totalKeystrokes":0,"totalMisses":0,"fastestMs":0,"slowestMs":0,"normal":{"served":0,"left":0},"bonus":{"served":0,"left":0},"claimer":{"served":0,"left":0},"buzz":{"served":0,"left":0}},"reason":"SelfCollapse","matchElapsedMs":90000,"creditLeft":0,"evalRaw":0,"evalNormalized":0}`},
+			`{"finalRank":1,"stats":{"servedCount":10,"avgAccuracy":0.95,"avgElapsedMs":2000,"leftCount":2,"totalKeystrokes":120,"totalMisses":6,"fastestMs":1500,"slowestMs":3000,"normal":{"served":7,"left":2},"bonus":{"served":0,"left":0},"claimer":{"served":0,"left":0},"buzz":{"served":3,"left":0}},"survivedMs":145000,"creditLeft":8,"evalRaw":0.72,"evalNormalized":1}`},
+		{"PersonalResult/自滅（reason あり）",
+			PersonalResult{FinalRank: 57, Reason: ElimSelfCollapse, SurvivedMs: 90000},
+			`{"finalRank":57,"stats":{"servedCount":0,"avgAccuracy":0,"avgElapsedMs":0,"leftCount":0,"totalKeystrokes":0,"totalMisses":0,"fastestMs":0,"slowestMs":0,"normal":{"served":0,"left":0},"bonus":{"served":0,"left":0},"claimer":{"served":0,"left":0},"buzz":{"served":0,"left":0}},"reason":"SelfCollapse","survivedMs":90000,"creditLeft":0,"evalRaw":0,"evalNormalized":0}`},
+		{"MatchEnd/全体終了",
+			MatchEnd{},
+			`{}`},
 		{"MatchmakingStatus/待機（宛先ごとに selfStoreId が違う）",
 			MatchmakingStatus{
 				WaitingCount: 2, MinPlayers: 20, SelfStoreId: "p-2",
