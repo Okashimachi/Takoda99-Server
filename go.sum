@@ -1,7 +1,5 @@
-github.com/Okashimachi/Takoda99-Proto v0.4.0 h1:lcqUZ+IReMpapwOCqtVbMUUXCZuCdEj++zLSHQLmmfM=
-github.com/Okashimachi/Takoda99-Proto v0.4.0/go.mod h1:H3H55ecCc9pGkYrtOiUz/BA3E5Oy9bQ7wCmxfS8qT5A=
-github.com/Okashimachi/Takoda99-Proto v0.5.0 h1:btucvSkXdZ5H7IialmGh9H/aARXFCIHovwjBuo1rPHw=
-github.com/Okashimachi/Takoda99-Proto v0.5.0/go.mod h1:H3H55ecCc9pGkYrtOiUz/BA3E5Oy9bQ7wCmxfS8qT5A=
+github.com/Okashimachi/Takoda99-Proto v0.5.1-0.20260807054614-d4d22c6f4a70 h1:FtARTikp7WvNrLwwN4DdINCmaSKzsj1gBVCCQGp5Hw0=
+github.com/Okashimachi/Takoda99-Proto v0.5.1-0.20260807054614-d4d22c6f4a70/go.mod h1:H3H55ecCc9pGkYrtOiUz/BA3E5Oy9bQ7wCmxfS8qT5A=
 github.com/coder/websocket v1.8.15 h1:6B2JPeOGlpff2Uz6vOEH1Vzpi0iUz20A+lPVhPHtNUA=
 github.com/coder/websocket v1.8.15/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
