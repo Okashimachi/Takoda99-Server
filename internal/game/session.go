@@ -181,22 +181,27 @@ func (s *Session) Snapshot() ([]proto.StoreSummary, int) {
 	return s.summaries(), s.aliveCount
 }
 
+// Params は現在のパラメータを返す。
+func (s *Session) Params() GameParameters { return s.params }
+
 // Start は WaitingStart→Running へ遷移し、客プール(300)を生成して各店へ MatchStart を配る。
-func (s *Session) Start() []Outbound {
+func (s *Session) Start(startsAtServerMs int64) []Outbound {
 	if s.state != WaitingStart {
 		return nil
 	}
 	s.state = Running
+	s.elapsedMs = -int64(s.params.Matching.ReadyCountdownMs)
 	s.initCustomers()
 	stores := s.summaries()
 	out := make([]Outbound, 0, len(s.order))
 	for _, sid := range s.order {
 		out = append(out, to(sid, proto.MatchStart{
-			MatchId:     s.id,
-			SelfStoreId: sid,
-			Params:      s.publicParams(),
-			Phase:       s.phase,
-			Stores:      stores,
+			MatchId:          s.id,
+			SelfStoreId:      sid,
+			Params:           s.publicParams(),
+			Phase:            s.phase,
+			Stores:           stores,
+			StartsAtServerMs: startsAtServerMs,
 		}))
 	}
 	return out
@@ -205,6 +210,10 @@ func (s *Session) Start() []Outbound {
 // ApplyOrderServed は提供完了(OrderServed)を処理する。
 func (s *Session) ApplyOrderServed(from PlayerId, r proto.OrderServed) []Outbound {
 	if s.state != Running {
+		return nil
+	}
+	if s.elapsedMs < 0 {
+		// フライング入力（REQ-04 の開始前カウントダウン中の入力）は無視する
 		return nil
 	}
 	st := s.stores[from]
@@ -306,18 +315,23 @@ func clampF(v, lo, hi float64) float64 {
 	return v
 }
 
-// Tick は時間を dt 進め、試合ループの各ステップを順序で呼ぶ。
-func (s *Session) Tick(dtMs int) []Outbound {
+// Tick は時間を dt (ms) 進め、状態機械を1ステップ駆動する。
+func (s *Session) Tick(dt int) []Outbound {
 	if s.state != Running {
 		return nil
 	}
-	s.elapsedMs += int64(dtMs)
+	s.elapsedMs += int64(dt)
+	if s.elapsedMs < 0 {
+		// REQ-04 の開始前カウントダウン中。ゲームは進行しない。
+		return nil
+	}
+
 	s.tick++
 
 	var out []Outbound
 	out = s.stepPhase(out)
 	out = s.stepDistribute(out)
-	out = s.stepPatience(dtMs, out)
+	out = s.stepPatience(dt, out)
 	out = s.stepEvaluate(out)
 	out = s.stepNormalize(out)
 	out = s.stepHeat(out)

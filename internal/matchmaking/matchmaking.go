@@ -227,12 +227,26 @@ func (m *Matchmaker) Run(ctx context.Context) {
 	}
 }
 
-// startMatch は Bot 補完してから Start を呼ぶ。
+// startMatch は Bot 補完し、最終的な参加者一覧を配信して待機したのちに Start を呼ぶ。
 func (m *Matchmaker) startMatch(pool []Player, params game.MatchingParams) {
 	players := append([]Player(nil), pool...)
 	for len(players) < params.MinFill && m.cfg.NewBot != nil {
 		players = append(players, m.cfg.NewBot())
 	}
+
+	// 席順と表示名を確定させる
+	for i := range players {
+		if players[i].Name == "" {
+			players[i].Name = FallbackDisplayName(players[i].IsBot, i+1)
+		}
+	}
+
+	// フェーズ3：人数確定待機（REQ-04）。Bot込みの99人を最終配信し、指定秒数待機する。
+	m.broadcast(players, false, time.Time{}, params)
+	if params.RosterWaitMs > 0 && m.cfg.After != nil {
+		<-m.cfg.After(time.Duration(params.RosterWaitMs) * time.Millisecond)
+	}
+
 	if m.cfg.Start != nil {
 		m.cfg.Start(players)
 	}
@@ -269,6 +283,7 @@ func (m *Matchmaker) broadcast(pool []Player, counting bool, countdownStart time
 		participants = append(participants, proto.MatchmakingParticipant{
 			StoreId:     string(p.Id),
 			DisplayName: name,
+			IsBot:       p.IsBot,
 		})
 	}
 

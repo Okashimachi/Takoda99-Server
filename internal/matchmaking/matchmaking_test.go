@@ -78,6 +78,60 @@ func TestMatchmaker_CountdownAndBotFill(t *testing.T) {
 	}
 }
 
+func TestMatchmaker_RosterWaitAndFinalBroadcast(t *testing.T) {
+	afterCh := make(chan time.Time)
+	started := make(chan []Player, 1)
+	m := New(Config{
+		GetParams: func() game.MatchingParams {
+			return game.MatchingParams{MinPlayers: 2, MaxPlayers: 2, StartCountdownMs: 15000, RosterWaitMs: 3000, MinFill: 2}
+		},
+		After: func(d time.Duration) <-chan time.Time {
+			// max 到達で startMatch から即座に呼ばれる
+			if d == 3000*time.Millisecond {
+				go func() {
+					time.Sleep(10 * time.Millisecond) // テスト進行の都合上少し待ってからシグナルを送る
+					afterCh <- time.Now()
+				}()
+			}
+			return afterCh
+		},
+		Start: func(players []Player) {
+			started <- players
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go m.Run(ctx)
+
+	sa, ca := transport.Pipe()
+	sb, cb := transport.Pipe()
+
+	m.Join(Player{Id: "a", Conn: sa, Name: "UserA"})
+	
+	// 1人目参加通知の破棄
+	recvStatus(t, ca)
+	
+	m.Join(Player{Id: "b", Conn: sb, Name: "UserB"})
+	// 2人目参加通知 (max到達のため、カウントダウン通知ではなく即座に startMatch へ)
+
+	// startMatch 内での最終配信 (IsBot フラグ付きで配信される)
+	stB := recvStatus(t, cb)
+	if stB.CountdownMs != nil {
+		t.Fatalf("最終配信は CountdownMs が nil であるべき: %v", stB.CountdownMs)
+	}
+	if len(stB.Participants) != 2 {
+		t.Fatalf("参加者が2人ではない: %d", len(stB.Participants))
+	}
+	
+	// After チャネルが読まれてから Start が呼ばれるか確認
+	select {
+	case <-started:
+		// OK
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start が呼ばれない (RosterWaitMs ブロックの解除失敗)")
+	}
+}
+
 // maxPlayers 到達で即開始。
 func TestMatchmaker_MaxPlayersImmediateStart(t *testing.T) {
 	started := make(chan []Player, 1)
