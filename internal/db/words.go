@@ -154,6 +154,7 @@ func (s *WordStore) saveAll(ctx context.Context, entries []odai.WordEntry, mode 
 		}
 	}
 
+	batch := &pgx.Batch{}
 	for _, e := range entries {
 		ks := e.KeystrokeCount
 		if ks == 0 {
@@ -166,16 +167,24 @@ func (s *WordStore) saveAll(ctx context.Context, entries []odai.WordEntry, mode 
 					reading = EXCLUDED.reading,
 					keystroke_count = EXCLUDED.keystroke_count,
 					category = EXCLUDED.category`
-			if _, err := tx.Exec(ctx, upsert, e.Text, e.Reading, ks, e.Level, e.Category); err != nil {
-				return fmt.Errorf("db: words upsert: %w", err)
-			}
+			batch.Queue(upsert, e.Text, e.Reading, ks, e.Level, e.Category)
 		} else {
 			const ins = `INSERT INTO words (text, reading, keystroke_count, level, category) VALUES ($1, $2, $3, $4, $5)`
-			if _, err := tx.Exec(ctx, ins, e.Text, e.Reading, ks, e.Level, e.Category); err != nil {
-				return fmt.Errorf("db: words insert: %w", err)
-			}
+			batch.Queue(ins, e.Text, e.Reading, ks, e.Level, e.Category)
 		}
 	}
+	
+	br := tx.SendBatch(ctx, batch)
+	for i := 0; i < len(entries); i++ {
+		if _, err := br.Exec(); err != nil {
+			br.Close()
+			return fmt.Errorf("db: words batch exec (index %d): %w", i, err)
+		}
+	}
+	if err := br.Close(); err != nil {
+		return fmt.Errorf("db: words batch close: %w", err)
+	}
+
 	return tx.Commit(ctx)
 }
 

@@ -208,6 +208,23 @@ func (gp GameParameters) Validate() error {
 	if gp.Phase.MidAliveThreshold < 0 {
 		return fmt.Errorf("phase.midAliveThreshold は非負である必要 (got %d)", gp.Phase.MidAliveThreshold)
 	}
+	if gp.Matching.MinPlayers <= 0 {
+		return fmt.Errorf("matching.minPlayers は正である必要 (got %d)", gp.Matching.MinPlayers)
+	}
+	if gp.Distribution.QueueRefillThreshold <= 0 {
+		return fmt.Errorf("distribution.queueRefillThreshold は正である必要 (got %d)", gp.Distribution.QueueRefillThreshold)
+	}
+	if gp.Eval.EmaAlpha <= 0 || gp.Eval.EmaAlpha > 1 {
+		return fmt.Errorf("eval.emaAlpha は 0 < x <= 1 である必要 (got %f)", gp.Eval.EmaAlpha)
+	}
+	for _, spec := range []AttributeSpec{gp.Customer.Normal, gp.Customer.Bonus, gp.Customer.Claimer, gp.Customer.Buzz} {
+		if spec.PatienceBaseMs <= 0 {
+			return fmt.Errorf("customer.%s.patienceBaseMs は正である必要 (got %d)", spec.Attribute, spec.PatienceBaseMs)
+		}
+		if spec.OrderCount <= 0 {
+			return fmt.Errorf("customer.%s.orderCount は正である必要 (got %d)", spec.Attribute, spec.OrderCount)
+		}
+	}
 	return nil
 }
 
