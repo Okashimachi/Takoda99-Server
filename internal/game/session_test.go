@@ -23,6 +23,8 @@ func newTestSession(n int) *Session {
 }
 
 func newTestSessionWith(params GameParameters, n int) *Session {
+	params.Matching.ReadyCountdownMs = 0
+	params.Matching.RosterWaitMs = 0
 	inits := make([]PlayerInit, n)
 	for i := range inits {
 		id := PlayerId(fmt.Sprintf("s-%d", i+1))
@@ -637,7 +639,7 @@ func TestStepNormalize_SingleStore(t *testing.T) {
 
 func TestStepDistribute_BottomStoreStillGetsCustomers(t *testing.T) {
 	s := newTestSession(3)
-	s.Start()
+	s.Start(0)
 	s.params.Distribution = DistributionParams{QueueRefillThreshold: 5, WeightFloor: 0.25}
 
 	bottom := s.order[0]
@@ -657,7 +659,7 @@ func TestStepDistribute_BottomStoreStillGetsCustomers(t *testing.T) {
 
 func TestStepDistribute_ZeroFloorReproducesSpec(t *testing.T) {
 	s := newTestSession(3)
-	s.Start()
+	s.Start(0)
 	s.params.Distribution = DistributionParams{QueueRefillThreshold: 5, WeightFloor: 0}
 
 	bottom := s.order[0]
@@ -687,7 +689,7 @@ func filterMsg[T any](out []Outbound) []T {
 
 func TestStepPhase_AliveThreshold(t *testing.T) {
 	s := newTestSession(99)
-	s.Start()
+	s.Start(0)
 	s.params.Storm.IntervalTicks = 0
 
 	if s.phase != proto.PhaseEarly {
@@ -724,7 +726,7 @@ func TestStepPhase_TimeThreshold(t *testing.T) {
 	s.params.Customer.Bonus.PatienceBaseMs = huge
 	s.params.Customer.Claimer.PatienceBaseMs = huge
 	s.params.Customer.Buzz.PatienceBaseMs = huge
-	s.Start()
+	s.Start(0)
 	s.params.Storm.IntervalTicks = 0
 
 	midMs := s.params.Phase.MidTimeMs
@@ -742,7 +744,7 @@ func TestStepPhase_TimeThreshold(t *testing.T) {
 
 func TestStepHeat_Calculation(t *testing.T) {
 	s := newTestSession(99)
-	s.Start()
+	s.Start(0)
 	s.params.Storm.IntervalTicks = 0
 	hp := s.params.Heat
 
@@ -764,7 +766,7 @@ func TestStepHeat_Calculation(t *testing.T) {
 func TestStepStorm_Cull(t *testing.T) {
 	n := 10
 	s := newTestSession(n)
-	s.Start()
+	s.Start(0)
 	s.params.Storm = StormParams{IntervalTicks: 5, WarnTicks: 2, ThresholdPct: 0.20}
 	s.phase = proto.PhaseMid
 	s.params.Phase.LateAliveThreshold = 0
@@ -794,7 +796,7 @@ func TestStepStorm_Cull(t *testing.T) {
 
 func TestStepStorm_Warning(t *testing.T) {
 	s := newTestSession(10)
-	s.Start()
+	s.Start(0)
 	s.params.Storm = StormParams{IntervalTicks: 10, WarnTicks: 3, ThresholdPct: 0.10}
 	s.phase = proto.PhaseMid
 	s.params.Phase.LateAliveThreshold = 0
@@ -827,7 +829,7 @@ func TestStepStorm_Warning(t *testing.T) {
 
 func TestStepStorm_Tiebreak(t *testing.T) {
 	s := newTestSession(5)
-	s.Start()
+	s.Start(0)
 	s.params.Storm = StormParams{IntervalTicks: 1, WarnTicks: 0, ThresholdPct: 0.40}
 	s.phase = proto.PhaseMid
 	s.params.Phase.LateAliveThreshold = 0
@@ -1499,7 +1501,7 @@ func TestStepHeat_ClampsToMaxLevel(t *testing.T) {
 	params.Heat.PhaseLate = 10
 
 	s := newTestSessionWith(params, 20)
-	s.Start()
+	s.Start(0)
 	maxSeen := 0
 	for i := 0; i < 3000 && s.State() != Finished; i++ {
 		for _, o := range s.Tick(params.Session.TickIntervalMs) {
@@ -1530,7 +1532,7 @@ func TestStepHeat_NeverGoesNegative(t *testing.T) {
 	params.Heat.PhaseLate = 0
 
 	s := newTestSessionWith(params, 5)
-	s.Start()
+	s.Start(0)
 	for i := 0; i < 500 && s.State() != Finished; i++ {
 		for _, o := range s.Tick(params.Session.TickIntervalMs) {
 			if d, ok := o.Msg.(proto.DifficultyUpdate); ok && d.HeatLevel < 0 {
@@ -1547,7 +1549,7 @@ func TestMatchStats_CountsServedAndLeftByAttribute(t *testing.T) {
 	params := DefaultParameters()
 	params.Customer.Total = 0 // 自動分配を止めて、置いた客だけを見る
 	s := newTestSessionWith(params, 2)
-	s.Start()
+	s.Start(0)
 
 	// 提供する客（Normal 2人・Buzz 1人）と、放置して帰らせる客（Claimer 1人）。
 	placeAssigned(s, "c-1", "s-1", proto.AttrNormal, 2, 10)
@@ -1617,7 +1619,7 @@ func TestMatchStats_NoServeIsSafe(t *testing.T) {
 	params := DefaultParameters()
 	params.Customer.Total = 0
 	s := newTestSessionWith(params, 2)
-	s.Start()
+	s.Start(0)
 
 	placeAssigned(s, "c-1", "s-1", proto.AttrNormal, 1, 5)
 	s.customers["c-1"].patienceLeftMs = 1
@@ -1641,7 +1643,7 @@ func TestMatchEnd_CarriesResultContext(t *testing.T) {
 	params := DefaultParameters()
 	params.Customer.Total = 0
 	s := newTestSessionWith(params, 2)
-	s.Start()
+	s.Start(0)
 
 	// s-2 を自滅させて決着させる。
 	s.stores["s-2"].creditLife = 0

@@ -109,7 +109,11 @@ func Simulate(cfg Config) Result {
 	}
 
 	words := odai.NewStaticPool()
-	sess := game.NewSession("sim", cfg.Params, words, sessRng, inits)
+	// シミュレーションなので即座に開始させる
+	params := cfg.Params
+	params.Matching.ReadyCountdownMs = 0
+
+	sess := game.NewSession("sim", params, words, sessRng, inits)
 	tickMs := cfg.Params.Session.TickIntervalMs
 
 	r := Result{
@@ -151,7 +155,7 @@ func Simulate(cfg Config) Result {
 		}
 	}
 
-	handle(sess.Start())
+	handle(sess.Start(0))
 	prevAlive := sess.AliveCount()
 	r.AliveCurve = append(r.AliveCurve, AlivePoint{Tick: 0, Alive: prevAlive})
 

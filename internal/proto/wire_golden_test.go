@@ -19,7 +19,7 @@ func TestWireGolden(t *testing.T) {
 				Phase:  PhaseEarly,
 				Stores: []StoreSummary{{StoreId: "s1", DisplayName: "s1", EvalNormalized: 0, Rank: 0, CreditLife: 3, Alive: true}},
 			},
-			`{"matchId":"m-1","selfStoreId":"s1","params":{"initialLife":3,"maxStores":99,"stormThresholdPct":0.1,"finalStageAliveThreshold":20,"finalRushAliveThreshold":10,"patienceLateMul":0.6,"patienceAlertMs":2000},"phase":"Early","stores":[{"storeId":"s1","displayName":"s1","evalNormalized":0,"rank":0,"creditLife":3,"alive":true}]}`},
+			`{"matchId":"m-1","selfStoreId":"s1","params":{"initialLife":3,"maxStores":99,"stormThresholdPct":0.1,"finalStageAliveThreshold":20,"finalRushAliveThreshold":10,"patienceLateMul":0.6,"patienceAlertMs":2000},"phase":"Early","stores":[{"storeId":"s1","displayName":"s1","evalNormalized":0,"rank":0,"creditLife":3,"alive":true}],"startsAtServerMs":0}`},
 		{"CustomerArrived",
 			CustomerView{CustomerId: "c-1", Attribute: AttrNormal, OrderCount: 2, Words: []string{"ねこ", "いぬ"}, PatienceMaxMs: 8000, PatienceStartedAtServerMs: 1500},
 			`{"customerId":"c-1","attribute":"Normal","orderCount":2,"words":["ねこ","いぬ"],"patienceMaxMs":8000,"patienceStartedAtServerMs":1500}`},
@@ -69,11 +69,11 @@ func TestWireGolden(t *testing.T) {
 			MatchmakingStatus{
 				WaitingCount: 2, MinPlayers: 20, SelfStoreId: "p-2",
 				Participants: []MatchmakingParticipant{
-					{StoreId: "p-1", DisplayName: "たこ焼き"},
-					{StoreId: "p-2", DisplayName: "ゲスト2"},
+					{StoreId: "p-1", DisplayName: "たこ焼き", IsBot: false},
+					{StoreId: "p-2", DisplayName: "ゲスト2", IsBot: false},
 				},
 			},
-			`{"waitingCount":2,"minPlayers":20,"selfStoreId":"p-2","participants":[{"storeId":"p-1","displayName":"たこ焼き"},{"storeId":"p-2","displayName":"ゲスト2"}]}`},
+			`{"waitingCount":2,"minPlayers":20,"selfStoreId":"p-2","participants":[{"storeId":"p-1","displayName":"たこ焼き","isBot":false},{"storeId":"p-2","displayName":"ゲスト2","isBot":false}]}`},
 
 		// ── C2S ──
 		{"OrderServed",

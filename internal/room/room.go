@@ -71,7 +71,8 @@ func (r *Room) Run(ctx context.Context) {
 		go r.readConn(pid, c)
 	}
 
-	r.dispatch(r.session.Start())
+	startsAt := time.Now().UnixMilli() + int64(r.session.Params().Matching.ReadyCountdownMs)
+	r.dispatch(r.session.Start(startsAt))
 	if r.session.State() == game.Finished {
 		return
 	}

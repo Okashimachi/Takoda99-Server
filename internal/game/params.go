@@ -54,6 +54,8 @@ type MatchingParams struct {
 	MaxPlayers       int `json:"maxPlayers"`
 	StartCountdownMs int `json:"startCountdownMs"`
 	MinFill          int `json:"minFill"`
+	RosterWaitMs     int `json:"rosterWaitMs"`
+	ReadyCountdownMs int `json:"readyCountdownMs"`
 }
 
 // LeaveLoss: 属性別の離脱ペナルティ。
@@ -221,6 +223,8 @@ func DefaultParameters() GameParameters {
 			MaxPlayers:       99,
 			StartCountdownMs: 15000,
 			MinFill:          99,
+			RosterWaitMs:     3000,
+			ReadyCountdownMs: 5000,
 		},
 		Credit: CreditParams{
 			InitialLife: 3,

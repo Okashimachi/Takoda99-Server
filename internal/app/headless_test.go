@@ -15,6 +15,7 @@ import (
 func TestHeadlessMatch_PlaysToFinish(t *testing.T) {
 	params := game.DefaultParameters()
 	params.Customer.Total = 30 // 少ない客で早期収束
+	params.Matching.ReadyCountdownMs = 0
 
 	ids := []game.PlayerId{"s1", "s2", "s3", "s4"}
 	inits := make([]game.PlayerInit, len(ids))
@@ -50,7 +51,7 @@ func TestHeadlessMatch_PlaysToFinish(t *testing.T) {
 	}
 
 	t.Log("========== 試合開始 ==========")
-	consume(s.Start())
+	consume(s.Start(0))
 
 	const tickMs = 200
 	rounds := 0
