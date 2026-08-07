@@ -56,6 +56,50 @@ func TestGameParameters_Validate(t *testing.T) {
 			t.Fatal("heat.maxLevel=0 はエラーになるべき")
 		}
 	})
+
+	t.Run("matching.minPlayers<=0 を弾く", func(t *testing.T) {
+		gp := DefaultParameters()
+		gp.Matching.MinPlayers = 0
+		if err := gp.Validate(); err == nil {
+			t.Fatal("matching.minPlayers=0 はエラーになるべき")
+		}
+	})
+
+	t.Run("distribution.queueRefillThreshold<=0 を弾く", func(t *testing.T) {
+		gp := DefaultParameters()
+		gp.Distribution.QueueRefillThreshold = 0
+		if err := gp.Validate(); err == nil {
+			t.Fatal("distribution.queueRefillThreshold=0 はエラーになるべき")
+		}
+	})
+
+	t.Run("eval.emaAlpha 範囲外を弾く", func(t *testing.T) {
+		gp := DefaultParameters()
+		gp.Eval.EmaAlpha = 0
+		if err := gp.Validate(); err == nil {
+			t.Fatal("eval.emaAlpha=0 はエラーになるべき")
+		}
+		gp.Eval.EmaAlpha = 1.1
+		if err := gp.Validate(); err == nil {
+			t.Fatal("eval.emaAlpha=1.1 はエラーになるべき")
+		}
+	})
+
+	t.Run("customer.*.patienceBaseMs<=0 を弾く", func(t *testing.T) {
+		gp := DefaultParameters()
+		gp.Customer.Bonus.PatienceBaseMs = 0
+		if err := gp.Validate(); err == nil {
+			t.Fatal("customer.bonus.patienceBaseMs=0 はエラーになるべき")
+		}
+	})
+
+	t.Run("customer.*.orderCount<=0 を弾く", func(t *testing.T) {
+		gp := DefaultParameters()
+		gp.Customer.Buzz.OrderCount = 0
+		if err := gp.Validate(); err == nil {
+			t.Fatal("customer.buzz.orderCount=0 はエラーになるべき")
+		}
+	})
 }
 
 func TestConfigHash(t *testing.T) {

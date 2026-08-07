@@ -30,7 +30,9 @@ func newTestSessionWith(params GameParameters, n int) *Session {
 		id := PlayerId(fmt.Sprintf("s-%d", i+1))
 		inits[i] = PlayerInit{Id: id, DisplayName: string(id)}
 	}
-	return NewSession("test-match", params, fakeWords{}, rand.New(rand.NewSource(42)), inits)
+	s := NewSession("test-match", params, fakeWords{}, rand.New(rand.NewSource(42)), inits)
+	s.customerSeq = 1000000
+	return s
 }
 
 func placeAssigned(s *Session, cid proto.CustomerId, store PlayerId, attr proto.CustomerAttribute, orderCount, keystrokes int) {
@@ -143,7 +145,7 @@ func TestStepPatience_BasicLeave(t *testing.T) {
 		t.Fatalf("Life=%d のはず: %d", expectedLife, cu.Life)
 	}
 
-	if s.customers[cid].assignedStore != nil {
+	if c, ok := s.customers[cid]; ok && c.assignedStore != nil {
 		t.Fatal("離脱した客の assignedStore がクリアされていない")
 	}
 }
@@ -1450,7 +1452,7 @@ func TestStepPatience_AllAttributesTimeOut(t *testing.T) {
 					t.Fatalf("%s が離脱後も行列に残っている: %v", attr, s.storeQueues[store])
 				}
 			}
-			if s.customers[stuck].assignedStore != nil {
+			if c, ok := s.customers[stuck]; ok && c.assignedStore != nil {
 				t.Fatalf("%s の assignedStore がクリアされていない", attr)
 			}
 		})

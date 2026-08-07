@@ -144,6 +144,7 @@ type Session struct {
 	heatLevel        int
 	stormTickCounter int
 	stormWarnSent    bool
+	customerSeq      int
 }
 
 // NewSession は WaitingStart 状態の試合を作る。
@@ -925,6 +926,7 @@ func (s *Session) initCustomers() {
 		}
 		s.restPool = append(s.restPool, cid)
 	}
+	s.customerSeq = total
 }
 
 func (s *Session) attributeSpecs() []AttributeSpec {
@@ -1000,7 +1002,14 @@ func (s *Session) releaseToRest(cid proto.CustomerId) {
 		s.storeQueues[*c.assignedStore] = removeCustomer(q, cid)
 	}
 	c.assignedStore = nil
-	s.restPool = append(s.restPool, cid)
+
+	// 新しいIDを振ってからプールに戻す（クライアントの重複IDバグ回避）
+	s.customerSeq++
+	newCid := proto.CustomerId(fmt.Sprintf("c-%d", s.customerSeq))
+	s.customers[newCid] = c
+	delete(s.customers, cid)
+
+	s.restPool = append(s.restPool, newCid)
 }
 
 func removeCustomer(ids []proto.CustomerId, cid proto.CustomerId) []proto.CustomerId {
