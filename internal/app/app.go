@@ -45,8 +45,9 @@ func newRng() *rand.Rand {
 }
 
 var matchSeq atomic.Int64
+var bootTime = time.Now().Unix()
 
-func nextMatchID() string { return fmt.Sprintf("m-%d", matchSeq.Add(1)) }
+func nextMatchID() string { return fmt.Sprintf("m-%d-%d", bootTime, matchSeq.Add(1)) }
 
 // RunMatch は players で1試合を構築して最後まで駆動する（ctx キャンセルでも抜ける）。
 func RunMatch(ctx context.Context, d Deps, players []matchmaking.Player) {
