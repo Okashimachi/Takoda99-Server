@@ -248,7 +248,7 @@ func DefaultParameters() GameParameters {
 			LeaveLoss:   LeaveLoss{Normal: 1, Bonus: 1, Claimer: 1, Buzz: 2},
 		},
 		Customer: CustomerParams{
-			Total:   300,
+			Total:   5000,
 			Normal:  AttributeSpec{Attribute: proto.AttrNormal, Weight: 70, PatienceBaseMs: 16000, OrderCount: 2},
 			Bonus:   AttributeSpec{Attribute: proto.AttrBonus, Weight: 15, PatienceBaseMs: 18000, OrderCount: 2},
 			Claimer: AttributeSpec{Attribute: proto.AttrClaimer, Weight: 10, PatienceBaseMs: 12000, OrderCount: 1},
@@ -281,13 +281,13 @@ func DefaultParameters() GameParameters {
 			MaxLevel: 17,
 		},
 		Storm: StormParams{
-			IntervalTicks: 140,
+			IntervalTicks: 200,
 			WarnTicks:     30,
 			ThresholdPct:  0.10,
 		},
 		Distribution: DistributionParams{
-			QueueRefillThreshold: 3,
-			WeightFloor:          0.25,
+			QueueRefillThreshold: 5,
+			WeightFloor:          0.6,
 		},
 		Patience: PatienceParams{
 			LateMul: 0.6,
@@ -299,7 +299,7 @@ func DefaultParameters() GameParameters {
 		},
 		Bot: BotParams{
 			BaseAccuracy:    0.85,
-			BaseElapsedMs:   3000,
+			BaseElapsedMs:   4500,
 			AccuracyJitter:  0.1,
 			ElapsedJitterMs: 500,
 		},
