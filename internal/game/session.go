@@ -321,12 +321,12 @@ func (s *Session) Tick(dt int) []Outbound {
 		return nil
 	}
 	s.elapsedMs += int64(dt)
-	s.tick++
-
 	if s.elapsedMs < 0 {
 		// REQ-04 の開始前カウントダウン中。ゲームは進行しない。
 		return nil
 	}
+
+	s.tick++
 
 	var out []Outbound
 	out = s.stepPhase(out)

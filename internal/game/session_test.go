@@ -59,6 +59,39 @@ func placeAssigned(s *Session, cid proto.CustomerId, store PlayerId, attr proto.
 
 // ── テストケース ──────────────────────────────────────────────
 
+func TestSession_CountdownDelay(t *testing.T) {
+	params := DefaultParameters()
+	params.Matching.ReadyCountdownMs = 5000 // 5秒
+	// newTestSessionWith は ReadyCountdownMs を 0 に上書きしてしまうので直接生成する
+	inits := make([]PlayerInit, 1)
+	inits[0] = PlayerInit{Id: "test-player"}
+	s := NewSession("test", params, fakeWords{}, rand.New(rand.NewSource(42)), inits)
+
+	s.Start(0)
+	if s.elapsedMs != -5000 {
+		t.Fatalf("Start時のelapsedMsが -5000 になっていない: %d", s.elapsedMs)
+	}
+
+	out := s.Tick(2000)
+	if s.elapsedMs != -3000 {
+		t.Fatalf("2秒後のelapsedMsが -3000 になっていない: %d", s.elapsedMs)
+	}
+	if len(out) != 0 {
+		t.Fatalf("カウントダウン中に出力が出てはいけない")
+	}
+
+	out = s.Tick(3000)
+	if s.elapsedMs != 0 {
+		t.Fatalf("5秒後のelapsedMsが 0 になっていない: %d", s.elapsedMs)
+	}
+
+	// 0以降でティックが進めばイベントが出る
+	out = s.Tick(100)
+	if s.elapsedMs != 100 {
+		t.Fatalf("5.1秒後のelapsedMsが 100 になっていない: %d", s.elapsedMs)
+	}
+}
+
 func TestStepPatience_BasicLeave(t *testing.T) {
 	s := newTestSession(2)
 	s.state = Running
