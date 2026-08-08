@@ -110,6 +110,8 @@ type storeState struct {
 	alive          bool
 	finalRank      int
 	elimination    string
+	survivedMs     int64
+
 
 	// prevStar は前回 EvaluationUpdate を出した時の starRating。starDelta の算出に使う。
 	prevStar float64
@@ -575,6 +577,7 @@ func (s *Session) selfCollapse(store PlayerId, out []Outbound) []Outbound {
 	st := s.stores[store]
 
 	st.alive = false
+	st.survivedMs = s.elapsedMs
 	s.aliveCount--
 
 	for len(s.storeQueues[store]) > 0 {
@@ -783,6 +786,7 @@ func (s *Session) executeCull(out []Outbound) []Outbound {
 	for i := 0; i < len(culled); i++ {
 		st := culled[i]
 		st.alive = false
+		st.survivedMs = s.elapsedMs
 		s.aliveCount--
 
 		for _, cid := range s.storeQueues[st.id] {
@@ -868,6 +872,7 @@ func (s *Session) checkFinish(out []Outbound) []Outbound {
 		if st := s.stores[pid]; st.alive {
 			st.finalRank = 1
 			st.elimination = ""
+			st.survivedMs = s.elapsedMs
 			break
 		}
 	}
@@ -889,7 +894,7 @@ func (s *Session) buildPersonalResult(st *storeState) proto.PersonalResult {
 		FinalRank:      st.finalRank,
 		Stats:          s.buildMatchStats(st),
 		Reason:         proto.EliminationReason(st.elimination),
-		SurvivedMs:     s.elapsedMs,
+		SurvivedMs:     st.survivedMs,
 		CreditLeft:     st.creditLife,
 		EvalRaw:        s.evalScore(st),
 		EvalNormalized: st.evalNormalized,
@@ -1076,9 +1081,11 @@ type StoreResult struct {
 	DisplayName string
 	FinalRank   int
 	Elimination string
-	CreditLife  int
-	EvalRaw     float64
-	Stats       proto.MatchStats
+	CreditLife     int
+	EvalRaw        float64
+	EvalNormalized float64
+	SurvivedMs     int64
+	Stats          proto.MatchStats
 }
 
 func (s *Session) Results() []StoreResult {
@@ -1090,9 +1097,11 @@ func (s *Session) Results() []StoreResult {
 			DisplayName: st.name,
 			FinalRank:   st.finalRank,
 			Elimination: st.elimination,
-			CreditLife:  st.creditLife,
-			EvalRaw:     st.evalRaw,
-			Stats:       s.buildMatchStats(st),
+			CreditLife:     st.creditLife,
+			EvalRaw:        st.evalRaw,
+			EvalNormalized: st.evalNormalized,
+			SurvivedMs:     st.survivedMs,
+			Stats:          s.buildMatchStats(st),
 		})
 	}
 	return results

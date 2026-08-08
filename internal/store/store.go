@@ -6,16 +6,31 @@ import "context"
 
 // Result は1店の最終結果。
 type Result struct {
-	StoreId      string
-	DisplayName  string
-	FinalRank    int
-	Elimination  string
-	CreditLife   int
-	EvalRaw      float64
-	ServedCount  int
-	AvgAccuracy  float64
-	AvgElapsedMs int
-	IsBot        bool
+	StoreId         string
+	DisplayName     string
+	FinalRank       int
+	Elimination     string
+	CreditLife      int
+	EvalRaw         float64
+	EvalNormalized  float64
+	ServedCount     int
+	AvgAccuracy     float64
+	AvgElapsedMs    int
+	IsBot           bool
+	SurvivedMs      int64
+	LeftCount       int
+	TotalKeystrokes int
+	TotalMisses     int
+	FastestMs       int
+	SlowestMs       int
+	NormalServed    int
+	NormalLeft      int
+	BonusServed     int
+	BonusLeft       int
+	ClaimerServed   int
+	ClaimerLeft     int
+	BuzzServed      int
+	BuzzLeft        int
 }
 
 // MatchResult は1試合の結果全体。
