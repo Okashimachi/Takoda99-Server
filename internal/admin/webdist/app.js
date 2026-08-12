@@ -242,8 +242,9 @@
     c.evalFill.style.width = (evalN * 100).toFixed(1) + '%';
     c.evalPct.textContent = Math.round(evalN * 100) + '%';
 
-    // ソート用のキーを保持
-    c.sortKeys = { rank: alive ? rank : 10000 + (999 - (typeof fr === 'number' ? fr : 0)), life, alive, id };
+    // ソート用のキーを保持。脱落店は生存店の下に沈め、最終順位の昇順（2位→…→99位）で
+    // 並べる＝優勝の直下に準優勝が来るリーダーボード順。finalRank 欠落は最後尾へ。
+    c.sortKeys = { rank: alive ? rank : 10000 + (typeof fr === 'number' ? fr : 999), life, alive, id };
     c.prev = { life, alive };
     cells.set(id, c);
   }
@@ -319,7 +320,7 @@
         // 生存を上に、体力少ない順（＝危ない店が上）。脱落は下。
         if (ka.alive !== kb.alive) return ka.alive ? -1 : 1;
         if (ka.alive) return (ka.life - kb.life) || (ka.rank - kb.rank);
-        return kb.rank - ka.rank;
+        return ka.rank - kb.rank; // 脱落は最終順位の昇順で下段に
       }
       // rank（既定）: 生存を評価順で上に、脱落は最終順位で下に。
       return ka.rank - kb.rank;
