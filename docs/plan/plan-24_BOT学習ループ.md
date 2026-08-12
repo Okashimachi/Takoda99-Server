@@ -6,6 +6,9 @@
 > **依存**: 試合結果の永続化（実装済み）＋ 打鍵単位イベントの永続化（**未実装・本プランの Phase 2**）
 > **参照**: `internal/store/store.go`, `internal/db/result.go`, `internal/bot/bot.go`
 
+> ⚠ **本戦版は `docs/plan-honsen/plan-h03`（Phase2）・`plan-h04`（Phase3）・`plan-h05`（Phase4）**に分割・精製した。
+> 本plan（設計の正典）は引き続き参照するが、本戦での着手はh03→h04→h05の順で進める。
+
 ---
 
 ## 0. なぜ後回しでよいか
