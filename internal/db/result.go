@@ -59,7 +59,29 @@ func (rs *ResultStore) Migrate(ctx context.Context) error {
 		buzz_served      INT NOT NULL DEFAULT 0,
 		buzz_left        INT NOT NULL DEFAULT 0,
 		PRIMARY KEY (match_id, store_id)
-	);`
+	);
+
+	-- 既存テーブルへの後方互換マイグレーション。
+	-- CREATE TABLE IF NOT EXISTS は「テーブルが既に在れば何もしない」ので、予選時点で
+	-- 旧スキーマの store_result を持つ本番DBには新カラムが足されず、SaveMatch の INSERT が
+	-- 実行時に「column does not exist」で失敗する（best-effort保存なので無言で全件保存漏れになる）。
+	-- ADD COLUMN IF NOT EXISTS で新旧どちらのDBでも冪等に揃える。
+	ALTER TABLE store_result
+		ADD COLUMN IF NOT EXISTS eval_normalized  FLOAT NOT NULL DEFAULT 0,
+		ADD COLUMN IF NOT EXISTS survived_ms      INT   NOT NULL DEFAULT 0,
+		ADD COLUMN IF NOT EXISTS left_count       INT   NOT NULL DEFAULT 0,
+		ADD COLUMN IF NOT EXISTS total_keystrokes INT   NOT NULL DEFAULT 0,
+		ADD COLUMN IF NOT EXISTS total_misses     INT   NOT NULL DEFAULT 0,
+		ADD COLUMN IF NOT EXISTS fastest_ms       INT   NOT NULL DEFAULT 0,
+		ADD COLUMN IF NOT EXISTS slowest_ms       INT   NOT NULL DEFAULT 0,
+		ADD COLUMN IF NOT EXISTS normal_served    INT   NOT NULL DEFAULT 0,
+		ADD COLUMN IF NOT EXISTS normal_left      INT   NOT NULL DEFAULT 0,
+		ADD COLUMN IF NOT EXISTS bonus_served     INT   NOT NULL DEFAULT 0,
+		ADD COLUMN IF NOT EXISTS bonus_left       INT   NOT NULL DEFAULT 0,
+		ADD COLUMN IF NOT EXISTS claimer_served   INT   NOT NULL DEFAULT 0,
+		ADD COLUMN IF NOT EXISTS claimer_left     INT   NOT NULL DEFAULT 0,
+		ADD COLUMN IF NOT EXISTS buzz_served      INT   NOT NULL DEFAULT 0,
+		ADD COLUMN IF NOT EXISTS buzz_left        INT   NOT NULL DEFAULT 0;`
 	_, err := rs.pool.Exec(ctx, ddl)
 	if err != nil {
 		return fmt.Errorf("db: result migrate: %w", err)
