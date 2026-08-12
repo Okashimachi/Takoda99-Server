@@ -4,11 +4,9 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>タコダ99 — 観測ダッシュボード</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
-  <!-- 接続状態バナー（切断時に降りてくる） -->
   <div id="banner" class="banner" hidden></div>
 
   <header class="topbar">
@@ -21,41 +19,94 @@
       <span id="conn-dot" class="conn-dot" data-state="connecting" title="接続状態"></span>
     </div>
 
-    <div class="stats">
-      <div class="stat stat--alive">
-        <span class="stat-label">生存店</span>
-        <span class="stat-value"><span id="alive-count">–</span><span class="stat-total">/ <span id="total-count">99</span></span></span>
-      </div>
-      <div class="stat">
-        <span class="stat-label">脱落</span>
-        <span class="stat-value" id="dead-count">–</span>
-      </div>
-      <div class="stat stat--wide">
-        <span class="stat-label">決着まで</span>
-        <div class="progress" title="脱落の進捗">
-          <div class="progress-fill" id="progress-fill"></div>
-        </div>
-      </div>
-      <div class="stat">
-        <span class="stat-label">更新</span>
-        <span class="stat-value stat-value--sm" id="last-update">–</span>
-      </div>
-    </div>
+    <nav class="tabs" role="tablist">
+      <button class="tab is-active" data-tab="board" role="tab">🏪 店舗盤面</button>
+      <button class="tab" data-tab="flow" role="tab">🚶 客フロー</button>
+    </nav>
 
     <div class="controls">
-      <label class="control">
+      <label class="control" id="sort-control">
         <span>並び順</span>
         <select id="sort-mode">
           <option value="rank">評価順（強い順）</option>
           <option value="life">体力が少ない順</option>
-          <option value="id">店ID順（固定配置）</option>
+          <option value="queue">行列が長い順</option>
+          <option value="id">店ID順（固定）</option>
         </select>
       </label>
       <button id="settings-btn" class="icon-btn" title="接続設定" aria-label="接続設定">⚙</button>
     </div>
   </header>
 
-  <!-- 接続設定パネル -->
+  <!-- メトリクス帯（両タブ共通） -->
+  <section class="metrics" id="metrics">
+    <div class="metric metric--alive">
+      <span class="metric-label">生存</span>
+      <span class="metric-value"><span id="m-alive">–</span><span class="metric-sub">/<span id="m-total">99</span></span></span>
+    </div>
+    <div class="metric">
+      <span class="metric-label">脱落</span>
+      <span class="metric-value" id="m-dead">–</span>
+    </div>
+    <div class="metric">
+      <span class="metric-label">フェーズ</span>
+      <span class="metric-value metric-value--md" id="m-phase">–</span>
+    </div>
+    <div class="metric">
+      <span class="metric-label">火力 Lv</span>
+      <span class="metric-value metric-value--md" id="m-heat">–</span>
+    </div>
+    <div class="metric">
+      <span class="metric-label">待機客</span>
+      <span class="metric-value metric-value--md" id="m-rest">–</span>
+    </div>
+    <div class="metric metric--mix">
+      <span class="metric-label">客の内訳</span>
+      <div class="mix" id="m-mix"></div>
+    </div>
+    <div class="metric metric--grow">
+      <span class="metric-label">決着まで</span>
+      <div class="progress"><div class="progress-fill" id="m-progress"></div></div>
+    </div>
+    <div class="metric">
+      <span class="metric-label">更新</span>
+      <span class="metric-value metric-value--sm" id="m-update">–</span>
+    </div>
+  </section>
+
+  <!-- storm 予告バナー -->
+  <div id="storm" class="storm" hidden>
+    <span class="storm-icon" aria-hidden="true">⚡</span>
+    <span class="storm-text">下位淘汰まで <b id="storm-until">–</b> tick ／ 評価下位 <b id="storm-pct">–</b> が脱落</span>
+  </div>
+
+  <main class="content">
+    <!-- タブ1: 店舗盤面 -->
+    <section class="view" id="view-board">
+      <div id="grid" class="grid" aria-label="99店のライブ状態"></div>
+    </section>
+
+    <!-- タブ2: 客フロー -->
+    <section class="view" id="view-flow" hidden>
+      <div class="legend" id="legend"></div>
+      <div class="waiting">
+        <div class="waiting-head">
+          <span class="waiting-title">たべたべエリア（待機客）</span>
+          <span class="waiting-count"><b id="rest-count">0</b> 人</span>
+        </div>
+        <div class="waiting-pool" id="rest-pool" title="未割当の客（属性別に散らばる）"></div>
+      </div>
+      <div class="flow-grid" id="flow-grid" aria-label="各店の行列"></div>
+    </section>
+
+    <div id="empty" class="empty">
+      <div class="empty-inner">
+        <div class="empty-spinner" aria-hidden="true"></div>
+        <p id="empty-msg">サーバーに接続しています…</p>
+      </div>
+    </div>
+  </main>
+
   <div id="settings" class="settings" hidden>
     <div class="settings-inner">
       <label>
@@ -72,16 +123,6 @@
       </div>
     </div>
   </div>
-
-  <main class="board">
-    <div id="grid" class="grid" aria-label="99店のライブ状態"></div>
-    <div id="empty" class="empty">
-      <div class="empty-inner">
-        <div class="empty-spinner" aria-hidden="true"></div>
-        <p id="empty-msg">サーバーに接続しています…</p>
-      </div>
-    </div>
-  </main>
 
   <script src="./app.js"></script>
 </body>

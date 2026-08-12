@@ -109,10 +109,11 @@ func (r *Room) publish() {
 	stores, aliveCount := r.session.Snapshot()
 	r.publisher.Publish(r.elapsedMs, stores, aliveCount, r.conns)
 
-	// 観測ストリームへ相乗り（session.Snapshot() を再利用・二重計算しない）。
-	// h01 は payload = 既存 StoreListUpdate。h02 で AdminSnapshot に差し替える（plan-h00 §4）。
+	// 観測ストリームへ相乗り。h02: payload を AdminSnapshot（客分配・フェーズ・heat・storm 込み）
+	// に差し替え（plan-h00 §4 / plan-h02 §1.3）。session の純粋 getter を読むだけで、session を
+	// 触るのはこの room goroutine だけなのでデータ競合しない。
 	if r.hub != nil {
-		if env, ok := envelopeOf(proto.StoreListUpdate{Stores: stores, AliveCount: aliveCount}); ok {
+		if env, ok := admin.SnapshotEnvelope(r.session); ok {
 			r.hub.Broadcast(env)
 		}
 	}
