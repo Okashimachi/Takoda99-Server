@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"time"
 
+	"takoda99/internal/admin"
 	"takoda99/internal/game"
 	"takoda99/internal/proto"
 	"takoda99/internal/transport"
@@ -47,10 +48,18 @@ type Room struct {
 	tickMs    int
 	clock     Clock
 	publisher transport.StatePublisher
+	hub       *admin.Hub // 観測ファンアウト（nil 安全・sim/既存テストでは未注入）
 	inbox     chan inbound
 	done      chan struct{}
 	elapsedMs int64
 }
+
+// SetAdminHub は観測用の AdminHub を注入する（nil 安全）。
+//
+// room.New の署名を変えないためのセッター。試合ごとに生成される Room に、プロセス共有の
+// hub を app.RunMatch から渡す（配線の正典は plan-h00 §3）。未注入(nil)なら publish() は
+// 観測配信をしない＝sim/既存テストに非破壊。
+func (r *Room) SetAdminHub(h *admin.Hub) { r.hub = h }
 
 // New は Room を作る。conns は playerId→接続。tickMs は tick 周期(ms)。
 func New(session *game.Session, conns map[game.PlayerId]transport.Connection, tickMs int, clock Clock, publisher transport.StatePublisher) *Room {
@@ -99,6 +108,14 @@ func (r *Room) publish() {
 	}
 	stores, aliveCount := r.session.Snapshot()
 	r.publisher.Publish(r.elapsedMs, stores, aliveCount, r.conns)
+
+	// 観測ストリームへ相乗り（session.Snapshot() を再利用・二重計算しない）。
+	// h01 は payload = 既存 StoreListUpdate。h02 で AdminSnapshot に差し替える（plan-h00 §4）。
+	if r.hub != nil {
+		if env, ok := envelopeOf(proto.StoreListUpdate{Stores: stores, AliveCount: aliveCount}); ok {
+			r.hub.Broadcast(env)
+		}
+	}
 }
 
 func (r *Room) closeConns() {

@@ -114,6 +114,8 @@ internal/
   matchmaking/         … 【スパイン】待機プール・人数下限＋カウントダウン・Bot補完
   transport/           … 【スパイン】coder/websocket・状態配信（間引き）・接続ライフサイクル
   configapi/           … 【スパイン】config-front 用 REST API（/api/params）
+  admin/               … 【スパイン】観測配信。AdminHub（読み取り専用ファンアウト）＋ /admin 静的同梱。
+                       …   room が publish() で Broadcast。game を import しない（admin→transport の一方向）
   proto/               … 【契約】canonical Takoda99-Proto を参照する薄い再輸出ラッパ
 ```
 

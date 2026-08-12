@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"takoda99/internal/admin"
 	"takoda99/internal/game"
 	"takoda99/internal/proto"
 	"takoda99/internal/transport"
@@ -79,6 +80,39 @@ func TestRoom_CoreLoopThroughConnection(t *testing.T) {
 	}
 	if len(ms.Stores) != 2 {
 		t.Fatalf("Stores は2店のはず: got %d", len(ms.Stores))
+	}
+}
+
+// hub を注入すると、publish() のたびに観測 conn へ StoreListUpdate が届く（plan-h01）。
+func TestRoom_BroadcastsToAdminHub(t *testing.T) {
+	sess := game.NewSession("m1", game.DefaultParameters(),
+		stubWords{},
+		rand.New(rand.NewSource(1)),
+		[]game.PlayerInit{{Id: "a", DisplayName: "a"}, {Id: "b", DisplayName: "b"}})
+
+	sa, _ := transport.Pipe()
+	sb, _ := transport.Pipe()
+	conns := map[game.PlayerId]transport.Connection{"a": sa, "b": sb}
+
+	tickCh := make(chan time.Time, 1)
+	rm := New(sess, conns, 150, manualClock{ticker: manualTicker{c: tickCh}},
+		transport.NewFullPublisher(0))
+
+	// 観測者を hub に登録（/admin/ws 相当）。
+	hub := admin.NewHub()
+	obsSrv, obsCli := transport.Pipe()
+	hub.Register(obsSrv)
+	rm.SetAdminHub(hub)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go rm.Run(ctx)
+
+	// 1 tick 発火 → publish() → hub.Broadcast。
+	tickCh <- time.Now()
+
+	if env := recvEnv(t, obsCli); env.Type != proto.TypeStoreListUpdate {
+		t.Fatalf("観測者は StoreListUpdate を受けるはず: got %s", env.Type)
 	}
 }
 
