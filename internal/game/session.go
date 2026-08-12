@@ -1110,3 +1110,126 @@ func (s *Session) Results() []StoreResult {
 func (s *Session) Id() proto.MatchId { return s.id }
 func (s *Session) AliveCount() int   { return s.aliveCount }
 func (s *Session) ElapsedMs() int64  { return s.elapsedMs }
+
+// ── 観測(admin)向けの純粋 getter（plan-h02）──
+//
+// いずれも副作用のない読み出しで、全店横断の状態と時系列を返すだけ（判定式ではない）。
+// game コアの純粋性は保たれる（hub/slog を import しない）。room の単一 goroutine から
+// publish 直後に呼ばれる前提（session を触るのは room だけなのでデータ競合しない）。
+
+// AttrCounts は客属性別の人数（観測用）。Normal/Bonus(おばちゃん)/Claimer/Buzz(JK)。
+type AttrCounts struct {
+	Normal  int `json:"normal"`
+	Bonus   int `json:"bonus"`
+	Claimer int `json:"claimer"`
+	Buzz    int `json:"buzz"`
+}
+
+func (a *AttrCounts) add(attr proto.CustomerAttribute) {
+	switch attr {
+	case proto.AttrBonus:
+		a.Bonus++
+	case proto.AttrClaimer:
+		a.Claimer++
+	case proto.AttrBuzz:
+		a.Buzz++
+	default:
+		a.Normal++
+	}
+}
+
+// StormView は下位淘汰(storm)の観測用ビュー。
+type StormView struct {
+	Warning      bool    // 予告中（stepStorm が予告を出してから実行までの間）
+	UntilTick    int     // 実行までの残りtick（Warning 中のみ有効）
+	ThresholdPct float64 // 淘汰される正規化評価下位の割合
+}
+
+// StoreBoardRow は1店の観測用の行（AdminSnapshot 用の素材）。
+type StoreBoardRow struct {
+	Id             PlayerId
+	Name           string
+	Alive          bool
+	Rank           int
+	FinalRank      int // 0 = 生存中（脱落済みのみ正）
+	CreditLife     int
+	EvalNormalized float64
+	QueueLen       int
+	ServedCount    int
+	AtRisk         bool       // 今 storm が起きたら淘汰される圏内か
+	QueueByAttr    AttrCounts // 行列中の客の属性内訳（客フロー可視化用）
+}
+
+// Phase は現在の局面（Early/Mid/Late）を返す。
+func (s *Session) Phase() proto.Phase { return s.phase }
+
+// HeatLevel は現在の火力（お題難度）レベルを返す。
+func (s *Session) HeatLevel() int { return s.heatLevel }
+
+// RestPoolCount は未割当客（たべたべエリア）の数を返す。
+func (s *Session) RestPoolCount() int { return len(s.restPool) }
+
+// RestPoolByAttr は未割当客の属性内訳を返す。
+func (s *Session) RestPoolByAttr() AttrCounts {
+	var a AttrCounts
+	for _, cid := range s.restPool {
+		if c := s.customers[cid]; c != nil {
+			a.add(c.attribute)
+		}
+	}
+	return a
+}
+
+// CustomerMix は在場（restPool＋全行列）の客を属性別に集計して返す。
+// 客は served/left でも新IDで restPool に戻る（自滅しない限り総数一定）ので、
+// customers レジストリ全体を走査すれば在場総数の内訳になる。
+func (s *Session) CustomerMix() AttrCounts {
+	var a AttrCounts
+	for _, c := range s.customers {
+		a.add(c.attribute)
+	}
+	return a
+}
+
+// StormState は storm 予告の状態を返す。
+func (s *Session) StormState() StormView {
+	sp := s.params.Storm
+	v := StormView{Warning: s.stormWarnSent, ThresholdPct: sp.ThresholdPct}
+	if s.stormWarnSent {
+		if u := sp.IntervalTicks - s.stormTickCounter; u > 0 {
+			v.UntilTick = u
+		}
+	}
+	return v
+}
+
+// StoreBoard は99店の観測用の行を order 順で返す。行列長・提供数・storm対象圏・
+// 行列の属性内訳を含む。AtRisk は「今 storm が起きたら淘汰される店」（予告と同一ロジック）。
+func (s *Session) StoreBoard() []StoreBoardRow {
+	atRisk := s.cullTargets()
+	out := make([]StoreBoardRow, 0, len(s.order))
+	for _, sid := range s.order {
+		st := s.stores[sid]
+		row := StoreBoardRow{
+			Id:             st.id,
+			Name:           st.name,
+			Alive:          st.alive,
+			Rank:           st.rank,
+			CreditLife:     st.creditLife,
+			EvalNormalized: st.evalNormalized,
+			QueueLen:       len(s.storeQueues[sid]),
+			ServedCount:    st.served.count,
+			AtRisk:         st.alive && atRisk[sid],
+		}
+		if !st.alive && st.finalRank > 0 {
+			row.FinalRank = st.finalRank
+		}
+		for _, cid := range s.storeQueues[sid] {
+			if c := s.customers[cid]; c != nil {
+				row.QueueByAttr.add(c.attribute)
+			}
+		}
+		out = append(out, row)
+	}
+	return out
+}

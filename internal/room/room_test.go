@@ -111,8 +111,9 @@ func TestRoom_BroadcastsToAdminHub(t *testing.T) {
 	// 1 tick 発火 → publish() → hub.Broadcast。
 	tickCh <- time.Now()
 
-	if env := recvEnv(t, obsCli); env.Type != proto.TypeStoreListUpdate {
-		t.Fatalf("観測者は StoreListUpdate を受けるはず: got %s", env.Type)
+	// h02: 観測ストリームは AdminSnapshot（客分配・フェーズ・storm 込み）を流す。
+	if env := recvEnv(t, obsCli); env.Type != admin.TypeAdminSnapshot {
+		t.Fatalf("観測者は AdminSnapshot を受けるはず: got %s", env.Type)
 	}
 }
 
