@@ -3,6 +3,9 @@
 サーバー実装の作業単位ごとの仕様書。**着手前に該当 plan を読むこと**。
 plan 同士で型・関数シグネチャが噛み合うよう調整済みなので、勝手に別案へ差し替えない。
 
+> 🆕 **本戦（予選通過後）の実装計画は別ディレクトリ `docs/plan-honsen/`**（観測ダッシュボード・全データ保存・BOT強化・算法改良）。
+> 本戦の作業をするなら **まず [`docs/plan-honsen/README.md`](../plan-honsen/README.md) と [`plan-h00`（共有コントラクト）](../plan-honsen/plan-h00_共有コントラクト.md) を読む**。実装順序は `#104マージ → h01 → h02 → h03`。
+
 - **内容の正典は plan**。タスクの**進捗・担当**は GitHub issue が正典（`gh issue list`）。
   食い違ったら plan が正しい（issue 本文は起票時点のスナップショット）。詳細は `AGENTS.md` §7
 - 設計の全体像は `docs/architecture.md`
