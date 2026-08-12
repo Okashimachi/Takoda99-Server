@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"flag"
 	"log"
@@ -17,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"takoda99/internal/admin"
 	"takoda99/internal/app"
 	"takoda99/internal/bot"
 	"takoda99/internal/config"
@@ -46,6 +48,12 @@ func main() {
 		log.Printf("config: 起動時取得失敗のためデフォルトで継続: %v", err)
 	}
 	baseDeps := app.DefaultDeps()
+
+	// hub はプロセス共有で1個だけ作る。loadDeps() は baseDeps をコピーして返すが、Hub は
+	// ポインタなので全試合が同一実体を共有する（＝/admin/ws の登録先と配信元が一致）。
+	// hub を loadDeps 内で作ると試合ごとに別 hub ができてズレるので、ここで作る（plan-h00 §3.1）。
+	hub := admin.NewHub()
+	baseDeps.Hub = hub
 
 	loadDeps := func() app.Deps {
 		d := baseDeps
@@ -169,6 +177,13 @@ func main() {
 	http.Handle("/api/words", configapi.NewWordsHandler(wStore, adminToken, frontOrigins))
 	http.Handle("/api/words/", configapi.NewWordsHandler(wStore, adminToken, frontOrigins))
 
+	// ── 観測ダッシュボード（plan-h01 / plan-h00 §5） ──
+	// /admin       … 同梱の静的ダッシュボード（別リポ Takoda99-DashBoard のビルド成果物を embed）。
+	// /admin/ws    … 読み取り専用の観測ストリーム。mm.Join しない＝店として試合に参加しない。
+	//                認証は ?token=（ブラウザWSはヘッダ不可）＋定数時間比較。Origin は /ws と共用。
+	http.Handle("/admin/", http.StripPrefix("/admin/", admin.StaticHandler()))
+	http.HandleFunc("/admin/ws", adminWSHandler(hub, adminToken, wsAccept))
+
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
@@ -278,6 +293,41 @@ func awaitJoinName(conn transport.Connection, timeout time.Duration) string {
 
 func idString(n int64) string {
 	return "p-" + strconv.FormatInt(n, 10)
+}
+
+// tokenEqual は定数時間比較（タイミング攻撃対策）。configapi の同名ヘルパと同じ流儀。
+// /admin/ws の ?token= 検証に使う。
+func tokenEqual(got, want string) bool {
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
+// adminWSHandler は読み取り専用の観測ストリーム /admin/ws のハンドラを返す（plan-h01）。
+//
+// mm.Join しない＝店として試合に参加しない。認証は ?token=（ブラウザWSはヘッダ不可）を
+// 定数時間で比較。トークン未設定は 503、誤りは 401（いずれも WS 昇格前に弾く）。
+// 昇格後は hub に登録し、conn.Done() で登録解除する（受信は読まない＝観測は片方向）。
+func adminWSHandler(hub *admin.Hub, token string, wsAccept transport.AcceptOptions) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if token == "" {
+			http.Error(w, "admin token not configured (CONFIG_ADMIN_TOKEN 未設定)", http.StatusServiceUnavailable)
+			return
+		}
+		if !tokenEqual(r.URL.Query().Get("token"), token) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		conn, err := transport.Accept(w, r, wsAccept)
+		if err != nil {
+			return
+		}
+		hub.Register(conn)
+		// 観測者が切れたら hub から外す。Receive() は監視しない（room の readConn と
+		// チャネルを奪い合うため）。受信メッセージは読まない＝捨てる（観測は片方向）。
+		go func() {
+			<-conn.Done()
+			hub.Unregister(conn)
+		}()
+	}
 }
 
 // maxConcurrentConnections は同時 WebSocket 接続数の上限（99人＋再接続/観戦の余裕）。

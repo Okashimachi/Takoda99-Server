@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"takoda99/internal/admin"
 	"takoda99/internal/bot"
 	"takoda99/internal/game"
 	"takoda99/internal/matchmaking"
@@ -26,6 +27,10 @@ type Deps struct {
 	Words  game.WordSource
 	Store  store.ResultStore
 	Clock  room.Clock
+	// Hub は観測ファンアウト（plan-h01）。プロセス共有・全試合で同一実体。
+	// main が baseDeps に載せ、loadDeps() のコピーでも同じポインタを指す（plan-h00 §3.1）。
+	// nil 安全（未設定なら room は観測配信をしない）。
+	Hub *admin.Hub
 }
 
 // DefaultDeps は DefaultLoader 相当の内蔵デフォルトで Deps を組む（solo/検証用の手軽な既定）。
@@ -69,6 +74,7 @@ func RunMatch(ctx context.Context, d Deps, players []matchmaking.Player) {
 	sess := game.NewSession(matchId, d.Params, d.Words, newRng(), inits)
 	pub := transport.NewFullPublisher(d.Params.Session.PublishIntervalMs)
 	rm := room.New(sess, conns, d.Params.Session.TickIntervalMs, d.Clock, pub)
+	rm.SetAdminHub(d.Hub) // nil 安全（plan-h00 §3.2）
 	rm.Run(ctx)
 
 	saveResults(ctx, d, sess, matchId, botIds)

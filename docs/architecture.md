@@ -29,7 +29,7 @@
 │ 層1: コア game（試合の権威）不可侵               │ ← 誰も編集しない
 │   session / params / ports                      │
 └───────────────────────────────────────────────┘
-    スパイン（背骨・りーせ）: room / matchmaking / transport / configapi
+    スパイン（背骨・りーせ）: room / matchmaking / transport / configapi / admin
     契約: proto（canonical Takoda99-Proto の薄いラッパ）
 ```
 
@@ -59,6 +59,7 @@ internal/
   matchmaking/ [スパイン]  待機プール・人数下限＋カウントダウン・Bot補完
   transport/ [スパイン]  Connection(WS/InMemory) ＋ StatePublisher(間引き)
   configapi/ [スパイン]  config-front 用 REST API（/api/params, /api/words）
+  admin/     [スパイン]  観測配信。AdminHub（読み取り専用ファンアウト）＋ /admin 静的同梱（embed）
   proto/     [契約]  canonical Takoda99-Proto の薄い再輸出ラッパ
 ```
 

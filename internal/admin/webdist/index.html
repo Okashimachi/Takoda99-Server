@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>タコダ99 — 観測ダッシュボード</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <!-- 接続状態バナー（切断時に降りてくる） -->
+  <div id="banner" class="banner" hidden></div>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">🐙</span>
+      <div class="brand-text">
+        <h1>タコダ99</h1>
+        <p>ライブ観測ダッシュボード</p>
+      </div>
+      <span id="conn-dot" class="conn-dot" data-state="connecting" title="接続状態"></span>
+    </div>
+
+    <div class="stats">
+      <div class="stat stat--alive">
+        <span class="stat-label">生存店</span>
+        <span class="stat-value"><span id="alive-count">–</span><span class="stat-total">/ <span id="total-count">99</span></span></span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">脱落</span>
+        <span class="stat-value" id="dead-count">–</span>
+      </div>
+      <div class="stat stat--wide">
+        <span class="stat-label">決着まで</span>
+        <div class="progress" title="脱落の進捗">
+          <div class="progress-fill" id="progress-fill"></div>
+        </div>
+      </div>
+      <div class="stat">
+        <span class="stat-label">更新</span>
+        <span class="stat-value stat-value--sm" id="last-update">–</span>
+      </div>
+    </div>
+
+    <div class="controls">
+      <label class="control">
+        <span>並び順</span>
+        <select id="sort-mode">
+          <option value="rank">評価順（強い順）</option>
+          <option value="life">体力が少ない順</option>
+          <option value="id">店ID順（固定配置）</option>
+        </select>
+      </label>
+      <button id="settings-btn" class="icon-btn" title="接続設定" aria-label="接続設定">⚙</button>
+    </div>
+  </header>
+
+  <!-- 接続設定パネル -->
+  <div id="settings" class="settings" hidden>
+    <div class="settings-inner">
+      <label>
+        <span>サーバー</span>
+        <input id="server-input" type="text" placeholder="（空欄＝このページと同じサーバー）" autocomplete="off" spellcheck="false" />
+      </label>
+      <label>
+        <span>管理トークン</span>
+        <input id="token-input" type="password" placeholder="CONFIG_ADMIN_TOKEN" autocomplete="off" spellcheck="false" />
+      </label>
+      <div class="settings-actions">
+        <button id="connect-btn" class="btn btn--primary">接続</button>
+        <span class="settings-hint">URL に <code>?token=…</code> があれば自動で使います</span>
+      </div>
+    </div>
+  </div>
+
+  <main class="board">
+    <div id="grid" class="grid" aria-label="99店のライブ状態"></div>
+    <div id="empty" class="empty">
+      <div class="empty-inner">
+        <div class="empty-spinner" aria-hidden="true"></div>
+        <p id="empty-msg">サーバーに接続しています…</p>
+      </div>
+    </div>
+  </main>
+
+  <script src="./app.js"></script>
+</body>
+</html>
