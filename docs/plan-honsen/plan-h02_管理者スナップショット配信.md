@@ -5,6 +5,13 @@
 > **依存**: h01（AdminHub / `/admin/ws` / 静的配信の配管）, #104 マージ
 > **参照**: **[plan-h00 共有コントラクト](plan-h00_共有コントラクト.md)（配線・ワイヤ契約の正典）**, `docs/architecture.md` §6-7, `internal/game/session.go`, `internal/room/room.go`
 
+> ✅ **実装済み**（Server #107 / DashBoard #2、2026-08-12 マージ）。
+>
+> ⚠ **本戦版は [plan-h25](plan-h25_観測ダッシュボードの本戦対応.md)。** 本 plan の**配管（AdminHub /
+> `/admin/ws` / room 配線 / front の枠組み）はそのまま生きる**が、**表示するフィールドは本戦ルールで
+> 差し替わる**（`CreditLife` / `EvalNormalized` / `AdminStorm` → `Score` / `AdminCull`）。
+> 観測の目的自体も「当日のトラブル切り分け」から「バランスを詰める計測器」へ移る。
+
 ---
 
 ## 0. 前提知識
