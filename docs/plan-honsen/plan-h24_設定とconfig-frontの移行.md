@@ -92,8 +92,13 @@ Cull  CullParams   // Stages [6]CullStage
 `speedBaselineMs` / `speedCap` / `buzzBonus` / `buzzDecay` / `buzzCap` ／
 `Storm`（`intervalTicks` / `warnTicks` / `thresholdPct`）
 
-> `Eval.MinMsPerWord` は**残す**（サニティ検証の下限クランプ）。`Eval` を丸ごと消すなら
-> `Sanity.MinMsPerWord` へ移す。**どちらにするか実装時に決めて config 側と揃える。**
+> ★**h21 で確定済み（PR #112）**：`Eval` グループは廃止し、`MinMsPerWord` は
+> **`Sanity.MinMsPerWord`（JSON: `sanity.minMsPerWord`）** へ移した。
+> 「評価」概念が消えた後に `eval` という箱が残ると誤解を招くため。
+> **本番の `eval.minMsPerWord` は 200 = コード既定と同値**であることを実測で確認済みなので、
+> このリネームで失われる調整値は無い。
+>
+> あわせて **`Distribution.WeightFloor` も h21 で削除済み**（分配の単純化で参照ゼロ＝「効かないツマミ」になったため）。
 
 ### 2.3 🔴 `Validate` で `[6]CullStage` のゼロ埋めを弾く（最重要・h22 §2.2 再掲）
 
@@ -148,7 +153,8 @@ curl -s https://takoda99.mooo.com/api/params | jq '.score, .cull'
 | **`cull`（新規）** | 6ステージの表。§4.3 |
 | `credit` / `patience` | **削除** |
 | `storm` | **削除**（`cull` が置き換え） |
-| `eval` | 評価係数を削除。`minMsPerWord` のみ残す（or `sanity` へ移動） |
+| **`sanity`（新規・旧 `eval` から改名）** | ★**h21 で確定**：`eval` グループは廃止し、残る `minMsPerWord` を **`sanity.minMsPerWord`** へ移した。JSON キーが変わるので UI も追従する |
+| `distribution.weightFloor` | ★**h21 で削除**（分配の単純化で参照ゼロになったため）。`queueRefillThreshold` は残る |
 | `customer` の `patienceBaseMs` 列 | **削除**（属性テーブルの列） |
 | `matching` / `phase` / `heat` / `distribution` / `bot` / `session` | 変更なし |
 
