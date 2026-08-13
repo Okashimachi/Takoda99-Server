@@ -145,6 +145,24 @@ st.score += delta
 > `MatchStats.LeftCount` と `AttributeTally.Left` は**常に 0** になる。
 > 集計フィールド自体は残す（リザルトの表示互換のため）。
 
+### 3.1 🔴 `internal/admin`（観測ダッシュボード）を壊さない — h25 の一部が前倒しで必要
+
+`storeState.creditLife` / `evalNormalized` を消すと、**`internal/admin/snapshot.go` がコンパイルできず
+`go build ./...` が落ちる**（h02 で実装済み。CI が赤くなる）。以下が連鎖して壊れる:
+
+| 場所 | 現状 | 本 plan での最小対応 |
+|---|---|---|
+| `session.go` の `StoreBoard()` / `summaries()` / StoreResult ビルダ（`:900` `:1045` `:1100` `:1155` 付近） | `st.evalNormalized` / `st.creditLife` を詰める | **`st.score` を詰める**（`EvalNormalized`/`CreditLife` フィールドを `Score` へ差し替え） |
+| `internal/admin/snapshot.go`（`AdminStore.CreditLife` / `EvalNormalized`・`:58-59` `:81-82`） | 上記 getter から読む | **`Score` を読む形へ差し替え**（`CreditLife`/`EvalNormalized` フィールドを削除） |
+| `internal/admin/webdist/app.js`（`creditLife` ×4 / `evalNormalized` ×1 参照） | 旧フィールドを表示 | **本 plan では触らなくてよい**（JS はビルドを止めない。表示が一時的に空になるだけ。正式な v2 化は h25） |
+
+> **これは「h25 の前倒し」ではなく「h21 がビルドを緑に保つための必須の巻き込み」。**
+> スコア分布ビュー・`IsBot`・cull 表示といった**本格的な v2 化は h25 のまま**。ここでやるのは
+> 「消したフィールドの参照を `Score` に付け替えてコンパイルを通す」最小対応だけ。
+>
+> ⚠ `StormState()` / `AdminStorm` は storm に依存するが、**storm の削除は h22**。本 plan では storm は残るので
+> `AdminStorm` はそのままでよい（h22 で `AdminCull` へ差し替える）。
+
 ---
 
 ## 4. 客分配を単純化する（★決定済み）
@@ -229,6 +247,7 @@ type ScoreParams struct {
 - [ ] 客分配が行列長のみの重みで動き、お題が途切れない
 - [ ] `GameParameters` に `Score` が追加され、廃止キーが消え、`Validate` が更新されている
 - [ ] `GameParameters` が `==` 比較可能なまま
+- [ ] **`internal/admin`（snapshot.go）が `Score` を読む形に付け替わり、`go build ./...` が緑**（§3.1・h25 の前倒し最小対応）
 - [ ] `go build` / `go vet` / `go test -race ./internal/game/...` / `golangci-lint run` が緑
 
 > h22（cullSchedule）が入るまでは storm が旧仕様のまま残る。**本 plan 単独では試合が終わらない可能性がある**ので、

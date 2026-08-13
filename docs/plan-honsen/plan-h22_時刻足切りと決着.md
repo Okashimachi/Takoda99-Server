@@ -107,6 +107,18 @@ config-front から5要素で保存されると `Stages[5] = {AtMs:0, TargetAliv
 
 `StormParams`（`IntervalTicks` / `WarnTicks` / `ThresholdPct`）を丸ごと削除。
 
+### 2.4 🔴 `internal/admin` を壊さない（h21 §3.1 の続き）
+
+storm を消すと `session.go` の `StormState()` と `internal/admin/snapshot.go` の `AdminStorm`
+（`Warning`/`UntilTick`/`ThresholdPct`）がコンパイルできず `go build ./...` が落ちる。
+
+- `StormState()` を**削除 or `CullState()` に置き換え**（次ステージの `UntilMs`/`StageIndex`/`TargetAlive`/`CutLineRank` を返す）
+- `AdminStorm` を **`AdminCull` へ差し替え**（h25 の `AdminCull` を前倒しで最小実装）
+- `webdist/app.js` は本 plan では触らなくてよい（JS はビルドを止めない。正式な足切り可視化は h25）
+
+> h21 で `Score` 化、h22 で `Cull` 化まで済ませれば、**h25 は「スコア分布ビュー・`IsBot`・演出」という
+> 純粋な機能追加だけ**になり、コンパイル都合の巻き込みが無くなる。
+
 ---
 
 ## 3. 足切りの実行（`stepStorm` → `stepCull`）
