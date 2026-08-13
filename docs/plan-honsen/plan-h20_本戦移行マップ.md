@@ -129,6 +129,13 @@ proto v0.8.0 で廃止フィールドに `// Deprecated:` を付けたため、*
 > **この除外は「移行完了の検知器」を兼ねる。** 外して緑なら完了、赤なら残っている。
 > h23 の完了条件に「この除外を外して緑」を入れてある。
 
+> 🔴 **ただし内訳のうち `internal/proto/messages.go` の5件は自然には消えない。**
+> ラッパが廃止型（`canon.CustomerLeft` / `canon.CreditUpdate` / `canon.StoreListUpdate` /
+> `canon.LeaveReason` / `canon.CreditReason`）を**名指しして再輸出している限り必ず SA1019 になる**ため。
+> テスト側の28件は h21/h22 の書き換えで自然に消えるが、この5件は
+> **h23 で再輸出そのものを削除する**必要がある（**plan-h23 §5.1**）。
+> これをやらないと「除外を外して緑」が永久に達成できない。
+
 ### 2.3 再輸出する新型（`internal/proto/messages.go`）
 
 ```go
