@@ -51,6 +51,10 @@ type (
 	AttributeTally             = canon.AttributeTally
 	GameParametersPublicSubset = canon.GameParametersPublicSubset
 	Envelope                   = canon.Envelope
+
+	// CullStageView は段階的足切りの1ステージ（v0.8.0・本選）。
+	// GameParametersPublicSubset.CullSchedule の要素。
+	CullStageView = canon.CullStageView
 )
 
 // ── メッセージ種別タグ ────────────────────────────────────
@@ -74,6 +78,11 @@ const (
 	TypePersonalResult           = canon.TypePersonalResult
 	TypeMatchEnd                 = canon.TypeMatchEnd
 	TypeMatchmakingStatus        = canon.TypeMatchmakingStatus
+
+	// v0.8.0（本戦）で追加。ランキング配信と足切りの一括通知（h23 で配信側を実装する）。
+	TypeStoreEliminatedBatch = canon.TypeStoreEliminatedBatch
+	TypeRankingSnapshot      = canon.TypeRankingSnapshot
+	TypeRankingDelta         = canon.TypeRankingDelta
 )
 
 // ── C2S ───────────────────────────────────────────────────
@@ -99,4 +108,21 @@ type (
 	MatchEnd                 = canon.MatchEnd
 	MatchmakingStatus        = canon.MatchmakingStatus
 	MatchmakingParticipant   = canon.MatchmakingParticipant
+)
+
+// ── S2C（v0.8.0・本戦で追加） ─────────────────────────────
+//
+// スコア制・時刻足切りに伴う新メッセージ。配信の実装は h23（plan-h23_配信の再設計）で行う。
+// ここでは h21〜h23 が参照できるように再輸出だけしておく。
+type (
+	// RankingEntry は RankingSnapshot の1行（rank 付きの全量）。
+	RankingEntry = canon.RankingEntry
+	// RankingSnapshot は全店の順位の全量配信（低頻度・整合性の回復）。
+	RankingSnapshot = canon.RankingSnapshot
+	// RankingChange は RankingDelta の1行（rank を持たない）。
+	RankingChange = canon.RankingChange
+	// RankingDelta は変化した店のみの差分配信（高頻度・取りこぼし可）。
+	RankingDelta = canon.RankingDelta
+	// StoreEliminatedBatch は1回の足切りで脱落した店をまとめて配信する。
+	StoreEliminatedBatch = canon.StoreEliminatedBatch
 )
