@@ -17,14 +17,6 @@ func TestGameParameters_Validate(t *testing.T) {
 		}
 	})
 
-	t.Run("credit.initialLife<=0 を弾く", func(t *testing.T) {
-		gp := DefaultParameters()
-		gp.Credit.InitialLife = 0
-		if err := gp.Validate(); err == nil {
-			t.Fatal("credit.initialLife=0 はエラーになるべき")
-		}
-	})
-
 	t.Run("session.tickIntervalMs<=0 を弾く", func(t *testing.T) {
 		gp := DefaultParameters()
 		gp.Session.TickIntervalMs = 0
@@ -73,23 +65,37 @@ func TestGameParameters_Validate(t *testing.T) {
 		}
 	})
 
-	t.Run("eval.emaAlpha 範囲外を弾く", func(t *testing.T) {
+	// ── 本戦（plan-h21 §5.3）で追加した検証 ──
+
+	t.Run("score.weightTakoyaki<=0 を弾く", func(t *testing.T) {
 		gp := DefaultParameters()
-		gp.Eval.EmaAlpha = 0
+		gp.Score.WeightTakoyaki = 0
 		if err := gp.Validate(); err == nil {
-			t.Fatal("eval.emaAlpha=0 はエラーになるべき")
+			t.Fatal("score.weightTakoyaki=0 はエラーになるべき（点が入らず順位が付かない）")
 		}
-		gp.Eval.EmaAlpha = 1.1
+		gp.Score.WeightTakoyaki = -1
 		if err := gp.Validate(); err == nil {
-			t.Fatal("eval.emaAlpha=1.1 はエラーになるべき")
+			t.Fatal("score.weightTakoyaki=-1 はエラーになるべき")
 		}
 	})
 
-	t.Run("customer.*.patienceBaseMs<=0 を弾く", func(t *testing.T) {
+	t.Run("score.weightMiss は 0 を許し負値を弾く", func(t *testing.T) {
 		gp := DefaultParameters()
-		gp.Customer.Bonus.PatienceBaseMs = 0
+		gp.Score.WeightMiss = 0
+		if err := gp.Validate(); err != nil {
+			t.Fatalf("score.weightMiss=0 は許容されるべき（ミスを罰しない設定）: %v", err)
+		}
+		gp.Score.WeightMiss = -1
 		if err := gp.Validate(); err == nil {
-			t.Fatal("customer.bonus.patienceBaseMs=0 はエラーになるべき")
+			t.Fatal("score.weightMiss=-1 はエラーになるべき（ミスで加点される）")
+		}
+	})
+
+	t.Run("sanity.minMsPerWord が負を弾く", func(t *testing.T) {
+		gp := DefaultParameters()
+		gp.Sanity.MinMsPerWord = -1
+		if err := gp.Validate(); err == nil {
+			t.Fatal("sanity.minMsPerWord=-1 はエラーになるべき")
 		}
 	})
 
@@ -112,7 +118,7 @@ func TestConfigHash(t *testing.T) {
 	if h != h2 {
 		t.Errorf("hash not deterministic: %s != %s", h, h2)
 	}
-	p.Credit.InitialLife = 999
+	p.Score.WeightTakoyaki = 999
 	h3 := p.ConfigHash()
 	if h == h3 {
 		t.Error("hash should differ with changed params")

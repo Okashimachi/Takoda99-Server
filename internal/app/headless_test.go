@@ -35,12 +35,8 @@ func TestHeadlessMatch_PlaysToFinish(t *testing.T) {
 			case proto.CustomerView:
 				pendingCustomers[o.To.PlayerId] = append(pendingCustomers[o.To.PlayerId], m.CustomerId)
 				t.Logf("[%s] CustomerArrived cid=%s attr=%s orders=%d", o.To.PlayerId, m.CustomerId, m.Attribute, m.OrderCount)
-			case proto.CustomerLeft:
-				t.Logf("[%s] CustomerLeft cid=%s reason=%s", o.To.PlayerId, m.CustomerId, m.Reason)
-			case proto.CreditUpdate:
-				t.Logf("[%s] CreditUpdate life=%d delta=%d reason=%s", o.To.PlayerId, m.Life, m.Delta, m.Reason)
 			case proto.EvaluationUpdate:
-				t.Logf("[%s] EvaluationUpdate raw=%.3f norm=%.3f rank=%d", o.To.PlayerId, m.EvalRaw, m.Normalized, m.Rank)
+				t.Logf("[%s] EvaluationUpdate score=%d rank=%d alive=%d", o.To.PlayerId, m.Score, m.Rank, m.AliveCount)
 			case proto.StoreEliminated:
 				t.Logf("*** Eliminated store=%s reason=%s finalRank=%d ***", m.StoreId, m.Reason, m.FinalRank)
 			case proto.PersonalResult:

@@ -27,22 +27,22 @@ func (gp GameParameters) ConfigHash() string {
 type GameParameters struct {
 	Session      SessionParams      `json:"session"`
 	Matching     MatchingParams     `json:"matching"`
-	Credit       CreditParams       `json:"credit"`
 	Customer     CustomerParams     `json:"customer"`
-	Eval         EvalParams         `json:"eval"`
+	Score        ScoreParams        `json:"score"`
+	Sanity       SanityParams       `json:"sanity"`
 	Phase        PhaseParams        `json:"phase"`
 	Heat         HeatParams         `json:"heat"`
 	Storm        StormParams        `json:"storm"`
 	Distribution DistributionParams `json:"distribution"`
-	Patience     PatienceParams     `json:"patience"`
 	Presentation PresentationParams `json:"presentation"`
 	Bot          BotParams          `json:"bot"`
 }
 
 // SessionParams: 試合ループの調整値。tick 周期・状態配信間隔もハードコードせずここで持つ。
 //
-// 制限時間の項目は持たない。試合の終了条件は「生存店=1」のみで、決着は storm（下位淘汰）が
-// 保証する（proto v0.3.0 で matchTimeLimitMs を契約から削除）。復活させないこと。
+// 制限時間の項目は持たない（proto v0.3.0 で matchTimeLimitMs を契約から削除）。
+// 本戦では決着を cullSchedule の最終ステージ（120秒・全店脱落）が保証する（plan-h22）。
+// 「試合時間」を表す調整値をここへ足さないこと。
 type SessionParams struct {
 	TickIntervalMs    int `json:"tickIntervalMs"`
 	PublishIntervalMs int `json:"publishIntervalMs"`
@@ -58,35 +58,7 @@ type MatchingParams struct {
 	ReadyCountdownMs int `json:"readyCountdownMs"`
 }
 
-// LeaveLoss: 属性別の離脱ペナルティ。
-type LeaveLoss struct {
-	Normal  int `json:"normal"`
-	Bonus   int `json:"bonus"`
-	Claimer int `json:"claimer"`
-	Buzz    int `json:"buzz"`
-}
-
-// For は属性に対応する減少量を返す。
-func (ll LeaveLoss) For(attr proto.CustomerAttribute) int {
-	switch attr {
-	case proto.AttrBonus:
-		return ll.Bonus
-	case proto.AttrClaimer:
-		return ll.Claimer
-	case proto.AttrBuzz:
-		return ll.Buzz
-	default:
-		return ll.Normal
-	}
-}
-
-// CreditParams: 信用（ライフ）。客の離脱でのみ減少・0で自滅脱落。
-type CreditParams struct {
-	InitialLife int       `json:"initialLife"`
-	LeaveLoss   LeaveLoss `json:"leaveLoss"`
-}
-
-// CustomerParams: 客システム（総数・属性ごとの出現率/我慢/注文数）。
+// CustomerParams: 客システム（総数・属性ごとの出現率/注文数）。
 type CustomerParams struct {
 	Total   int           `json:"total"`
 	Normal  AttributeSpec `json:"normal"`
@@ -96,24 +68,38 @@ type CustomerParams struct {
 }
 
 // AttributeSpec: 1属性分の生成パラメータ。
+//
+// 本戦（plan-h21）で属性はスコアに一切影響しなくなった。残っているのは
+// 出現率(Weight)と注文数(OrderCount)＝見た目の彩りとお題量の差だけで、
+// **同じ打鍵をすれば属性によらず同じスコアになる**。
+// 「この属性だけ加点/減点」を復活させないこと（予選の「同じように打ったのに評価が違う」の再来）。
 type AttributeSpec struct {
-	Attribute      proto.CustomerAttribute `json:"attribute"`
-	Weight         int                     `json:"weight"`
-	PatienceBaseMs int                     `json:"patienceBaseMs"`
-	OrderCount     int                     `json:"orderCount"`
+	Attribute  proto.CustomerAttribute `json:"attribute"`
+	Weight     int                     `json:"weight"`
+	OrderCount int                     `json:"orderCount"`
 }
 
-// EvalParams: 提供スコア→評価EMA の調整値。
-type EvalParams struct {
-	EmaAlpha        float64 `json:"emaAlpha"`
-	WeightAccuracy  float64 `json:"weightAccuracy"`
-	WeightSpeed     float64 `json:"weightSpeed"`
-	SpeedBaselineMs int     `json:"speedBaselineMs"`
-	SpeedCap        float64 `json:"speedCap"`
-	MinMsPerWord    int     `json:"minMsPerWord"`
-	BuzzBonus       float64 `json:"buzzBonus"`
-	BuzzDecay       float64 `json:"buzzDecay"`
-	BuzzCap         float64 `json:"buzzCap"`
+// ScoreParams: スコアの重み（本戦・plan-h21）。順位を決める唯一の値。
+//
+//	deltaScore = WeightTakoyaki×たこ焼き数(orderCount) − WeightMiss×ミス数
+//
+// int なのは意図的で、重みが整数なら累積に誤差が乗らない（float にしない）。
+// **速度の項は持たない**。速さは「時間内に何個作れたか」に自然に表れる。
+//
+// この2つの比率が本作の面白さの中心で、h26 で最も回数を重ねて詰める値になる。
+type ScoreParams struct {
+	WeightTakoyaki int `json:"weightTakoyaki"` // たこ焼き1個あたりの加点
+	WeightMiss     int `json:"weightMiss"`     // ミス1打鍵あたりの減点
+}
+
+// SanityParams: クライアント申告値の妥当性チェック（不正・計測ブレの下限）。
+//
+// 旧 EvalParams のうち、評価の廃止後も残る唯一の項目。ゲームバランスではなく
+// 「あり得ない申告を弾く」ためのもの。
+type SanityParams struct {
+	// MinMsPerWord は1単語あたりの所要msの下限。OrderServed.ElapsedMs がこれを
+	// 下回る申告は下限へクランプする（スコアには使わないが、統計の汚染を防ぐ）。
+	MinMsPerWord int `json:"minMsPerWord"`
 }
 
 // PhaseParams: フェーズ遷移（Early → Mid → Late）。
@@ -148,15 +134,15 @@ type StormParams struct {
 }
 
 // DistributionParams: 客の分配（restPool→店の行列）。
+//
+// 本戦（plan-h21 §4）で分配重みは「行列が短い店ほど来やすい」だけになった。
+// 評価/スコアによる重み付け（旧 WeightFloor）は廃止。**スコアで客の来やすさを変えないこと**：
+// 「スコアが高い→客が増える→さらに伸びる」の正のフィードバックが二重にかかり、
+// 序盤の小差が終盤に発散して決勝20秒の逆転劇が死ぬ。
 type DistributionParams struct {
-	QueueRefillThreshold int     `json:"queueRefillThreshold"`
-	WeightFloor          float64 `json:"weightFloor"`
-}
-
-// PatienceParams: 我慢ゲージの調整。
-type PatienceParams struct {
-	LateMul float64 `json:"lateMul"`
-	AlertMs int     `json:"alertMs"`
+	// QueueRefillThreshold は補充の発火点。行列がこれを下回った店だけが分配候補になる。
+	// 「お題が途切れない」保証は重みではなくこの閾値が担っている。
+	QueueRefillThreshold int `json:"queueRefillThreshold"`
 }
 
 // PresentationParams: クライアントの演出切替に使うしきい値。ゲーム進行には影響しない
@@ -183,9 +169,6 @@ type BotParams struct {
 func (gp GameParameters) Validate() error {
 	if gp.Customer.Total <= 0 {
 		return fmt.Errorf("customer.total は正である必要 (got %d)", gp.Customer.Total)
-	}
-	if gp.Credit.InitialLife <= 0 {
-		return fmt.Errorf("credit.initialLife は正である必要 (got %d)", gp.Credit.InitialLife)
 	}
 	if gp.Session.TickIntervalMs <= 0 {
 		return fmt.Errorf("session.tickIntervalMs は正である必要 (got %d)", gp.Session.TickIntervalMs)
@@ -214,13 +197,20 @@ func (gp GameParameters) Validate() error {
 	if gp.Distribution.QueueRefillThreshold <= 0 {
 		return fmt.Errorf("distribution.queueRefillThreshold は正である必要 (got %d)", gp.Distribution.QueueRefillThreshold)
 	}
-	if gp.Eval.EmaAlpha <= 0 || gp.Eval.EmaAlpha > 1 {
-		return fmt.Errorf("eval.emaAlpha は 0 < x <= 1 である必要 (got %f)", gp.Eval.EmaAlpha)
+	// スコアの重み（本戦の順位を決める唯一の値・plan-h21 §5.3）。
+	// weightTakoyaki が 0 以下だと「たこ焼きを作っても点が入らない」＝順位が付かない。
+	if gp.Score.WeightTakoyaki <= 0 {
+		return fmt.Errorf("score.weightTakoyaki は正である必要 (got %d)", gp.Score.WeightTakoyaki)
+	}
+	// weightMiss は 0 を許す（ミスを罰しない設定でバランスを見たい場合がある）。
+	// 負値だけは弾く（ミスするほど加点される逆転した挙動になる）。
+	if gp.Score.WeightMiss < 0 {
+		return fmt.Errorf("score.weightMiss は非負である必要 (got %d)", gp.Score.WeightMiss)
+	}
+	if gp.Sanity.MinMsPerWord < 0 {
+		return fmt.Errorf("sanity.minMsPerWord は非負である必要 (got %d)", gp.Sanity.MinMsPerWord)
 	}
 	for _, spec := range []AttributeSpec{gp.Customer.Normal, gp.Customer.Bonus, gp.Customer.Claimer, gp.Customer.Buzz} {
-		if spec.PatienceBaseMs <= 0 {
-			return fmt.Errorf("customer.%s.patienceBaseMs は正である必要 (got %d)", spec.Attribute, spec.PatienceBaseMs)
-		}
 		if spec.OrderCount <= 0 {
 			return fmt.Errorf("customer.%s.orderCount は正である必要 (got %d)", spec.Attribute, spec.OrderCount)
 		}
@@ -243,27 +233,21 @@ func DefaultParameters() GameParameters {
 			RosterWaitMs:     3000,
 			ReadyCountdownMs: 5000,
 		},
-		Credit: CreditParams{
-			InitialLife: 3,
-			LeaveLoss:   LeaveLoss{Normal: 1, Bonus: 1, Claimer: 1, Buzz: 2},
-		},
 		Customer: CustomerParams{
 			Total:   5000,
-			Normal:  AttributeSpec{Attribute: proto.AttrNormal, Weight: 70, PatienceBaseMs: 16000, OrderCount: 2},
-			Bonus:   AttributeSpec{Attribute: proto.AttrBonus, Weight: 15, PatienceBaseMs: 18000, OrderCount: 2},
-			Claimer: AttributeSpec{Attribute: proto.AttrClaimer, Weight: 10, PatienceBaseMs: 12000, OrderCount: 1},
-			Buzz:    AttributeSpec{Attribute: proto.AttrBuzz, Weight: 5, PatienceBaseMs: 24000, OrderCount: 4},
+			Normal:  AttributeSpec{Attribute: proto.AttrNormal, Weight: 70, OrderCount: 2},
+			Bonus:   AttributeSpec{Attribute: proto.AttrBonus, Weight: 15, OrderCount: 2},
+			Claimer: AttributeSpec{Attribute: proto.AttrClaimer, Weight: 10, OrderCount: 1},
+			Buzz:    AttributeSpec{Attribute: proto.AttrBuzz, Weight: 5, OrderCount: 4},
 		},
-		Eval: EvalParams{
-			EmaAlpha:        0.3,
-			WeightAccuracy:  0.5,
-			WeightSpeed:     0.5,
-			SpeedBaselineMs: 4000,
-			SpeedCap:        2.0,
-			MinMsPerWord:    200,
-			BuzzBonus:       0.2,
-			BuzzDecay:       0.98,
-			BuzzCap:         0.5,
+		// 仮値。W_TAKOYAKI=100 / W_MISS=30 なら1語あたり3.3ミス超で初めて減点が勝つ。
+		// この比率の詰めは h26（バランス検証）で行う。
+		Score: ScoreParams{
+			WeightTakoyaki: 100,
+			WeightMiss:     30,
+		},
+		Sanity: SanityParams{
+			MinMsPerWord: 200,
 		},
 		Phase: PhaseParams{
 			MidAliveThreshold:  70,
@@ -287,11 +271,6 @@ func DefaultParameters() GameParameters {
 		},
 		Distribution: DistributionParams{
 			QueueRefillThreshold: 5,
-			WeightFloor:          0.6,
-		},
-		Patience: PatienceParams{
-			LateMul: 0.6,
-			AlertMs: 2000,
 		},
 		Presentation: PresentationParams{
 			FinalStageAliveThreshold: 20,

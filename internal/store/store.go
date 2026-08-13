@@ -8,11 +8,13 @@ import "context"
 type Result struct {
 	StoreId         string
 	DisplayName     string
-	FinalRank       int
-	Elimination     string
-	CreditLife      int
-	EvalRaw         float64
-	EvalNormalized  float64
+	FinalRank   int
+	Elimination string
+	// Score は最終スコア（本戦の順位を決めた値）。TakoyakiCount は作った個数で、
+	// ServedCount（提供した**客**の数）とは別物。
+	// 旧 CreditLife / EvalRaw / EvalNormalized は本戦で廃止（plan-h21）。
+	Score           int
+	TakoyakiCount   int
 	ServedCount     int
 	AvgAccuracy     float64
 	AvgElapsedMs    int

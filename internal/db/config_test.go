@@ -48,13 +48,13 @@ func TestConfigStore_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load(seed後): %v", err)
 	}
-	if got.Credit.InitialLife != game.DefaultParameters().Credit.InitialLife {
-		t.Fatalf("seed 値が既定と違う: got credit.initialLife=%d", got.Credit.InitialLife)
+	if got.Score.WeightTakoyaki != game.DefaultParameters().Score.WeightTakoyaki {
+		t.Fatalf("seed 値が既定と違う: got score.weightTakoyaki=%d", got.Score.WeightTakoyaki)
 	}
 
 	// Save→Load で往復。値を変えて反映されること。
 	edited := game.DefaultParameters()
-	edited.Credit.InitialLife = 7
+	edited.Score.WeightTakoyaki = 7
 	edited.Heat.MaxLevel = 12
 	if err := s.Save(ctx, edited); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -63,8 +63,8 @@ func TestConfigStore_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load(Save後): %v", err)
 	}
-	if got.Credit.InitialLife != 7 || got.Heat.MaxLevel != 12 {
-		t.Fatalf("Save が反映されていない: got credit.initialLife=%d maxLevel=%d", got.Credit.InitialLife, got.Heat.MaxLevel)
+	if got.Score.WeightTakoyaki != 7 || got.Heat.MaxLevel != 12 {
+		t.Fatalf("Save が反映されていない: got score.weightTakoyaki=%d maxLevel=%d", got.Score.WeightTakoyaki, got.Heat.MaxLevel)
 	}
 
 	// 破綻値は Save で弾かれ、DB は前の値のまま。
@@ -77,8 +77,8 @@ func TestConfigStore_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load(不正Save後): %v", err)
 	}
-	if got.Credit.InitialLife != 7 {
-		t.Fatalf("不正Saveで値が壊れた: got credit.initialLife=%d", got.Credit.InitialLife)
+	if got.Score.WeightTakoyaki != 7 {
+		t.Fatalf("不正Saveで値が壊れた: got score.weightTakoyaki=%d", got.Score.WeightTakoyaki)
 	}
 
 	// 回帰: bot セクション追加前に保存された行（JSON に "bot" キーが無い）でも Load が
@@ -94,7 +94,7 @@ func TestConfigStore_RoundTrip(t *testing.T) {
 	if got.Bot != game.DefaultParameters().Bot {
 		t.Fatalf("bot が既定値で補完されていない: %+v", got.Bot)
 	}
-	if got.Credit.InitialLife != 7 {
-		t.Fatalf("旧データの既存値が保持されていない: got credit.initialLife=%d", got.Credit.InitialLife)
+	if got.Score.WeightTakoyaki != 7 {
+		t.Fatalf("旧データの既存値が保持されていない: got score.weightTakoyaki=%d", got.Score.WeightTakoyaki)
 	}
 }
