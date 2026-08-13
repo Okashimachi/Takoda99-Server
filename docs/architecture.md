@@ -144,17 +144,23 @@ func (s *Session) Tick(dtMs int) []Outbound
 
 ```
 1. stepPhase      … フェーズ判定（Early/Mid/Late）
-2. stepDistribute … 客分配（restPool→行列）
-3. stepPatience   … 我慢ゲージ減算 → 離脱 → 信用減 → 自滅脱落（SelfCollapse）
-4. stepEvaluate   … 評価の時間減衰（バズ加点の減衰）
-5. stepNormalize  … 生存店内でパーセンタイル化 → rank
-6. stepHeat       … 火力（お題難度）更新
-7. stepStorm      … 下位淘汰の予告・実行
-8. checkFinish    … 終了条件・順位確定・MatchEnd
+2. stepDistribute … 客分配（restPool→行列）。重みは行列の短さのみ
+3. stepRank       … 生存店をスコア降順に並べて rank → EvaluationUpdate
+4. stepHeat       … 火力（お題難度）更新
+5. stepStorm      … 下位淘汰の予告・実行  ← ⚠ 予選仕様。h22 で stepCull（時刻足切り）に置換
+6. checkFinish    … 終了条件・順位確定・MatchEnd ← ⚠ 同上（h22 で「120秒に全店脱落」へ）
 ```
 
-- **per-store 状態**は `storeState` が集約：信用（ライフ）・評価EMA・バズ加点・行列・提供済み客数・順位。
-- **Tick** は tick駆動で：客の分配→我慢ゲージ→離脱→評価更新→正規化→火力→storm→終了判定。
+順序には意味がある。`stepPhase` が先なのは分配の Claimer 解禁判定に要るため、
+`stepStorm` が `stepRank` の後なのは淘汰判定に rank/スコアが要るため。
+
+**本戦（plan-h21）で消えたステップ**: `stepPatience`（我慢ゲージ→離脱→信用減→自滅脱落）と
+`stepEvaluate`（バズ加点の時間減衰）。スコアは `ApplyOrderServed` で加算されるので、
+tick 側にスコアの処理は無い。
+
+- **per-store 状態**は `storeState` が集約：**スコア（累積の絶対値）**・行列・提供済み客数・順位。
+  信用（ライフ）・評価EMA・パーセンタイル正規化・バズ加点は**廃止済み**（復活させない）。
+- **Tick** は tick駆動で：客の分配→順位付け→火力→storm→終了判定。
 - step関数を純粋に保つことで、room の実tickでも、ヘッドレスsim（合成dtを手で流す）でも**同じ試合コード**が動く。
 
 ---
@@ -192,7 +198,8 @@ type Connection interface {
 ### 切断時の扱い（#40・自然減衰に任せる）
 
 切断専用の機構は持たない。切断した店は `OrderServed` を送らなくなるので、
-**行列の客が我慢ゲージ切れで離脱 → 信用減 → 0 で `SelfCollapse`** という既存の経済モデルだけで自然に脱落する。
+**スコアが伸びなくなる → 足切りで下位から落ちる**という既存の順位モデルだけで自然に脱落する。
+（予選は「客が我慢ゲージ切れで離脱 → 信用減 → 0 で `SelfCollapse`」だったが、plan-h21 で信用制ごと廃止した。）
 
 - Bot 引き継ぎはしない（「切断すれば Bot が代わりに戦う」となり離脱のペナルティが消え、順位の公平性が崩れるため）。
 - 即時脱落もしない（一時的な回線断で即死すると再接続の余地がなくなるため）。

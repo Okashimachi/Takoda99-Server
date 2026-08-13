@@ -145,17 +145,23 @@ func backfillDefaults(gp *game.GameParameters, def game.GameParameters) {
 	if gp.Distribution == (game.DistributionParams{}) {
 		gp.Distribution = def.Distribution
 	}
-	if gp.Patience == (game.PatienceParams{}) {
-		gp.Patience = def.Patience
-	}
 	if gp.Presentation == (game.PresentationParams{}) {
 		gp.Presentation = def.Presentation
 	}
 	if gp.Bot == (game.BotParams{}) {
 		gp.Bot = def.Bot
 	}
-	if gp.Credit.LeaveLoss == (game.LeaveLoss{}) {
-		gp.Credit.LeaveLoss = def.Credit.LeaveLoss
+	// 本戦（plan-h21）で追加したグループ。予選スキーマのまま保存されている本番DBには
+	// これらのキーが無く、ゼロ値のままだと Validate が weightTakoyaki<=0 で弾く
+	// （＝config 取得が丸ごと失敗し、内蔵デフォルトで起動してしまう）。ここで補完する。
+	//
+	// ⚠ 廃止キー（credit / patience / eval / distribution.weightFloor）は DB に残り続ける。
+	// JSON の未知キーは無視されるので害は無いが、config-front の UI からは消すこと（h24）。
+	if gp.Score == (game.ScoreParams{}) {
+		gp.Score = def.Score
+	}
+	if gp.Sanity == (game.SanityParams{}) {
+		gp.Sanity = def.Sanity
 	}
 }
 

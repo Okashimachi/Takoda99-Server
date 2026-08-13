@@ -115,10 +115,10 @@ func TestObserve_StormState(t *testing.T) {
 // StoreBoard の AtRisk が storm の淘汰対象集合(cullTargets)と一致する（配線確認）。
 func TestObserve_StoreBoardAtRiskMatchesCull(t *testing.T) {
 	s := newTestSession(5)
-	// 生存店に異なる評価を与える（弱い順が決まるように）。
-	evals := map[PlayerId]float64{"s-1": 0.9, "s-2": 0.1, "s-3": 0.5, "s-4": 0.2, "s-5": 0.7}
-	for id, e := range evals {
-		s.stores[id].evalNormalized = e
+	// 生存店に異なるスコアを与える（弱い順が決まるように）。
+	scores := map[PlayerId]int{"s-1": 900, "s-2": 100, "s-3": 500, "s-4": 200, "s-5": 700}
+	for id, sc := range scores {
+		s.stores[id].score = sc
 	}
 
 	want := s.cullTargets()

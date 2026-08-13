@@ -37,6 +37,10 @@ func (rs *ResultStore) Migrate(ctx context.Context) error {
 		display_name     TEXT NOT NULL DEFAULT '',
 		final_rank       INT NOT NULL,
 		elimination      TEXT NOT NULL DEFAULT '',
+		-- 本戦（plan-h21）で順位を決める値。credit_life / eval_raw / eval_normalized は
+		-- 書かなくなったが、DROP はしない（予選の記録が入っており、消すと戻せない）。
+		score            INT NOT NULL DEFAULT 0,
+		takoyaki_count   INT NOT NULL DEFAULT 0,
 		credit_life      INT NOT NULL DEFAULT 0,
 		eval_raw         FLOAT NOT NULL DEFAULT 0,
 		eval_normalized  FLOAT NOT NULL DEFAULT 0,
@@ -67,6 +71,8 @@ func (rs *ResultStore) Migrate(ctx context.Context) error {
 	-- 実行時に「column does not exist」で失敗する（best-effort保存なので無言で全件保存漏れになる）。
 	-- ADD COLUMN IF NOT EXISTS で新旧どちらのDBでも冪等に揃える。
 	ALTER TABLE store_result
+		ADD COLUMN IF NOT EXISTS score            INT   NOT NULL DEFAULT 0,
+		ADD COLUMN IF NOT EXISTS takoyaki_count   INT   NOT NULL DEFAULT 0,
 		ADD COLUMN IF NOT EXISTS eval_normalized  FLOAT NOT NULL DEFAULT 0,
 		ADD COLUMN IF NOT EXISTS survived_ms      INT   NOT NULL DEFAULT 0,
 		ADD COLUMN IF NOT EXISTS left_count       INT   NOT NULL DEFAULT 0,
@@ -111,14 +117,15 @@ func (rs *ResultStore) SaveMatch(ctx context.Context, m store.MatchResult) error
 			continue
 		}
 		_, err = tx.Exec(ctx,
+			// credit_life / eval_raw / eval_normalized は本戦で書かない（列は DEFAULT 0 で残る）。
 			`INSERT INTO store_result
 			 (match_id, store_id, display_name, final_rank, elimination,
-			  credit_life, eval_raw, eval_normalized, served_count, avg_accuracy, avg_elapsed_ms, is_bot,
+			  score, takoyaki_count, served_count, avg_accuracy, avg_elapsed_ms, is_bot,
 			  survived_ms, left_count, total_keystrokes, total_misses, fastest_ms, slowest_ms,
 			  normal_served, normal_left, bonus_served, bonus_left, claimer_served, claimer_left, buzz_served, buzz_left)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)`,
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)`,
 			m.MatchId, r.StoreId, r.DisplayName, r.FinalRank, r.Elimination,
-			r.CreditLife, r.EvalRaw, r.EvalNormalized, r.ServedCount, r.AvgAccuracy, r.AvgElapsedMs, r.IsBot,
+			r.Score, r.TakoyakiCount, r.ServedCount, r.AvgAccuracy, r.AvgElapsedMs, r.IsBot,
 			r.SurvivedMs, r.LeftCount, r.TotalKeystrokes, r.TotalMisses, r.FastestMs, r.SlowestMs,
 			r.NormalServed, r.NormalLeft, r.BonusServed, r.BonusLeft, r.ClaimerServed, r.ClaimerLeft, r.BuzzServed, r.BuzzLeft,
 		)

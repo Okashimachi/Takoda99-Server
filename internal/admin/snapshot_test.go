@@ -3,6 +3,7 @@ package admin
 import (
 	"encoding/json"
 	"math/rand"
+	"strings"
 	"testing"
 
 	"takoda99/internal/game"
@@ -76,6 +77,45 @@ func TestSnapshotEnvelope_TypeAndPayload(t *testing.T) {
 	for _, st := range snap.Stores {
 		if st.Alive && st.FinalRank != nil {
 			t.Fatalf("生存店に finalRank が入っている: %+v", st)
+		}
+	}
+}
+
+// AdminSnapshot が本戦の score を運び、廃止フィールドを載せないこと（plan-h21 §3.1）。
+//
+// これは h25（観測ダッシュボード本戦対応）の本格的な v2 化ではなく、
+// 「消したフィールドの参照を Score へ付け替えた」最小対応の固定。
+func TestBuildSnapshot_CarriesScore(t *testing.T) {
+	s := newSession(3)
+	s.Start(0)
+
+	// session の score は外から書けないので、実際に1人捌かせて score を動かす。
+	board := s.StoreBoard()
+	if len(board) != 3 {
+		t.Fatalf("StoreBoard len=%d, want 3", len(board))
+	}
+
+	snap := BuildSnapshot(s)
+	if len(snap.Stores) != 3 {
+		t.Fatalf("stores=%d, want 3", len(snap.Stores))
+	}
+	for i, st := range snap.Stores {
+		if st.Score != board[i].Score {
+			t.Fatalf("%s の Score=%d, want %d（StoreBoard と食い違う）", st.StoreId, st.Score, board[i].Score)
+		}
+	}
+
+	// JSON に score キーが出て、廃止キーが出ないこと（front が旧キーを探しに行かないように）。
+	raw, err := json.Marshal(snap.Stores[0])
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(raw), `"score"`) {
+		t.Fatalf("score キーが無い: %s", raw)
+	}
+	for _, dead := range []string{"creditLife", "evalNormalized"} {
+		if strings.Contains(string(raw), dead) {
+			t.Fatalf("廃止キー %q が残っている: %s", dead, raw)
 		}
 	}
 }

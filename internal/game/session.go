@@ -2,6 +2,7 @@ package game
 
 import (
 	"fmt"
+	"math"
 	"math/rand"
 	"sort"
 
@@ -10,9 +11,15 @@ import (
 
 // session.go は【層1コア】1試合の状態機械＋権威データ。純粋・Tick(dt)駆動（時計は持たず room が dt を渡す）。
 //
-// たこ焼き経営 BR: 99店が300客を捌き合う。直接攻撃なし。
-// Tick loop: stepPhase → stepDistribute → stepPatience → stepEvaluate → stepNormalize → stepHeat → stepStorm → checkFinish
-// 各ステップは no-op stub。実ロジックは Plan-02～05 で実装する。
+// たこ焼き経営 BR: 99店が客を捌き合う。直接攻撃なし。
+// Tick loop: stepPhase → stepDistribute → stepRank → stepHeat → stepStorm → checkFinish
+//
+// 本戦ルール（plan-h21）で順位を決める値が **評価（EMA×パーセンタイル正規化の相対値）→
+// スコア（累積の絶対値）** に変わった。あわせて信用・我慢ゲージ・客属性の評価効果を削除した。
+// スコアは ApplyOrderServed で加算されるので、tick 側にスコアの処理は無い（stepRank は並べるだけ）。
+//
+// ⚠ stepStorm / checkFinish は**まだ予選仕様**（tick周期の下位%淘汰・生存1店で終了）。
+// 20秒等間隔の時刻足切りと120秒全店脱落への置き換えは plan-h22。
 
 // SessionState は試合の状態。
 type SessionState int
@@ -40,17 +47,15 @@ func to(pid PlayerId, msg any) Outbound { return Outbound{To: Recipient{PlayerId
 func broadcastMsg(msg any) Outbound     { return Outbound{To: Recipient{Broadcast: true}, Msg: msg} }
 
 // customer は客1人の権威状態。属性は試合中不変。
+//
+// 本戦（plan-h21）で**客は逃げない**。我慢ゲージ（patienceMaxMs / patienceLeftMs /
+// patienceStartedAtMs）は削除した。一度出たお題は必ず打ち切られる。
+// 属性は見た目の出し分け専用で、スコアには一切影響しない。
 type customer struct {
 	attribute      proto.CustomerAttribute
-	patienceMaxMs  int
-	patienceLeftMs int
 	orderCount     int
 	keystrokeTotal int
 	assignedStore  *PlayerId
-
-	// patienceStartedAtMs は我慢が減り始めたサーバー時刻（= 行列に入った時刻）。
-	// クライアントが受信遅延ぶんズレずにゲージを描くために配る。
-	patienceStartedAtMs int64
 }
 
 // servedStats は1店の提供集計（リザルト用）。
@@ -68,10 +73,18 @@ type servedStats struct {
 	fastestMs  int // 1客を捌いた最短(ms)。未提供なら 0
 	slowestMs  int // 同最長(ms)
 
+	// takoyaki は作ったたこ焼きの総数（= 提供した客の orderCount の累計）。
+	// count（提供した**客**の数）とは別物。スコアの加点対象はこちら。
+	takoyaki int
+
 	// leftCount は我慢切れで帰られた客の数（取りこぼし）。
+	//
+	// 本戦（plan-h21）で客が逃げなくなったため**常に 0**。リザルトの表示互換のために
+	// 集計フィールドだけ残している（proto.MatchStats.LeftCount も同様）。
 	leftCount int
 
 	// byAttr は属性ごとの捌き／取りこぼしの内訳。添字は attrIndex。
+	// Left 側は上記と同じ理由で常に 0。
 	byAttr [attrCount]proto.AttributeTally
 }
 
@@ -98,23 +111,26 @@ func attrIndex(a proto.CustomerAttribute) int {
 }
 
 // storeState は1店分の権威状態。
+//
+// 本戦（plan-h21）で順位を決めるのは score ただ1つ。
+// creditLife（信用）・evalRaw/evalNormalized（相対評価）・buzzBonus（属性加点）・
+// prevStar（星表示）は削除した。復活させないこと。
 type storeState struct {
-	id             PlayerId
-	name           string
-	creditLife     int
-	evalRaw        float64
-	buzzBonus      float64
-	evalNormalized float64
-	rank           int
-	served         servedStats
-	alive          bool
-	finalRank      int
-	elimination    string
-	survivedMs     int64
+	id   PlayerId
+	name string
 
+	// score は順位を決める累積値。
+	// WeightTakoyaki×たこ焼き数 − WeightMiss×ミス数 の累計で、**0 でクランプしない**（§1.1）。
+	// 0 で止めると下位が全員ぴったり 0 に密集し、足切りで「どの店を切るか」が
+	// タイブレーク頼みの恣意的なものになる。負値は「ミスが多かった」という正直な情報。
+	score int
 
-	// prevStar は前回 EvaluationUpdate を出した時の starRating。starDelta の算出に使う。
-	prevStar float64
+	rank        int
+	served      servedStats
+	alive       bool
+	finalRank   int
+	elimination string
+	survivedMs  int64
 }
 
 // PlayerInit は NewSession に渡す初期店舗情報。
@@ -160,14 +176,12 @@ func NewSession(id proto.MatchId, params GameParameters, words WordSource, rng *
 		state:       WaitingStart,
 		phase:       proto.PhaseEarly,
 	}
-	life := params.Credit.InitialLife
 	for _, in := range inits {
 		s.stores[in.Id] = &storeState{
-			id:         in.Id,
-			name:       in.DisplayName,
-			creditLife: life,
-			evalRaw:    0,
-			alive:      true,
+			id:    in.Id,
+			name:  in.DisplayName,
+			score: 0,
+			alive: true,
 		}
 		s.storeQueues[in.Id] = nil
 		s.order = append(s.order, in.Id)
@@ -227,8 +241,9 @@ func (s *Session) ApplyOrderServed(from PlayerId, r proto.OrderServed) []Outboun
 		return nil
 	}
 
-	ep := s.params.Eval
-	floor := ep.MinMsPerWord * c.orderCount
+	// サニティ検証（本戦でも残す）。elapsedMs はスコアには使わないが、
+	// あり得ない申告で統計が汚れるのを防ぐため下限クランプは続ける。
+	floor := s.params.Sanity.MinMsPerWord * c.orderCount
 	elapsed := r.ElapsedMs
 	if elapsed < floor {
 		elapsed = floor
@@ -249,14 +264,15 @@ func (s *Session) ApplyOrderServed(from PlayerId, r proto.OrderServed) []Outboun
 	}
 
 	accuracy := 1 - float64(miss)/float64(keys)
-	speed := clampF(float64(ep.SpeedBaselineMs)/float64(elapsed), 0, ep.SpeedCap)
-	perOrder := ep.WeightAccuracy*accuracy + ep.WeightSpeed*speed
 
-	st.evalRaw = ep.EmaAlpha*perOrder + (1-ep.EmaAlpha)*st.evalRaw
-	if c.attribute == proto.AttrBuzz {
-		st.buzzBonus = clampF(st.buzzBonus+ep.BuzzBonus, 0, ep.BuzzCap)
-	}
+	// ── スコア加算（本戦の順位を決める唯一の値・plan-h21 §1）──
+	//
+	// 属性による加減点は無い。速度の項も持たない（速さは「時間内に何個作れたか」に表れる）。
+	// **0 でクランプしない**（§1.1）。
+	sp := s.params.Score
+	st.score += sp.WeightTakoyaki*c.orderCount - sp.WeightMiss*miss
 
+	st.served.takoyaki += c.orderCount
 	st.served.count++
 	st.served.accuracySum += accuracy
 	st.served.elapsedSum += int64(elapsed)
@@ -275,47 +291,17 @@ func (s *Session) ApplyOrderServed(from PlayerId, r proto.OrderServed) []Outboun
 	return append([]Outbound(nil), to(from, s.evaluationUpdate(st)))
 }
 
-func (s *Session) evalScore(st *storeState) float64 { return st.evalRaw + st.buzzBonus }
-
-// starRating は表示専用の星（0..5）を返す。
+// evaluationUpdate は1店ぶんの EvaluationUpdate を組み立てる。
 //
-//	starRating = 5 * (maxStores - rank) / (maxStores - 1)
-//
-// 母集団は生存店ではなく**99店全体**（脱落店は下位に積む）。生存店の rank は
-// 生存店内順位だが、脱落店は必ずその下に積まれるので全体順位と一致する。
-// これは表示専用で、分配重み・下位淘汰には従来どおり evalNormalized を使う。
-func (s *Session) starRating(st *storeState) float64 {
-	maxStores := len(s.order)
-	if maxStores <= 1 || st.rank <= 0 {
-		return 0
-	}
-	return 5 * float64(maxStores-st.rank) / float64(maxStores-1)
-}
-
-// evaluationUpdate は1店ぶんの EvaluationUpdate を組み立て、星の前回値を更新する。
-// starDelta は「前回配信時からの増減」なので、組み立てと同時に prevStar を進める。
+// **自店の順位はこれが権威**（proto の RankingSnapshot/Delta は他店を含む表示用）。
+// 相対評価が廃止されたので evalRaw / normalized / starRating / starDelta は入れない
+// （proto では定義が残るがゼロ値のまま送る）。
 func (s *Session) evaluationUpdate(st *storeState) proto.EvaluationUpdate {
-	star := s.starRating(st)
-	delta := star - st.prevStar
-	st.prevStar = star
 	return proto.EvaluationUpdate{
-		EvalRaw:    s.evalScore(st),
-		Normalized: st.evalNormalized,
+		Score:      st.score,
 		Rank:       st.rank,
 		AliveCount: s.aliveCount,
-		StarRating: star,
-		StarDelta:  delta,
 	}
-}
-
-func clampF(v, lo, hi float64) float64 {
-	if v < lo {
-		return lo
-	}
-	if v > hi {
-		return hi
-	}
-	return v
 }
 
 // Tick は時間を dt (ms) 進め、状態機械を1ステップ駆動する。
@@ -334,16 +320,14 @@ func (s *Session) Tick(dt int) []Outbound {
 	var out []Outbound
 	out = s.stepPhase(out)
 	out = s.stepDistribute(out)
-	out = s.stepPatience(dt, out)
-	out = s.stepEvaluate(out)
-	out = s.stepNormalize(out)
+	out = s.stepRank(out)
 	out = s.stepHeat(out)
 	out = s.stepStorm(out)
 	out = s.checkFinish(out)
 	return out
 }
 
-// ── 試合ループの各ステップ（no-op stub）────────────────────────
+// ── 試合ループの各ステップ ──────────────────────────────────
 
 func (s *Session) stepPhase(out []Outbound) []Outbound {
 	pp := s.params.Phase
@@ -398,27 +382,16 @@ func (s *Session) stepDistribute(out []Outbound) []Outbound {
 		return out
 	}
 
-	allZero := true
-	for _, sid := range s.order {
-		st := s.stores[sid]
-		if st.alive && st.evalNormalized != 0 {
-			allZero = false
-			break
-		}
-	}
-
 	for _, cid := range distributable {
 		if len(candidates) == 0 {
 			break
 		}
+		// 重みは行列の短さだけ（plan-h21 §4）。スコア/評価は一切見ない。
+		// これは予選の「全店 evalNormalized=0」の分岐（試合開始直後に毎回通っていた経路）を
+		// 常用にしたもので、新規ロジックではない。
 		weights := make([]float64, len(candidates))
-		floor := s.params.Distribution.WeightFloor
 		for i, cd := range candidates {
-			if allZero {
-				weights[i] = 1.0 / float64(cd.queueLen+1)
-			} else {
-				weights[i] = (floor + s.stores[cd.id].evalNormalized) / float64(cd.queueLen+1)
-			}
+			weights[i] = 1.0 / float64(cd.queueLen+1)
 		}
 		totalW := 0.0
 		for _, w := range weights {
@@ -464,195 +437,42 @@ func (s *Session) weightedSelect(weights []float64) int {
 	}
 	return len(weights) - 1
 }
-func (s *Session) stepPatience(dtMs int, out []Outbound) []Outbound {
-	effectiveDt := dtMs
-	if s.phase == proto.PhaseLate && s.params.Patience.LateMul > 0 {
-		effectiveDt = int(float64(dtMs) / s.params.Patience.LateMul)
-	}
-
-	// 同一tickで信用が尽きた店をいったん溜める。
-	// ここで即座に脱落させると、順位が s.order（店IDの並び）で決まってしまい、
-	// 「同時に落ちた店の優劣」が実力と無関係になる。
-	var collapsed []*storeState
-
-	for _, sid := range s.order {
-		st := s.stores[sid]
-		if !st.alive {
-			continue
-		}
-		q := s.storeQueues[sid]
-		if len(q) == 0 {
-			continue
-		}
-
-		// 対応中(先頭)だけでなく**待機中の客も**我慢が減る。
-		// これが「忙しさ」の表現で、行列を溜めること自体のコストになる
-		// （先頭だけだと行列がいくら伸びてもペナルティが無い）。
-		//
-		// 属性で分岐しないこと（#29）。特定属性が離脱から漏れると、その客が
-		// 行列に居座って店が永久に詰まる。
-		//
-		// 離脱者は先に集める。processLeave が storeQueues を書き換えるため、
-		// 走査中に処理すると要素を飛ばす。
-		var left []proto.CustomerId
-		for _, cid := range q {
-			c := s.customers[cid]
-			if c == nil {
-				continue
-			}
-			c.patienceLeftMs -= effectiveDt
-			if c.patienceLeftMs <= 0 {
-				left = append(left, cid)
-			}
-		}
-
-		for _, cid := range left {
-			var died bool
-			out, died = s.processLeave(sid, cid, out)
-			if died {
-				// 信用が尽きた時点で打ち切る。残りの客は脱落処理で
-				// まとめて restPool へ戻るので、ここで二重に信用を削らない。
-				collapsed = append(collapsed, st)
-				break
-			}
-		}
-	}
-
-	return s.resolveCollapses(collapsed, out)
-}
-
-// resolveCollapses は同一tickで信用が尽きた店をまとめて脱落させる。
+// stepRank は生存店をスコア降順に並べて rank を振り、各店へ EvaluationUpdate を返す。
 //
-// 総合判定（weakerForRank）で弱い順に並べ、弱い店から先に落とす＝下位の順位を与える。
-// バトルロイヤルなので**全員が同時に倒れても優勝者は必ず1店残す**。
-// その場合、いちばん強い店は脱落させずに生存させ、checkFinish が正規の優勝者として扱う
-// （「優勝者なのに脱落理由が付く」状態を作らない）。
-func (s *Session) resolveCollapses(collapsed []*storeState, out []Outbound) []Outbound {
-	if len(collapsed) == 0 {
+// パーセンタイル正規化は廃止した（plan-h21 §2）。順位は「スコアが高い順」であって、
+// 相対位置ではない。同値のタイブレークは weakerForRank（§2.1）。
+//
+// 配信頻度の間引きは h23 の担当。ここでは毎tick返す。
+func (s *Session) stepRank(out []Outbound) []Outbound {
+	alive := s.aliveStores()
+	if len(alive) == 0 {
 		return out
 	}
 
-	sortWeakestFirst(collapsed)
+	// 強い順（＝ weakerForRank の逆）。sort.SliceStable + 決定的な全順序なので、
+	// map の反復順に依存せず毎回同じ並びになる。
+	sortStrongestFirst(alive)
 
-	// 生存店が全滅する場合は、最強の1店を残す（勝者不在にしない）。
-	if len(collapsed) == s.aliveCount {
-		collapsed = collapsed[:len(collapsed)-1]
+	for i, st := range alive {
+		st.rank = i + 1
 	}
-
-	for _, st := range collapsed {
-		out = s.selfCollapse(st.id, out)
-	}
-	return out
-}
-
-// processLeave は客の離脱を確定し信用を減らす。
-// 信用が尽きた場合は died=true を返すだけで、脱落の確定は呼び出し側
-// （resolveCollapses）が同一tick分をまとめて総合判定してから行う。
-func (s *Session) processLeave(store PlayerId, cid proto.CustomerId, out []Outbound) ([]Outbound, bool) {
-	c := s.customers[cid]
-
-	out = append(out, to(store, proto.CustomerLeft{
-		CustomerId: cid,
-		Reason:     proto.LeaveTimeout,
-	}))
-
-	s.releaseToRest(cid)
-
-	loss := s.params.Credit.LeaveLoss.For(c.attribute)
-	st := s.stores[store]
-	st.creditLife -= loss
-	st.served.leftCount++
-	st.served.byAttr[attrIndex(c.attribute)].Left++
-
-	out = append(out, to(store, proto.CreditUpdate{
-		Life:   st.creditLife,
-		Delta:  -loss,
-		Reason: proto.CreditCustomerLeft,
-	}))
-
-	return out, st.creditLife <= 0
-}
-
-func (s *Session) selfCollapse(store PlayerId, out []Outbound) []Outbound {
-	st := s.stores[store]
-
-	st.alive = false
-	st.survivedMs = s.elapsedMs
-	s.aliveCount--
-
-	for len(s.storeQueues[store]) > 0 {
-		cid := s.storeQueues[store][0]
-		s.releaseToRest(cid)
-	}
-
-	st.finalRank = s.aliveCount + 1
-	st.elimination = string(proto.ElimSelfCollapse)
-
-	out = append(out, broadcastMsg(proto.StoreEliminated{
-		StoreId:   store,
-		Reason:    proto.ElimSelfCollapse,
-		FinalRank: st.finalRank,
-	}))
-	out = append(out, to(store, s.buildPersonalResult(st)))
-
-	return out
-}
-
-func (s *Session) stepEvaluate(out []Outbound) []Outbound {
-	decay := s.params.Eval.BuzzDecay
-	for _, st := range s.stores {
-		if !st.alive || st.buzzBonus == 0 {
-			continue
-		}
-		st.buzzBonus *= decay
-		if st.buzzBonus < 1e-4 {
-			st.buzzBonus = 0
-		}
+	for _, st := range alive {
+		out = append(out, to(st.id, s.evaluationUpdate(st)))
 	}
 	return out
 }
 
-func (s *Session) stepNormalize(out []Outbound) []Outbound {
-	type entry struct {
-		store *storeState
-		score float64
-	}
-	alive := make([]entry, 0, s.aliveCount)
+// aliveStores は生存店を s.order の順（＝決定的な順）で集める。
+// s.stores（map）を直接走査しないこと。Go の map 反復順はランダムで、
+// シード固定の matchsim が再現しなくなる。
+func (s *Session) aliveStores() []*storeState {
+	alive := make([]*storeState, 0, s.aliveCount)
 	for _, sid := range s.order {
-		st := s.stores[sid]
-		if st.alive {
-			alive = append(alive, entry{store: st, score: s.evalScore(st)})
+		if st := s.stores[sid]; st.alive {
+			alive = append(alive, st)
 		}
 	}
-	n := len(alive)
-	if n == 0 {
-		return out
-	}
-
-	for i := 1; i < n; i++ {
-		key := alive[i]
-		j := i - 1
-		for j >= 0 && alive[j].score > key.score {
-			alive[j+1] = alive[j]
-			j--
-		}
-		alive[j+1] = key
-	}
-
-	for i, e := range alive {
-		if n <= 1 {
-			e.store.evalNormalized = 1.0
-			e.store.rank = 1
-		} else {
-			e.store.evalNormalized = float64(i) / float64(n-1)
-			e.store.rank = n - i
-		}
-	}
-
-	for _, e := range alive {
-		out = append(out, to(e.store.id, s.evaluationUpdate(e.store)))
-	}
-	return out
+	return alive
 }
 func (s *Session) stepHeat(out []Outbound) []Outbound {
 	hp := s.params.Heat
@@ -741,12 +561,7 @@ func (s *Session) stepStorm(out []Outbound) []Outbound {
 func (s *Session) cullCandidates() []*storeState {
 	sp := s.params.Storm
 
-	alive := make([]*storeState, 0, s.aliveCount)
-	for _, sid := range s.order {
-		if s.stores[sid].alive {
-			alive = append(alive, s.stores[sid])
-		}
-	}
+	alive := s.aliveStores()
 	if len(alive) <= 1 {
 		return nil
 	}
@@ -759,7 +574,7 @@ func (s *Session) cullCandidates() []*storeState {
 		cullCount = len(alive) - 1
 	}
 
-	sortStoresByWeakest(alive)
+	sortWeakestFirst(alive)
 	return alive[:cullCount]
 }
 
@@ -808,47 +623,53 @@ func (s *Session) executeCull(out []Outbound) []Outbound {
 	return out
 }
 
-func sortStoresByWeakest(stores []*storeState) {
-	sort.SliceStable(stores, func(i, j int) bool {
-		a, b := stores[i], stores[j]
-		if a.evalNormalized != b.evalNormalized {
-			return a.evalNormalized < b.evalNormalized
-		}
-		return a.creditLife < b.creditLife
-	})
-}
-
-// avgAccuracy は平均精度（提供実績が無ければ0）。
-func (st *storeState) avgAccuracy() float64 {
-	if st.served.count == 0 {
+// rankAccuracy はタイブレーク用の正確性（1 − 総ミス数/総打鍵数）。
+//
+// リザルトの avgAccuracy（客ごとの精度の平均・buildMatchStats）とは別物。
+// 客ごとに打鍵数が違うので両者は一致しない。順位に使うのは生の合計ベースのこちら。
+//
+// 🔴 **未提供店（keystrokes=0）は 0 を返す**（＝最下位側）。20秒地点では「1件も提供していない店」が
+// 必ず出るので、ここでゼロ除算すると初日に必ず落ちる。
+func (st *storeState) rankAccuracy() float64 {
+	if st.served.keystrokes <= 0 {
 		return 0
 	}
-	return st.served.accuracySum / float64(st.served.count)
+	return 1 - float64(st.served.misses)/float64(st.served.keystrokes)
 }
 
-// weakerForRank は「同時に脱落した店同士の総合的な優劣」を返す（a の方が下位なら true）。
+// rankAvgElapsedMs はタイブレーク用の平均所要（小さいほど速い＝強い）。
 //
-// 最終順位は脱落順で決まるが、同一tickで複数店が同時に落ちた分は順序が付かない。
-// そこを店IDの並び順のような無意味な基準で決めないための総合判定
-// （AGENTS「評価は順位計算に使わない。同時脱落のタイブレークにのみ使う」）。
+// 🔴 **未提供店（count=0）は +∞ を返す**（＝最下位側）。rankAccuracy と同じ理由。
+func (st *storeState) rankAvgElapsedMs() float64 {
+	if st.served.count == 0 {
+		return math.Inf(1)
+	}
+	return float64(st.served.elapsedSum) / float64(st.served.count)
+}
+
+// weakerForRank は「a の方が下位か」を返す（本戦・plan-h21 §2.1）。
 //
-// 比較順: 残信用 → 正規化評価 → 生評価 → 提供数 → 平均精度 → id
-// 最後に id を見るのは、全部同値でも順序が揺れないようにするため（決定的なリプレイのため）。
+// 順位付け（stepRank）と足切り対象の選定（cullCandidates）で**同じ判定を共有する**。
+// ここが割れると「順位表では上なのに切られた」が起きる。
+//
+// 比較順: スコア → 正確性 → 速度 → storeId
+//
+//	1. score が低い方が下位
+//	2. 同値 → 正確性（1 − 総ミス/総打鍵）が低い方が下位。未提供店は 0
+//	3. 同値 → 平均所要が大きい（遅い）方が下位。未提供店は +∞
+//	4. 同値 → storeId（決定性の最終担保）
+//
+// 🔴 **4段目を省略しない。** 完全同値が残ると並びが揺れ、シード固定の matchsim が
+// 再現しなくなってバランス調整とテストが信用できなくなる。
 func weakerForRank(a, b *storeState) bool {
-	if a.creditLife != b.creditLife {
-		return a.creditLife < b.creditLife
+	if a.score != b.score {
+		return a.score < b.score
 	}
-	if a.evalNormalized != b.evalNormalized {
-		return a.evalNormalized < b.evalNormalized
-	}
-	if a.evalRaw != b.evalRaw {
-		return a.evalRaw < b.evalRaw
-	}
-	if a.served.count != b.served.count {
-		return a.served.count < b.served.count
-	}
-	if aa, ba := a.avgAccuracy(), b.avgAccuracy(); aa != ba {
+	if aa, ba := a.rankAccuracy(), b.rankAccuracy(); aa != ba {
 		return aa < ba
+	}
+	if ae, be := a.rankAvgElapsedMs(), b.rankAvgElapsedMs(); ae != be {
+		return ae > be
 	}
 	return a.id > b.id
 }
@@ -856,6 +677,12 @@ func weakerForRank(a, b *storeState) bool {
 // sortWeakestFirst は弱い順に並べる（先頭ほど下位＝先に脱落扱い）。
 func sortWeakestFirst(stores []*storeState) {
 	sort.SliceStable(stores, func(i, j int) bool { return weakerForRank(stores[i], stores[j]) })
+}
+
+// sortStrongestFirst は強い順に並べる（先頭が1位）。weakerForRank の逆順で、
+// 判定そのものは共有する（順位と足切りで基準がズレないようにするため）。
+func sortStrongestFirst(stores []*storeState) {
+	sort.SliceStable(stores, func(i, j int) bool { return weakerForRank(stores[j], stores[i]) })
 }
 
 func (s *Session) checkFinish(out []Outbound) []Outbound {
@@ -889,15 +716,19 @@ func (s *Session) checkFinish(out []Outbound) []Outbound {
 	return out
 }
 
+// buildPersonalResult は自店の脱落確定時に本人へ送るリザルトを組む。
+//
+// Reason は入れない（本戦は脱落経路が足切りの1本だけになったので、理由を出す意味が無い）。
+// creditLeft / evalRaw / evalNormalized も廃止（proto では定義が残るがゼロ値のまま送る）。
 func (s *Session) buildPersonalResult(st *storeState) proto.PersonalResult {
 	return proto.PersonalResult{
-		FinalRank:      st.finalRank,
-		Stats:          s.buildMatchStats(st),
-		Reason:         proto.EliminationReason(st.elimination),
-		SurvivedMs:     st.survivedMs,
-		CreditLeft:     st.creditLife,
-		EvalRaw:        s.evalScore(st),
-		EvalNormalized: st.evalNormalized,
+		FinalRank:  st.finalRank,
+		Stats:      s.buildMatchStats(st),
+		SurvivedMs: st.survivedMs,
+		// Score は順位を決めた値そのもの。TakoyakiCount は作った個数で、
+		// Stats.ServedCount（提供した**客**の数）とは別物。
+		Score:         st.score,
+		TakoyakiCount: st.served.takoyaki,
 	}
 }
 
@@ -932,9 +763,8 @@ func (s *Session) initCustomers() {
 		cid := proto.CustomerId(fmt.Sprintf("c-%d", i+1))
 		spec := s.rollAttribute()
 		s.customers[cid] = &customer{
-			attribute:     spec.Attribute,
-			patienceMaxMs: spec.PatienceBaseMs,
-			orderCount:    spec.OrderCount,
+			attribute:  spec.Attribute,
+			orderCount: spec.OrderCount,
 		}
 		s.restPool = append(s.restPool, cid)
 	}
@@ -979,13 +809,12 @@ func (s *Session) admitCustomer(cid proto.CustomerId, store PlayerId) (Outbound,
 		keystrokes += w.KeystrokeCount
 	}
 	c.keystrokeTotal = keystrokes
+	// 我慢ゲージは廃止（客は逃げない）。patience* には値を入れない。
 	return to(store, proto.CustomerView{
-		CustomerId:                cid,
-		Attribute:                 c.attribute,
-		OrderCount:                c.orderCount,
-		Words:                     words,
-		PatienceMaxMs:             c.patienceMaxMs,
-		PatienceStartedAtServerMs: c.patienceStartedAtMs,
+		CustomerId: cid,
+		Attribute:  c.attribute,
+		OrderCount: c.orderCount,
+		Words:      words,
 	}), true
 }
 
@@ -999,9 +828,6 @@ func (s *Session) assignCustomer(cid proto.CustomerId, store PlayerId) {
 	s.restPool = removeCustomer(s.restPool, cid)
 	s.storeQueues[store] = append(s.storeQueues[store], cid)
 	c.assignedStore = &store
-	c.patienceLeftMs = c.patienceMaxMs
-	// 我慢は行列に入った瞬間から減る（待たせること自体がコスト）。
-	c.patienceStartedAtMs = s.elapsedMs
 }
 
 func (s *Session) releaseToRest(cid proto.CustomerId) {
@@ -1040,12 +866,11 @@ func (s *Session) summaries() []proto.StoreSummary {
 	for _, sid := range s.order {
 		st := s.stores[sid]
 		sum := proto.StoreSummary{
-			StoreId:        st.id,
-			DisplayName:    st.name,
-			EvalNormalized: st.evalNormalized,
-			Rank:           st.rank,
-			CreditLife:     st.creditLife,
-			Alive:          st.alive,
+			StoreId:     st.id,
+			DisplayName: st.name,
+			Rank:        st.rank,
+			Score:       st.score,
+			Alive:       st.alive,
 		}
 		// finalRank は脱落済みの店だけに入れる（生存店では JSON にキーごと出さない）。
 		// 0 を送ると「順位0」という存在しない順位をクライアントに渡すことになる。
@@ -1058,17 +883,16 @@ func (s *Session) summaries() []proto.StoreSummary {
 	return out
 }
 
+// publicParams は MatchStart で配る公開サブセット。
+//
+// 廃止フィールド（initialLife / stormThresholdPct / patience*）には値を入れない。
+// CullSchedule は h22（時刻足切り）で GameParameters に入ってから詰める。
 func (s *Session) publicParams() proto.GameParametersPublicSubset {
 	return proto.GameParametersPublicSubset{
-		InitialLife: s.params.Credit.InitialLife,
-		MaxStores:   len(s.order),
-		// Late は我慢が dt/LateMul で減る（既定 0.6 → 約1.67倍速）。patienceMaxMs は
-		// 書き換わらず速度だけ変わるので、これを配らないとクライアントのゲージが
-		// Late 突入以降ズレ続ける。alertMs はサーバーが判定に使わない表示専用値。
-		PatienceLateMul: s.params.Patience.LateMul,
-		PatienceAlertMs: s.params.Patience.AlertMs,
-		// 順位バーに「淘汰圏」の帯を常時描くために配る（既存の storm 設定をそのまま公開）。
-		StormThresholdPct:        s.params.Storm.ThresholdPct,
+		MaxStores: len(s.order),
+		// スコア算出はサーバー権威。これを配るのは「+100」等の加点演出のためだけ。
+		ScoreWeightTakoyaki:      s.params.Score.WeightTakoyaki,
+		ScoreWeightMiss:          s.params.Score.WeightMiss,
 		FinalStageAliveThreshold: s.params.Presentation.FinalStageAliveThreshold,
 		FinalRushAliveThreshold:  s.params.Presentation.FinalRushAliveThreshold,
 	}
@@ -1081,11 +905,12 @@ type StoreResult struct {
 	DisplayName string
 	FinalRank   int
 	Elimination string
-	CreditLife     int
-	EvalRaw        float64
-	EvalNormalized float64
-	SurvivedMs     int64
-	Stats          proto.MatchStats
+	// Score は最終スコア（順位を決めた値）。TakoyakiCount は作った個数。
+	// 旧 CreditLife / EvalRaw / EvalNormalized は本戦で廃止（plan-h21）。
+	Score         int
+	TakoyakiCount int
+	SurvivedMs    int64
+	Stats         proto.MatchStats
 }
 
 func (s *Session) Results() []StoreResult {
@@ -1093,15 +918,14 @@ func (s *Session) Results() []StoreResult {
 	for _, pid := range s.order {
 		st := s.stores[pid]
 		results = append(results, StoreResult{
-			StoreId:     st.id,
-			DisplayName: st.name,
-			FinalRank:   st.finalRank,
-			Elimination: st.elimination,
-			CreditLife:     st.creditLife,
-			EvalRaw:        st.evalRaw,
-			EvalNormalized: st.evalNormalized,
-			SurvivedMs:     st.survivedMs,
-			Stats:          s.buildMatchStats(st),
+			StoreId:       st.id,
+			DisplayName:   st.name,
+			FinalRank:     st.finalRank,
+			Elimination:   st.elimination,
+			Score:         st.score,
+			TakoyakiCount: st.served.takoyaki,
+			SurvivedMs:    st.survivedMs,
+			Stats:         s.buildMatchStats(st),
 		})
 	}
 	return results
@@ -1146,18 +970,20 @@ type StormView struct {
 }
 
 // StoreBoardRow は1店の観測用の行（AdminSnapshot 用の素材）。
+//
+// 本戦（plan-h21）で CreditLife / EvalNormalized は Score に置き換わった。
+// スコア分布ビュー等の本格的な観測 v2 化は h25。
 type StoreBoardRow struct {
-	Id             PlayerId
-	Name           string
-	Alive          bool
-	Rank           int
-	FinalRank      int // 0 = 生存中（脱落済みのみ正）
-	CreditLife     int
-	EvalNormalized float64
-	QueueLen       int
-	ServedCount    int
-	AtRisk         bool       // 今 storm が起きたら淘汰される圏内か
-	QueueByAttr    AttrCounts // 行列中の客の属性内訳（客フロー可視化用）
+	Id          PlayerId
+	Name        string
+	Alive       bool
+	Rank        int
+	FinalRank   int // 0 = 生存中（脱落済みのみ正）
+	Score       int
+	QueueLen    int
+	ServedCount int
+	AtRisk      bool       // 今 storm が起きたら淘汰される圏内か
+	QueueByAttr AttrCounts // 行列中の客の属性内訳（客フロー可視化用）
 }
 
 // Phase は現在の局面（Early/Mid/Late）を返す。
@@ -1211,15 +1037,14 @@ func (s *Session) StoreBoard() []StoreBoardRow {
 	for _, sid := range s.order {
 		st := s.stores[sid]
 		row := StoreBoardRow{
-			Id:             st.id,
-			Name:           st.name,
-			Alive:          st.alive,
-			Rank:           st.rank,
-			CreditLife:     st.creditLife,
-			EvalNormalized: st.evalNormalized,
-			QueueLen:       len(s.storeQueues[sid]),
-			ServedCount:    st.served.count,
-			AtRisk:         st.alive && atRisk[sid],
+			Id:          st.id,
+			Name:        st.name,
+			Alive:       st.alive,
+			Rank:        st.rank,
+			Score:       st.score,
+			QueueLen:    len(s.storeQueues[sid]),
+			ServedCount: st.served.count,
+			AtRisk:      st.alive && atRisk[sid],
 		}
 		if !st.alive && st.finalRank > 0 {
 			row.FinalRank = st.finalRank

@@ -87,10 +87,8 @@ func TestDecisiveness_EndgameAlwaysShrinks(t *testing.T) {
 func TestDecisiveness_ZeroThresholdStillCulls(t *testing.T) {
 	cfg := newConfig(20, ProfileUniform, 1)
 	cfg.Params.Storm.ThresholdPct = 0
-	// 離脱ペナルティを 0 にして自滅の経路を完全に閉じる。これで storm が唯一の決着手段になり、
-	// 「storm が削らなければ必ず膠着する」状態を作れる。
-	// （InitialLife を大きくするだけでは、長い試行の間に離脱が積もって自滅が起きうる）
-	cfg.Params.Credit.LeaveLoss = game.LeaveLoss{}
+	// 本戦（plan-h21）で自滅の経路そのものが無くなったため、storm が唯一の決着手段。
+	// 予選ではここで離脱ペナルティを 0 にして自滅を封じる必要があった。
 
 	r := Simulate(cfg)
 	if r.Stalled {
@@ -101,7 +99,7 @@ func TestDecisiveness_ZeroThresholdStillCulls(t *testing.T) {
 		t.Fatalf("storm が削った店数が %d（%d店を期待）。1店ずつ削れていない", r.Culls, cfg.Stores-1)
 	}
 	if r.SelfCollapses != 0 {
-		t.Fatalf("離脱ペナルティ0なのに自滅が %d 件ある（テストの前提が崩れている）", r.SelfCollapses)
+		t.Fatalf("自滅が %d 件ある（本戦では信用制ごと廃止されており発生しないはず）", r.SelfCollapses)
 	}
 }
 
@@ -109,7 +107,6 @@ func TestDecisiveness_ZeroThresholdStillCulls(t *testing.T) {
 func TestDecisiveness_TinyThresholdRoundsUp(t *testing.T) {
 	cfg := newConfig(20, ProfileUniform, 1)
 	cfg.Params.Storm.ThresholdPct = 0.001 // 20店 × 0.1% = 0.02店
-	cfg.Params.Credit.LeaveLoss = game.LeaveLoss{}
 
 	r := Simulate(cfg)
 	if r.Stalled {

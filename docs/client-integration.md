@@ -20,7 +20,18 @@
 > **サーバーの挙動を変えたら、同じ PR でこの文書も直すこと。**
 > 食い違いを見つけたら、**文書ではなくサーバーの実挙動を正**としてここを直す。
 
-**裏取り時点**: `4ee201c`（2026-08-05）/ proto **v0.3.0**。参照元のファイル名・関数名を各所に明記してある。
+**裏取り時点**: proto **v0.8.0** / plan-h21（スコア制）適用後。参照元のファイル名・関数名を各所に明記してある。
+
+> 🔴 **本戦ルールへの移行途中**（`docs/plan-honsen/plan-h20` の移行マップ）。
+> この文書は **h21（スコア制）まで**を反映している。**まだ追随していない**のは:
+>
+> | 未反映 | 担当 plan | 現在の記述 |
+> |---|---|---|
+> | 20秒等間隔の時刻足切り（`cullSchedule`）・120秒で全店脱落 | **h22** | §3.8・§4 は**予選の storm 仕様のまま** |
+> | `RankingSnapshot` / `RankingDelta` / `StoreEliminatedBatch`・配信順序・間引き | **h23** | §3.10 は `StoreListUpdate` のまま |
+>
+> 上記2つはサーバー実装もまだ予選仕様なので、**この文書は現在のサーバーの実挙動と一致している**。
+> h22 / h23 の PR でそれぞれ書き換えること。
 
 ---
 
@@ -57,8 +68,7 @@
   │  │
   │  ├─← PhaseChange              ← 移行時のみ・全員
   │  ├─← CustomerArrived          ← 自店に客が来たとき
-  │  ├─← CustomerLeft → CreditUpdate  ← 我慢切れ（必ずこの順・同tick）
-  │  ├─← EvaluationUpdate         ← 毎tick・生存店それぞれへ
+  │  ├─← EvaluationUpdate         ← 毎tick・生存店それぞれへ（score / rank）
   │  ├─← DifficultyUpdate         ← heatLevel が変化したときのみ・全員
   │  ├─← ForcedEliminationWarning ← storm 予告時に1回・生存店それぞれへ
   │  ├─← StoreEliminated          ← 脱落確定のたび・全員
@@ -70,6 +80,11 @@
   │
   └─← MatchEnd                    ← 全店へ（脱落済みの店にも届く）
 ```
+
+> **本戦（h21）で消えたもの**: `CustomerLeft` / `CreditUpdate`。
+> **客は逃げなくなり、信用（ライフ）も廃止された**。一度出たお題は必ず打ち切られるので、
+> クライアントは「打っている最中に客が消える」割り込みを扱わなくてよい
+> （自店が足切りで脱落したときのシーン遷移は別の話）。
 
 ---
 
@@ -171,7 +186,7 @@ UTF-16 単位で数えるので**完全一致はしない**。**サーバーの�
 
 ---
 
-## 3. S2C — サーバーから届くもの（12種）
+## 3. S2C — サーバーから届くもの（10種）
 
 宛先の「自分」＝その店だけに届く、「全員」＝試合参加者全員に同じものが届く。
 
@@ -180,8 +195,6 @@ UTF-16 単位で数えるので**完全一致はしない**。**サーバーの�
 | `MatchmakingStatus` | 待機者 | 待機中 | 1秒ごと＋カウントダウン開始時 |
 | `MatchStart` | 自分 | 試合開始 | 1回 |
 | `CustomerArrived` | 自分 | 客が自店の行列に入った | 不定 |
-| `CustomerLeft` | 自分 | 我慢切れで帰った | 不定 |
-| `CreditUpdate` | 自分 | 信用が減った | `CustomerLeft` の直後 |
 | `EvaluationUpdate` | 自分 | 毎tick ＋ 提供成功の即レス | **高頻度** |
 | `DifficultyUpdate` | 全員 | `heatLevel` が**変化したとき** | 低頻度 |
 | `PhaseChange` | 全員 | フェーズ移行 | 試合中2回 |
@@ -189,6 +202,9 @@ UTF-16 単位で数えるので**完全一致はしない**。**サーバーの�
 | `StoreEliminated` | 全員 | 脱落確定 | 98回 |
 | `StoreListUpdate` | 全員 | 一定間隔 | 250ms ごと |
 | `MatchEnd` | 全員 | 試合終了 | 1回 |
+
+> ~~`CustomerLeft`~~ / ~~`CreditUpdate`~~ は**サーバーが送らなくなった**（h21）。
+> 型は proto に残っているが、受信ハンドラを書く必要は無い。
 
 ### 3.1 `MatchmakingStatus`
 
@@ -217,83 +233,81 @@ UTF-16 単位で数えるので**完全一致はしない**。**サーバーの�
 {
   "matchId": "m-3",
   "selfStoreId": "p-42",
-  "params": { "initialLife": 3, "maxStores": 99, "stormThresholdPct": 0.1,
-              "finalStageAliveThreshold": 20, "finalRushAliveThreshold": 10 },
+  "params": { "maxStores": 99, "cullSchedule": [],
+              "scoreWeightTakoyaki": 100, "scoreWeightMiss": 30,
+              "finalStageAliveThreshold": 20, "finalRushAliveThreshold": 10,
+              "initialLife": 0, "stormThresholdPct": 0,
+              "patienceLateMul": 0, "patienceAlertMs": 0 },
   "phase": "Early",
-  "stores": [ { "storeId": "p-1", "displayName": "…", "evalNormalized": 0,
-                "rank": 0, "creditLife": 20, "alive": true }, … ]
+  "stores": [ { "storeId": "p-1", "displayName": "…", "rank": 0, "alive": true,
+                "score": 0, "evalNormalized": 0, "creditLife": 0 }, … ]
 }
 ```
 
 > 上の値は**例**。運営UIから変更できるので、**必ず受信値を使う**（§5.7）。
 
 - `selfStoreId` で `stores[]` の中の自分を特定する
-- **`params` の値を表示に使う。** 信用ゲージの最大値は `initialLife`、順位バーの淘汰圏は `stormThresholdPct`
+- **`stores[]` は表示名の唯一の供給源。** 以降のメッセージは帯域削減のため `storeId` しか送らない。
+  ここを辞書としてキャッシュし、`storeId` → 表示名 を自前で引くこと。**再送は期待しない**
+- `scoreWeightTakoyaki` / `scoreWeightMiss` — スコアの重み。
+  `deltaScore = scoreWeightTakoyaki × たこ焼き数 − scoreWeightMiss × ミス数`。
+  **スコア算出はサーバー権威**で、これを配るのは「+100」等の**加点演出のためだけ**
 - `finalStageAliveThreshold` / `finalRushAliveThreshold` は**演出の切り替え専用**。ゲーム進行には影響しない
-- **`patienceLateMul`**（既定 0.6）— **Late 以降は我慢ゲージが `1/patienceLateMul` 倍速で減る**。
-  `patienceMaxMs` は書き換わらず**減る速度だけ**が変わり、行列内の来店済みの客にも即座に効く。
-  **これを使わないと Late 突入以降ゲージが約1.67倍ズレる**（§3.3 も参照）
-- `patienceAlertMs`（既定 2000）— 「もうすぐ帰る」警告へ切り替える残り時間。**表示専用**でサーバーは判定に使わない
+
+> 🔴 **ゼロ値で届く廃止フィールドを読まないこと。**
+> `initialLife` / `stormThresholdPct` / `patienceLateMul` / `patienceAlertMs` は
+> 契約（proto v0.8.0・方式B）に定義が残っているだけで、**サーバーは値を入れない**。
+> `initialLife` をライフゲージの最大値に使うと 0 除算やゲージ消滅になる。
+>
+> `cullSchedule` は **h22 で埋まるまで空配列**。タイムラインUIはそれまで組めない。
 
 ### 3.3 `CustomerArrived`（= `CustomerView`）
 
 ```json
 { "customerId": "c-42", "attribute": "Normal", "orderCount": 2,
-  "words": ["たこやき", "おおきに"], "patienceMaxMs": 16000,
-  "patienceStartedAtServerMs": 12750 }
+  "words": ["たこやき", "おおきに"],
+  "patienceMaxMs": 0, "patienceStartedAtServerMs": 0 }
 ```
 
 | フィールド | 備考 |
 |---|---|
 | `attribute` | `Normal` / `Bonus` / `Claimer` / `Buzz`。**試合中不変**。初回のみ配られる |
-| `orderCount` | = `words` の長さ |
+| `orderCount` | = `words` の長さ = **たこ焼きの個数**（スコアの加点対象） |
 | `words` | サーバー発行のお題。**ひらがな**（現在の辞書） |
-| `patienceMaxMs` | 我慢ゲージの最大値 |
-| `patienceStartedAtServerMs` | **我慢が減り始めたサーバー時刻**（試合開始からの経過ms） |
+| ~~`patienceMaxMs`~~ / ~~`patienceStartedAtServerMs`~~ | **常に 0**。我慢ゲージは廃止（読まない） |
 
-**★我慢ゲージは `patienceStartedAtServerMs` を起点に描く。** 受信時刻を起点にすると、受信遅延ぶん
-そのままズレる。サーバーの経過時刻は tick の積算なので、`MatchStart` 受信時を 0 として自前で進めた
-時計と突き合わせればよい。
+**★属性はゲームに一切影響しない**（h21）。予選は属性ごとに評価が増減したが、
+「同じように打ったのに評価が違う」という運の要素だったため廃止された。
+**見た目の出し分け専用**で、キャラクター・アイコン・行列の賑わいには引き続き使う。
 
-**★行列に入った瞬間から減る。** 対応中（先頭）の客だけでなく、**待っている客も同時に減っている**。
-これが「行列を溜めること自体のコスト」。
+**★客は逃げない。** 我慢ゲージも離脱もない。**一度出たお題は必ず打ち切られる**ので、
+入力中に客が消える割り込みを扱う必要はない。
 
-**★Late フェーズでは減る速度が変わる。** `dt / patienceLateMul`（既定 0.6 → 約1.67倍速）で減る。
-`patienceMaxMs` は書き換わらないので、**線形にカウントダウンすると Late 以降ズレ続ける**。
-`PhaseChange` で Late を知ったら、そこから先は倍率を掛けて進めること。
-
-### 3.4 `CustomerLeft` → `CreditUpdate`
+### 3.4 `EvaluationUpdate`
 
 ```json
-{ "customerId": "c-42", "reason": "Timeout" }
-{ "life": 18, "delta": -2, "reason": "CustomerLeft" }
-```
-
-**必ずこの順で、同じ tick に届く。** 信用は離脱でのみ減り、**回復はしない**。
-`delta` は属性ごとに違う（現在 Normal/Bonus/Claimer が -1、Buzz が -2）。
-
-### 3.5 `EvaluationUpdate`
-
-```json
-{ "evalRaw": 0.72, "normalized": 0.83, "rank": 17, "aliveCount": 64,
-  "starRating": 4.18, "starDelta": 0.21 }
+{ "score": 12300, "rank": 17, "aliveCount": 64,
+  "evalRaw": 0, "normalized": 0, "starRating": 0, "starDelta": 0 }
 ```
 
 | フィールド | 意味 |
 |---|---|
-| `normalized` | **生存店内**のパーセンタイル 0..1。分配重み・下位淘汰はこれを使う |
+| `score` | **順位を決める累積値**。`W_TAKOYAKI×たこ焼き数 − W_MISS×ミス数` の累計 |
 | `rank` | 生存店内の順位（1が最上位） |
-| `starRating` | **99店全体**を母集団にした表示専用の星 0..5 |
-| `starDelta` | 前回配信からの増減。「★+0.2」の演出用 |
+| `aliveCount` | 現在の生存店数 |
+| ~~`evalRaw`~~ / ~~`normalized`~~ / ~~`starRating`~~ / ~~`starDelta`~~ | **常に 0**。相対評価・星は廃止（読まない） |
 
-**`normalized` と `starRating` は別物。** 星は表示専用で、ゲーム進行には使われない。
-**星をクライアントで計算しない**（プレイヤーごとに違う星が見えてしまう）。
+**★`score` は負になりうる。** サーバーは 0 でクランプしない（ミスが多ければ実際に負になる）。
+`uint` で受けたり `Mathf.Max(0, …)` で潰したりしないこと。順位表がその店だけ嘘になる。
+
+**★自店の順位はこれが権威。** 他店を含む一覧（h23 で入る `RankingSnapshot` / `RankingDelta`）は
+表示用で取りこぼしがありうる。自分の順位は必ずこちらを使う。
 
 届くのは2系統:
-1. **毎tick**（`stepNormalize`）— 生存店それぞれへ
+1. **毎tick**（`stepRank`）— 生存店それぞれへ
 2. **`OrderServed` の成功レスポンス** — 提供直後の演出用に即座に1通
 
-### 3.6 `DifficultyUpdate`
+### 3.5 `DifficultyUpdate`
 
 ```json
 { "heatLevel": 7 }
@@ -302,7 +316,7 @@ UTF-16 単位で数えるので**完全一致はしない**。**サーバーの�
 **値が変化したときだけ**届く。毎tick来ると思って組まないこと。
 お題の難度段階で、現在の辞書は **0〜17**。
 
-### 3.7 `PhaseChange`
+### 3.6 `PhaseChange`
 
 ```json
 { "phase": "Mid" }
@@ -310,9 +324,12 @@ UTF-16 単位で数えるので**完全一致はしない**。**サーバーの�
 
 `Early` → `Mid` → `Late`。**戻らない。** 生存数と経過時間のどちらか先に成立した方で移行する。
 
-フェーズが変えるもの: Claimer の解禁（Early は来ない）／火力の加算／**Late は我慢ゲージが速く減る**。
+フェーズが変えるもの: Claimer の解禁（Early は来ない）／火力（お題難度）の加算。
 
-### 3.8 `ForcedEliminationWarning`
+> **本戦では脱落は Phase では起きない**（足切りの時刻スケジュールで起きる・h22）。
+> Phase は**演出の切り替えとお題難度の目安**として使う。
+
+### 3.7 `ForcedEliminationWarning`
 
 ```json
 { "untilTick": 30, "thresholdPct": 0.1, "selfAtRisk": true }
@@ -320,22 +337,29 @@ UTF-16 単位で数えるので**完全一致はしない**。**サーバーの�
 
 storm（下位淘汰）の予告。**1周期に1回だけ**届く。
 
+> 🔴 **これは予選仕様のまま。h22 で書き換わる。** 本戦では `untilMs` / `stageIndex` /
+> `stageTotal` / `cutLineRank` / `cutStoreIds` を持つ**常時配信**になり、`untilTick` /
+> `thresholdPct` は廃止される。**今この2つに依存した実装をしないこと。**
+
 - `untilTick` は**実行までの残りtick数**。秒に直すなら `tickIntervalMs` を掛ける
 - **`selfAtRisk` は店ごとに違う**（だから全体配信ではなく個別配信）
 - **自分が対象かをクライアントで判定しない。** `selfAtRisk` をそのまま使う
 
-### 3.9 `StoreEliminated`
+### 3.8 `StoreEliminated`
 
 ```json
 { "storeId": "p-42", "reason": "Cull", "finalRank": 63 }
 ```
 
-`reason` は `SelfCollapse`（信用0の自滅）か `Cull`（下位淘汰）。
+`reason` は**常に `Cull`**。本戦（h21）で信用制が廃止され、`SelfCollapse`（自滅）の経路が消えたため、
+脱落経路は足切りの1本だけになった。`reason` で分岐する意味は無い。
+
+> h22 で複数店が同時に落ちるようになるため、`StoreEliminatedBatch`（1メッセージにまとめる）へ移る。
 
 - **自店なら** → リザルトへ遷移。ただし**接続は切らない**（§5.4）
 - **他店なら** → ミニ盤面の更新
 
-### 3.10 `StoreListUpdate`
+### 3.9 `StoreListUpdate`
 
 ```json
 { "stores": [ … 99店ぶん … ], "aliveCount": 64 }
@@ -343,70 +367,89 @@ storm（下位淘汰）の予告。**1周期に1回だけ**届く。
 
 **tick とは別系統**で、現在 **250ms ごと**に全員へ全店分が届く。
 
+> 🔴 **これは予選仕様のまま。h23 で `RankingSnapshot`（全量・低頻度）と
+> `RankingDelta`（差分・高頻度）に置き換わる。**
+> `StoreSummary.score` には既に本戦のスコアが入っている（`evalNormalized` / `creditLife` は常に 0）。
+
 `StoreSummary.finalRank` は**脱落済みの店にだけ入る**（生存店では**キーごと出ない**）。
 
 > ⚠ **欠落を 0 として扱わないこと。** 順位0は存在しない。
 > C# の `int` で受けると 0 になるので、**nullable（`int?`）で持つ**。
 
-### 3.11 `MatchEnd`
+### 3.10 `PersonalResult`
 
 ```json
 {
   "finalRank": 1,
-  "reason": "",
-  "matchElapsedMs": 145000,
-  "creditLeft": 8,
-  "evalRaw": 0.72,
-  "evalNormalized": 1,
+  "survivedMs": 120000,
+  "score": 12300,
+  "takoyakiCount": 34,
   "stats": {
-    "servedCount": 34, "avgAccuracy": 0.94, "avgElapsedMs": 3100,
-    "leftCount": 6, "totalKeystrokes": 1180, "totalMisses": 71,
+    "servedCount": 12, "avgAccuracy": 0.94, "avgElapsedMs": 3100,
+    "leftCount": 0, "totalKeystrokes": 1180, "totalMisses": 71,
     "fastestMs": 2100, "slowestMs": 5400,
-    "normal":  { "served": 24, "left": 4 },
-    "bonus":   { "served": 6,  "left": 1 },
-    "claimer": { "served": 2,  "left": 1 },
-    "buzz":    { "served": 2,  "left": 0 }
-  }
+    "normal":  { "served": 9, "left": 0 },
+    "bonus":   { "served": 2, "left": 0 },
+    "claimer": { "served": 0, "left": 0 },
+    "buzz":    { "served": 1, "left": 0 }
+  },
+  "creditLeft": 0, "evalRaw": 0, "evalNormalized": 0
 }
 ```
 
-**脱落済みの店にも届く。** 最終順位は**脱落順のみ**で決まる（評価は使わない）。
+**自店の脱落が確定した瞬間に、本人だけへ届く。全員の試合終了を待たない。**
+クライアントはこれを保持しておき、任意のタイミング（「次へ」押下時など）で個人成績画面を出す。
+画面遷移とデータ受信を切り離すための設計（予選の「1位が決まる前に遷移すると何も出ない」対策）。
 
 | フィールド | 意味 |
 |---|---|
 | `finalRank` | 最終順位。1が優勝 |
-| `reason` | `SelfCollapse`（信用0）/ `Cull`（下位淘汰）。**優勝ならキーごと出ない** |
-| `matchElapsedMs` | 試合の総経過時間。**途中で脱落しても試合が終わるまでの時間**が入る |
-| `creditLeft` | 終了時点の残り信用。自滅なら 0 |
-| `evalRaw` / `evalNormalized` | 最終評価。**順位計算には使われない**表示用の値 |
+| `survivedMs` | 生存時間（試合開始から自分が脱落するまでの積算ms）。**試合の総経過時間ではない** |
+| `score` | **最終スコア**。順位を決めた値そのもの。負もありうる |
+| `takoyakiCount` | 作ったたこ焼きの総数（＝累計 `orderCount`）。`stats.servedCount`（提供した**客**の数）とは別物 |
+| ~~`reason`~~ | **サーバーは入れない**（脱落経路が足切りの1本だけになったため）。キーごと出ない |
+| ~~`creditLeft`~~ / ~~`evalRaw`~~ / ~~`evalNormalized`~~ | **常に 0**。信用・相対評価は廃止（読まない） |
 
 `stats` は**自店ぶんのみ**。
 
 | フィールド | 意味 |
 |---|---|
-| `servedCount` / `leftCount` | 捌けた客 / 我慢切れで帰られた客 |
+| `servedCount` | 捌けた**客**の数（たこ焼きの数は `takoyakiCount`） |
+| ~~`leftCount`~~ | **常に 0**。客は逃げない。集計欄だけ残っている |
 | `avgAccuracy` | **客ごとの精度の平均**（0..1） |
-| `totalKeystrokes` / `totalMisses` | 打鍵の生の合計。**「全体で何打鍵中いくつミスしたか」はこちらで出す**（客ごとに打鍵数が違うので `avgAccuracy` からは出せない） |
+| `totalKeystrokes` / `totalMisses` | 打鍵の生の合計。**「全体で何打鍵中いくつミスしたか」はこちらで出す**（客ごとに打鍵数が違うので `avgAccuracy` からは出せない）。**総ミス数はここが唯一の出どころ** |
 | `avgElapsedMs` / `fastestMs` / `slowestMs` | 1客を捌くのに要した平均・最短・最長。提供0なら全て 0 |
-| `normal` / `bonus` / `claimer` / `buzz` | 属性別の `{ served, left }` |
+| `normal` / `bonus` / `claimer` / `buzz` | 属性別の `{ served, left }`。`left` は常に 0 |
 
-属性別の合計は全体と一致する（`normal.served + bonus.served + … == servedCount`）。
+属性別の `served` の合計は `servedCount` と一致する。
 
 > **★最大コンボはサーバーから返らない。** サーバーは**打鍵列を受け取らない**（`OrderServed` は
 > 客1人ぶんの `elapsedMs` と `missCount` だけ）ので、連続無ミス数を知る手段が無い。
 > 加えて「コンボ」は企画転換で概念ごと廃止されている。
 > **リザルトに出すならクライアント側で自前に数えること。**
 
-> **全店の最終順位表は `MatchEnd` に入らない。** `StoreListUpdate` の最後のスナップショットに
-> 99店分が `finalRank` 込みで入っているので、それを保持しておけば順位表を描ける。
+> **全店の最終順位表は `PersonalResult` に入らない。** `StoreListUpdate` の最後のスナップショットに
+> 99店分が `finalRank` 込みで入っているので、それを保持しておけば順位表を描ける
+> （h23 で最後の `RankingSnapshot` がこの役目を引き継ぐ）。
 
----
+### 3.11 `MatchEnd`
+
+```json
+{}
+```
+
+試合全体の終了を全員へ知らせる締めの合図。**ペイロードは持たない。**
+勝者の特別扱いはサーバーが持たないので、クライアントは `PersonalResult.finalRank` に応じて
+リザルト演出を分岐する。
 
 ## 4. 試合の終了条件
 
-**生存店が1になったときだけ。制限時間は無い**（proto v0.3.0 で `matchTimeLimitMs` は削除された）。
+**現在のサーバーは「生存店が1になったときだけ」終わる**（予選仕様のまま）。
 
-**残り時間のUIを作らないこと。** 決着は storm（下位淘汰）が保証する。
+> 🔴 **h22 で変わる。** 本戦は `cullSchedule` の最終ステージ（**120秒**）で**全店が同時に脱落**して終わる。
+> 実質の制限時間は `cullSchedule` の最終 `atMs`。`matchTimeLimitMs` は契約から削除されたままなので、
+> **残り時間は `cullSchedule` から自前で組む**（h22 で `MatchStart.params.cullSchedule` が埋まる）。
+> それまでは `cullSchedule` が空配列で届くため、タイムラインUIは組めない。
 
 ---
 
@@ -422,9 +465,13 @@ storm（下位淘汰）の予告。**1周期に1回だけ**届く。
 サーバーは「不正な `OrderServed` でした」を返さない。
 **提供したのに `EvaluationUpdate` が返らなかったら、それがリジェクト**と考えてよい。
 
-### 5.3 待機中の客も我慢が減っている
+### 5.3 客は逃げない・スコアは負になる
 
-先頭だけではない。行列に3人いれば3人とも減る。UI もそう描くこと。
+我慢ゲージと信用は廃止された（h21）。**一度出たお題は必ず打ち切られる**ので、
+「打鍵中に客が消える」割り込み処理は要らない。
+
+`EvaluationUpdate.score` / `PersonalResult.score` は **0 でクランプされていない**。
+ミスが多ければ実際に負の値が届く。符号なしで受けたり 0 で潰したりしないこと。
 
 ### 5.4 脱落しても接続を切らない
 
@@ -434,8 +481,8 @@ storm（下位淘汰）の予告。**1周期に1回だけ**届く。
 ### 5.5 `clientTimestamp` は現在使われていない
 
 proto のコメントには「同時脱落のタイブレーク等に使用」とあるが、**サーバー実装は読んでいない**。
-同時脱落のタイブレークは残信用→評価→提供数→精度→id の総合判定でサーバー側が決めている。
-送っても害は無いが、**これに依存した実装をしない**。
+同順位のタイブレークは **スコア→正確性→速度→storeId** でサーバー側が決めている
+（`internal/game/session.go` の `weakerForRank`）。送っても害は無いが、**これに依存した実装をしない**。
 
 ### 5.6 `finalRank` は nullable
 
@@ -443,8 +490,11 @@ proto のコメントには「同時脱落のタイブレーク等に使用」�
 
 ### 5.7 数値をハードコードしない
 
-信用の最大値・淘汰圏の割合・演出のしきい値は、すべて `MatchStart.params` から取る。
+スコアの重み・演出のしきい値（および h22 以降は `cullSchedule`）は、すべて `MatchStart.params` から取る。
 サーバー側は運営UIから試合中でも変更できる（次の試合から反映）。
+
+**ゼロ値で届く廃止フィールドを「設定されていない」と解釈して独自の既定値で補わないこと**
+（`initialLife` など）。値が入らないのは仕様で、その機能自体が存在しない。
 
 ---
 

@@ -49,18 +49,22 @@ func mixOf(a game.AttrCounts) AdminMix {
 }
 
 // AdminStore は1店の観測情報（店舗盤面＋客フロー用）。
+//
+// 本戦（plan-h21）で creditLife / evalNormalized は score に置き換わった。
+// これは「消したフィールドの参照を付け替えてコンパイルを通す」最小対応で、
+// スコア分布ビュー等の本格的な v2 化は h25。**webdist/app.js はまだ旧フィールドを
+// 読んでいるので、体力バー・評価バーの表示は一時的に空になる**（描画は壊れない）。
 type AdminStore struct {
-	StoreId        string   `json:"storeId"`
-	DisplayName    string   `json:"displayName"`
-	Alive          bool     `json:"alive"`
-	Rank           int      `json:"rank"`
-	FinalRank      *int     `json:"finalRank,omitempty"` // 脱落済みのみ
-	CreditLife     int      `json:"creditLife"`
-	EvalNormalized float64  `json:"evalNormalized"`
-	QueueLen       int      `json:"queueLen"`
-	ServedCount    int      `json:"servedCount"`
-	AtRisk         bool     `json:"atRisk"`
-	QueueByAttr    AdminMix `json:"queueByAttr"`
+	StoreId     string   `json:"storeId"`
+	DisplayName string   `json:"displayName"`
+	Alive       bool     `json:"alive"`
+	Rank        int      `json:"rank"`
+	FinalRank   *int     `json:"finalRank,omitempty"` // 脱落済みのみ
+	Score       int      `json:"score"`
+	QueueLen    int      `json:"queueLen"`
+	ServedCount int      `json:"servedCount"`
+	AtRisk      bool     `json:"atRisk"`
+	QueueByAttr AdminMix `json:"queueByAttr"`
 }
 
 // BuildSnapshot は session の純粋 getter を読んで AdminSnapshot を組む。
@@ -74,16 +78,15 @@ func BuildSnapshot(s *game.Session) AdminSnapshot {
 	stores := make([]AdminStore, 0, len(board))
 	for _, r := range board {
 		as := AdminStore{
-			StoreId:        string(r.Id),
-			DisplayName:    r.Name,
-			Alive:          r.Alive,
-			Rank:           r.Rank,
-			CreditLife:     r.CreditLife,
-			EvalNormalized: r.EvalNormalized,
-			QueueLen:       r.QueueLen,
-			ServedCount:    r.ServedCount,
-			AtRisk:         r.AtRisk,
-			QueueByAttr:    mixOf(r.QueueByAttr),
+			StoreId:     string(r.Id),
+			DisplayName: r.Name,
+			Alive:       r.Alive,
+			Rank:        r.Rank,
+			Score:       r.Score,
+			QueueLen:    r.QueueLen,
+			ServedCount: r.ServedCount,
+			AtRisk:      r.AtRisk,
+			QueueByAttr: mixOf(r.QueueByAttr),
 		}
 		if !r.Alive && r.FinalRank > 0 {
 			fr := r.FinalRank

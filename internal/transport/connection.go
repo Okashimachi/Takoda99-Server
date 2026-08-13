@@ -151,7 +151,9 @@ func (c *wsConnection) write(env proto.Envelope) bool {
 // Write が writeTimeout まで固まり、**試合全体が停止する**。それを防ぐための非同期化。
 //
 // キューが埋まっている＝そのクライアントは配信に追従できていないので、接続を切る。
-// 以降は自然減衰（客の我慢切れ→信用減→SelfCollapse）で脱落する（#40）。
+// 以降は自然減衰で脱落する（#40）。本戦（plan-h21）では「OrderServed を送らなくなる
+// → スコアが伸びない → 足切りで下位から落ちる」という経路になる
+// （予選の「客の我慢切れ→信用減→SelfCollapse」は信用制ごと廃止された）。
 func (c *wsConnection) Send(env proto.Envelope) error {
 	select {
 	case <-c.ctx.Done():

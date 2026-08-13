@@ -51,8 +51,8 @@ func TestGet_ReturnsFullParams(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &gp); err != nil {
 		t.Fatalf("返却JSONがGameParametersでない: %v", err)
 	}
-	if gp.Credit.InitialLife != game.DefaultParameters().Credit.InitialLife {
-		t.Fatalf("値が一致しない: %d", gp.Credit.InitialLife)
+	if gp.Score.WeightTakoyaki != game.DefaultParameters().Score.WeightTakoyaki {
+		t.Fatalf("値が一致しない: %d", gp.Score.WeightTakoyaki)
 	}
 	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "*" {
 		t.Fatalf("CORS未設定: %q", got)
@@ -85,14 +85,14 @@ func TestPost_Valid_SavesAndReturns(t *testing.T) {
 	h := NewHandler(store, tok, nil)
 	body, _ := json.Marshal(func() game.GameParameters {
 		gp := game.DefaultParameters()
-		gp.Credit.InitialLife = 15
+		gp.Score.WeightTakoyaki = 15
 		return gp
 	}())
 	w := do(h, http.MethodPost, tok, body)
 	if w.Code != http.StatusOK {
 		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
 	}
-	if store.saved == nil || store.saved.Credit.InitialLife != 15 {
+	if store.saved == nil || store.saved.Score.WeightTakoyaki != 15 {
 		t.Fatalf("保存されていない: %+v", store.saved)
 	}
 }
@@ -213,10 +213,17 @@ func TestParams_ConfigHashInBody(t *testing.T) {
 	if want := gp.ConfigHash(); got != want {
 		t.Fatalf("configHash = %q, want %q", got, want)
 	}
-	for _, k := range []string{"session", "matching", "credit", "customer", "eval",
-		"phase", "heat", "storm", "distribution", "patience", "presentation", "bot"} {
+	// 本戦（plan-h21）で credit / eval / patience を廃止し score / sanity を追加した。
+	// config-front の UI 側の追随は h24。
+	for _, k := range []string{"session", "matching", "customer", "score", "sanity",
+		"phase", "heat", "storm", "distribution", "presentation", "bot"} {
 		if _, ok := m[k]; !ok {
 			t.Errorf("既存セクション %q が消えた", k)
+		}
+	}
+	for _, k := range []string{"credit", "eval", "patience"} {
+		if _, ok := m[k]; ok {
+			t.Errorf("廃止セクション %q が残っている（当日「効かない値」をいじる事故のもと）", k)
 		}
 	}
 }
@@ -235,8 +242,8 @@ func TestParams_PostAcceptsBodyWithConfigHash(t *testing.T) {
 	if fs.saved == nil {
 		t.Fatal("保存されていない")
 	}
-	if fs.saved.Credit.InitialLife != game.DefaultParameters().Credit.InitialLife {
-		t.Fatalf("往復で値が壊れた: %+v", fs.saved.Credit)
+	if fs.saved.Score.WeightTakoyaki != game.DefaultParameters().Score.WeightTakoyaki {
+		t.Fatalf("往復で値が壊れた: %+v", fs.saved.Score)
 	}
 	// 保存後のレスポンスにも configHash が入ること。
 	var m map[string]json.RawMessage
@@ -269,7 +276,7 @@ func TestParams_ConfigHashHeader(t *testing.T) {
 
 	// 設定が変われば値も変わること（＝実際に中身を見ている）。
 	other := gp
-	other.Credit.InitialLife = gp.Credit.InitialLife + 1
+	other.Score.WeightTakoyaki = gp.Score.WeightTakoyaki + 1
 	w2 := do(NewHandler(&fakeStore{gp: other}, tok, nil), http.MethodGet, "", nil)
 	if w2.Header().Get("X-Config-Hash") == got {
 		t.Fatal("設定を変えてもハッシュが同じ（中身を見ていない）")

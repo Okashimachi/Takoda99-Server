@@ -17,7 +17,7 @@ import (
 // チェック項目:
 //   1. CustomerView に words が空のまま送られていないか
 //   2. 同じ CustomerId が同時に2箇所以上に存在していないか
-//   3. restPool が枯渇して客の配信が止まっていないか
+//   3. restPool に在庫があるのに行列が空（お題切れ）になっていないか
 //   4. 各店舗に客が偏りすぎていないか
 //   5. 試合が正常に終了するか
 func TestDiagnostic_CustomerLifecycle(t *testing.T) {
@@ -59,20 +59,24 @@ func TestDiagnostic_CustomerLifecycle(t *testing.T) {
 	totalServed := 0
 	rejected := 0
 
-	// 周期的にrestPoolの枯渇を検知するための変数
-	ticksWithNoDistribution := 0
-	maxTicksWithNoDistribution := 0
-	lastDistributionTick := 0
+	// 客の供給が止まっていないかを検知するための変数。
+	//
+	// 本戦（plan-h21）で客が逃げなくなったため、「配信が何tick無かったか」は
+	// もう指標にならない。行列は閾値まで埋まったまま維持され、**誰かが1人捌いて
+	// 初めて1人補充される**ので、終盤（生存2〜3店・長いお題）では十数秒配信が無くて当然。
+	//
+	// 代わりに見るのは「お題が途切れたか」そのもの ＝ restPool に客が残っているのに
+	// 生存店の行列が空になった tick 数。ここが0なら供給は破綻していない。
+	starvedTicks := 0
+	starvedStores := map[game.PlayerId]int{}
 
 	tick := 0
 
 	handle := func(out []game.Outbound) {
-		hadDistribution := false
 		for _, o := range out {
 			switch m := o.Msg.(type) {
 			case proto.CustomerView:
 				totalArrived++
-				hadDistribution = true
 
 				// チェック1: words が空でないか
 				if len(m.Words) == 0 {
@@ -122,11 +126,6 @@ func TestDiagnostic_CustomerLifecycle(t *testing.T) {
 				}
 			}
 		}
-
-		if hadDistribution {
-			lastDistributionTick = tick
-			ticksWithNoDistribution = 0
-		}
 	}
 
 	// ── 試合開始 ─────────────────────────────────────────
@@ -161,11 +160,18 @@ func TestDiagnostic_CustomerLifecycle(t *testing.T) {
 			handle(res)
 		}
 
-		// 配信が無いtickを計測
-		if tick-lastDistributionTick > ticksWithNoDistribution {
-			ticksWithNoDistribution = tick - lastDistributionTick
-			if ticksWithNoDistribution > maxTicksWithNoDistribution {
-				maxTicksWithNoDistribution = ticksWithNoDistribution
+		// お題切れ（供給の破綻）を計測する。
+		// restPool に在庫があるのに生存店の行列が空 ＝ その店は打つものが無い＝ゲームが止まる。
+		if sess.RestPoolCount() > 0 {
+			starvedHere := false
+			for _, row := range sess.StoreBoard() {
+				if row.Alive && row.QueueLen == 0 {
+					starvedStores[row.Id]++
+					starvedHere = true
+				}
+			}
+			if starvedHere {
+				starvedTicks++
 			}
 		}
 
@@ -173,16 +179,15 @@ func TestDiagnostic_CustomerLifecycle(t *testing.T) {
 		elapsed := sess.ElapsedMs()
 		if elapsed >= nextLogMs {
 			alive := sess.AliveCount()
-			t.Logf("[%5.1fs | tick=%d] alive=%d arrived=%d left=%d served=%d rejected=%d active=%d emptyWords=%d dupeId=%d noDistFor=%dticks",
+			t.Logf("[%5.1fs | tick=%d] alive=%d arrived=%d left=%d served=%d rejected=%d active=%d emptyWords=%d dupeId=%d starved=%dticks",
 				float64(elapsed)/1000.0, tick, alive,
 				totalArrived, totalLeft, totalServed, rejected,
 				len(activeCustomers), emptyWordCount, duplicateIdCount,
-				ticksWithNoDistribution)
+				starvedTicks)
 
-			// チェック3: 長時間配信が無い場合に警告
-			if ticksWithNoDistribution > 100 {
-				t.Logf("  ⚠ 配信が %d tick (%dms) 止まっている！",
-					ticksWithNoDistribution, ticksWithNoDistribution*tickMs)
+			// チェック3: お題切れが起きていたら警告
+			if starvedTicks > 0 {
+				t.Logf("  ⚠ お題切れ（行列が空の生存店あり）が %d tick 発生している！", starvedTicks)
 			}
 
 			nextLogMs += int64(logIntervalMs)
@@ -208,8 +213,7 @@ func TestDiagnostic_CustomerLifecycle(t *testing.T) {
 	t.Logf("  お題空配信:                    %d", emptyWordCount)
 	t.Logf("  ID重複検出:                    %d", duplicateIdCount)
 	t.Logf("  ユニークID数:                  %d", len(seenIds))
-	t.Logf("  最長配信停止:                  %d ticks (%dms)",
-		maxTicksWithNoDistribution, maxTicksWithNoDistribution*tickMs)
+	t.Logf("  お題切れ tick 数:              %d (%d店で発生)", starvedTicks, len(starvedStores))
 
 	// ID再利用の分析
 	reuseCount := 0
@@ -265,10 +269,11 @@ func TestDiagnostic_CustomerLifecycle(t *testing.T) {
 		t.Errorf("❌ OrderServed が %d 件拒否されています（行列同期ズレ）", rejected)
 	}
 
-	// 10秒以上配信が止まると体験上問題
-	if maxTicksWithNoDistribution*tickMs > 10000 {
-		t.Errorf("❌ 最大 %dms（%d ticks）客の配信が止まっています。restPool枯渇の疑い",
-			maxTicksWithNoDistribution*tickMs, maxTicksWithNoDistribution)
+	// お題が途切れたら、そのプレイヤーは打つものが無く手が止まる（体験上の致命傷）。
+	// 供給の保証は分配の重みではなく distribution.queueRefillThreshold が担う（plan-h21 §4）。
+	if starvedTicks > 0 {
+		t.Errorf("❌ restPool に在庫があるのに行列が空の生存店が %d tick 発生（お題切れ）。内訳=%v",
+			starvedTicks, starvedStores)
 	}
 
 	// 再利用分析のサマリーライン
