@@ -23,17 +23,24 @@ type AdminSnapshot struct {
 	HeatLevel  int          `json:"heatLevel"`
 	AliveCount int          `json:"aliveCount"`
 	RestPool   int          `json:"restPool"` // 未割当客（たべたべエリア）数
-	Storm      AdminStorm   `json:"storm"`
+	Cull       AdminCull    `json:"cull"`
 	Customers  AdminMix     `json:"customers"`  // 在場の属性別総数
 	RestByAttr AdminMix     `json:"restByAttr"` // restPool の属性別内訳（客フロー用）
 	Stores     []AdminStore `json:"stores"`     // 99店
 }
 
-// AdminStorm は下位淘汰(storm)予告の状態。
-type AdminStorm struct {
-	Warning      bool    `json:"warning"`
-	UntilTick    int     `json:"untilTick"`
-	ThresholdPct float64 `json:"thresholdPct"`
+// AdminCull は次の時刻足切りの状態（本戦・plan-h22）。
+//
+// 予選の AdminStorm（warning / untilTick / thresholdPct）を置き換えたもの。
+// 本戦の予告は常時なので「予告中かどうか」のフラグは無い。
+// h21 の Score 化と同じく、これは**コンパイルを通すための最小対応**。
+// 足切りの可視化（タイムライン・カットライン帯）は h25。
+type AdminCull struct {
+	StageIndex       int `json:"stageIndex"` // 次のステージ（1始まり）。消化済みなら 0
+	StageTotal       int `json:"stageTotal"`
+	UntilMs          int `json:"untilMs"`
+	TargetAliveCount int `json:"targetAliveCount"`
+	CutLineRank      int `json:"cutLineRank"`
 }
 
 // AdminMix は客属性別の人数（Normal/Bonus=おばちゃん/Claimer/Buzz=JK）。
@@ -73,7 +80,7 @@ type AdminStore struct {
 // getter 読み出しはデータ競合しない（plan-h02 §1.3）。
 func BuildSnapshot(s *game.Session) AdminSnapshot {
 	board := s.StoreBoard()
-	storm := s.StormState()
+	cull := s.CullState()
 
 	stores := make([]AdminStore, 0, len(board))
 	for _, r := range board {
@@ -102,10 +109,12 @@ func BuildSnapshot(s *game.Session) AdminSnapshot {
 		HeatLevel:  s.HeatLevel(),
 		AliveCount: s.AliveCount(),
 		RestPool:   s.RestPoolCount(),
-		Storm: AdminStorm{
-			Warning:      storm.Warning,
-			UntilTick:    storm.UntilTick,
-			ThresholdPct: storm.ThresholdPct,
+		Cull: AdminCull{
+			StageIndex:       cull.StageIndex,
+			StageTotal:       cull.StageTotal,
+			UntilMs:          cull.UntilMs,
+			TargetAliveCount: cull.TargetAliveCount,
+			CutLineRank:      cull.CutLineRank,
 		},
 		Customers:  mixOf(s.CustomerMix()),
 		RestByAttr: mixOf(s.RestPoolByAttr()),

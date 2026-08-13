@@ -5,6 +5,11 @@
 //   - **バランス調整**（Plan-13 / `cmd/matchsim`）— 決着が目安時間に収まるか、数値を変えて反復する
 //   - **決着保証の検証**（Plan-14 / `sim_test.go`）— そもそも試合が必ず終わるか。CI で毎回回す
 //
+// ⚠ 本戦（plan-h22）で決着保証の意味が変わった。予選は「storm が効いて必ず終わるか」だったが、
+// 本戦は cullSchedule の最終ステージ（120秒）で**時刻により必ず終わる**ので、それ自体は自明。
+// 代わりに検証するのは「脱落カーブが targetAliveCount どおりか」「20秒より前に誰も落ちないか」
+// 「finalRank が重複なく 1..N を埋めるか」「同じシードで再現するか」（plan-h22 §5）。
+//
 // どちらも room/transport/bot を通さず game.Session を直接叩く。room は実時計(ticker)で
 // 回るので「1試合を数秒で」が成立しないため。Bot の代わりに、打鍵速度とミス率の2値で実力を
 // 表したダミー店（dummy.go）を持ち、ApplyOrderServed を直接呼ぶ。
@@ -43,6 +48,13 @@ type PhaseChangeAt struct {
 	Alive     int
 }
 
+// CullStageResult は足切りステージ1段ぶんの結果。
+type CullStageResult struct {
+	StageIndex int // 1始まり
+	ElapsedMs  int64
+	Alive      int // ステージ実行直後の生存数
+}
+
 // AlivePoint は生存店数が変化した時点。
 type AlivePoint struct {
 	Tick      int
@@ -79,11 +91,16 @@ type Result struct {
 	PhaseChanges []PhaseChangeAt
 	AliveCurve   []AlivePoint
 
-	SelfCollapses int // 自滅脱落した店数
-	Culls         int // 下位淘汰(storm)で落ちた店数
-	Served        int // 提供できた客の延べ数
-	// Left は我慢切れで帰られた客の延べ数。Served との比が信用の減りやすさを直接表す。
-	Left int
+	Culls  int // 足切りで落ちた店数（本戦では脱落経路がこれ1本なので = 全店数）
+	Served int // 提供できた客の延べ数
+
+	// CullStages は各足切りステージ直後の生存数（plan-h22 §5）。
+	// targetAliveCount どおりに脱落カーブが出ているかを見る。
+	CullStages []CullStageResult
+
+	// Results は全店の最終結果（順位・スコア）。finalRank の重複検査と
+	// 決定性の検証に使う。h26 のスコア分布の観測もここから取れる。
+	Results []game.StoreResult
 
 	// Rejected は session に弾かれた OrderServed の数。
 	// 正常なら 0。0 でないならダミー店の行列が session の storeQueues とズレており、
@@ -132,11 +149,6 @@ func Simulate(cfg Config) Result {
 				if d := byId[o.To.PlayerId]; d != nil {
 					d.arrive(m)
 				}
-			case proto.CustomerLeft:
-				r.Left++
-				if d := byId[o.To.PlayerId]; d != nil {
-					d.leave(m.CustomerId)
-				}
 			case proto.PhaseChange:
 				r.FinalPhase = m.Phase
 				r.PhaseChanges = append(r.PhaseChanges, PhaseChangeAt{
@@ -159,6 +171,9 @@ func Simulate(cfg Config) Result {
 	prevAlive := sess.AliveCount()
 	r.AliveCurve = append(r.AliveCurve, AlivePoint{Tick: 0, Alive: prevAlive})
 
+	totalStages := sess.CullState().StageTotal
+	stagesDone := 0
+
 	for tick = 1; tick <= cfg.MaxTicks; tick++ {
 		handle(sess.Tick(tickMs))
 
@@ -180,6 +195,20 @@ func Simulate(cfg Config) Result {
 		// stepHeat 後の heatLevel で出されるため。
 		if r.WordMaxLevel > 0 && r.HeatLevel >= r.WordMaxLevel {
 			r.TicksAtMaxHeat++
+		}
+
+		// 足切りステージが1段進んだら、その直後の生存数を記録する。
+		if cs := sess.CullState(); true {
+			nowDone := cs.StageIndex - 1
+			if cs.StageIndex == 0 {
+				nowDone = totalStages
+			}
+			for stagesDone < nowDone {
+				stagesDone++
+				r.CullStages = append(r.CullStages, CullStageResult{
+					StageIndex: stagesDone, ElapsedMs: sess.ElapsedMs(), Alive: sess.AliveCount(),
+				})
+			}
 		}
 
 		if a := sess.AliveCount(); a != prevAlive {
@@ -205,12 +234,10 @@ func finalize(r Result, sess *game.Session, byId map[game.PlayerId]*dummyStore,
 	r.Stalled = stalled
 	r.AliveAtEnd = sess.AliveCount()
 
-	for _, res := range sess.Results() {
+	r.Results = sess.Results()
+	for _, res := range r.Results {
 		r.Served += res.Stats.ServedCount
-		switch res.Elimination {
-		case string(proto.ElimSelfCollapse):
-			r.SelfCollapses++
-		case string(proto.ElimCull):
+		if res.Elimination == string(proto.ElimCull) {
 			r.Culls++
 		}
 		if res.FinalRank == 1 {

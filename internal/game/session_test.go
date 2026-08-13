@@ -23,6 +23,16 @@ func newTestSession(n int) *Session {
 	return newTestSessionWith(DefaultParameters(), n)
 }
 
+// disableCull は足切りを事実上無効化する（そのテストの関心事でない場合に使う）。
+//
+// 本戦の足切りは**時刻**で発火するので、予選のように周期を 0 にする
+// （storm.intervalTicks = 0）やり方は使えない。ステージ時刻を遠い未来へ飛ばす。
+func disableCull(s *Session) {
+	for i := range s.params.Cull.Stages {
+		s.params.Cull.Stages[i].AtMs = 1_000_000_000 + i*1000
+	}
+}
+
 func newTestSessionWith(params GameParameters, n int) *Session {
 	params.Matching.ReadyCountdownMs = 0
 	params.Matching.RosterWaitMs = 0
@@ -214,7 +224,7 @@ func TestStepDistribute_EmptyRestPool(t *testing.T) {
 	}
 }
 
-// ── Plan-04: stepPhase / stepHeat / stepStorm テスト ─────────
+// ── stepPhase / stepHeat テスト ──────────────────────────────
 
 func filterMsg[T any](out []Outbound) []T {
 	var result []T
@@ -229,7 +239,7 @@ func filterMsg[T any](out []Outbound) []T {
 func TestStepPhase_AliveThreshold(t *testing.T) {
 	s := newTestSession(99)
 	s.Start(0)
-	s.params.Storm.IntervalTicks = 0
+	disableCull(s)
 
 	if s.phase != proto.PhaseEarly {
 		t.Fatalf("初期は Early のはず: %v", s.phase)
@@ -261,7 +271,7 @@ func TestStepPhase_TimeThreshold(t *testing.T) {
 	// Tick が素通りする」のを避けるため我慢を伸ばす必要があったが、
 	// 本戦では客が逃げないので下準備は要らない。
 	s.Start(0)
-	s.params.Storm.IntervalTicks = 0
+	disableCull(s)
 
 	midMs := s.params.Phase.MidTimeMs
 	s.Tick(midMs)
@@ -279,7 +289,7 @@ func TestStepPhase_TimeThreshold(t *testing.T) {
 func TestStepHeat_Calculation(t *testing.T) {
 	s := newTestSession(99)
 	s.Start(0)
-	s.params.Storm.IntervalTicks = 0
+	disableCull(s)
 	hp := s.params.Heat
 
 	s.Tick(150)
@@ -297,264 +307,7 @@ func TestStepHeat_Calculation(t *testing.T) {
 	}
 }
 
-func TestStepStorm_Cull(t *testing.T) {
-	n := 10
-	s := newTestSession(n)
-	s.Start(0)
-	s.params.Storm = StormParams{IntervalTicks: 5, WarnTicks: 2, ThresholdPct: 0.20}
-	s.phase = proto.PhaseMid
-	s.params.Phase.LateAliveThreshold = 0
-
-	// スコアに差を付ける（s-1 が最弱、s-10 が最強）。
-	for i, sid := range s.order {
-		s.stores[sid].score = i * 100
-	}
-
-	var lastOut []Outbound
-	for i := 0; i < 5; i++ {
-		lastOut = s.Tick(150)
-	}
-
-	culled := filterMsg[proto.StoreEliminated](lastOut)
-	if len(culled) == 0 {
-		t.Fatal("storm で StoreEliminated が出るはず")
-	}
-	if s.aliveCount != n-2 {
-		t.Fatalf("10人中2人が淘汰されて8人残るはず: %d", s.aliveCount)
-	}
-	for _, c := range culled {
-		if c.Reason != proto.ElimCull {
-			t.Fatalf("Reason=Cull のはず: %v", c.Reason)
-		}
-	}
-}
-
-func TestStepStorm_Warning(t *testing.T) {
-	s := newTestSession(10)
-	s.Start(0)
-	s.params.Storm = StormParams{IntervalTicks: 10, WarnTicks: 3, ThresholdPct: 0.10}
-	s.phase = proto.PhaseMid
-	s.params.Phase.LateAliveThreshold = 0
-
-	for i := 0; i < 6; i++ {
-		out := s.Tick(150)
-		warns := filterMsg[proto.ForcedEliminationWarning](out)
-		if len(warns) > 0 {
-			t.Fatalf("tick %d で警告が出るのは早すぎる", i+1)
-		}
-	}
-
-	out := s.Tick(150)
-	warns := filterMsg[proto.ForcedEliminationWarning](out)
-	if len(warns) == 0 {
-		t.Fatal("tick 7 で ForcedEliminationWarning が出るはず")
-	}
-	if warns[0].UntilTick != 3 {
-		t.Fatalf("UntilTick=3 のはず: %d", warns[0].UntilTick)
-	}
-
-	for i := 8; i <= 9; i++ {
-		out := s.Tick(150)
-		warns := filterMsg[proto.ForcedEliminationWarning](out)
-		if len(warns) > 0 {
-			t.Fatalf("tick %d で警告が重複している", i)
-		}
-	}
-}
-
-func TestStepStorm_Tiebreak(t *testing.T) {
-	s := newTestSession(5)
-	s.Start(0)
-	s.params.Storm = StormParams{IntervalTicks: 1, WarnTicks: 0, ThresholdPct: 0.40}
-	s.phase = proto.PhaseMid
-	s.params.Phase.LateAliveThreshold = 0
-
-	s.stores[s.order[0]].score = 100
-	s.stores[s.order[1]].score = 200
-	s.stores[s.order[2]].score = 300
-	s.stores[s.order[3]].score = 400
-	s.stores[s.order[4]].score = 500
-
-	out := s.Tick(150)
-	culled := filterMsg[proto.StoreEliminated](out)
-
-	if len(culled) < 2 {
-		t.Fatalf("2店が淘汰されるはず: %d", len(culled))
-	}
-
-	if culled[0].StoreId != s.order[0] {
-		t.Fatalf("score が最も低い店が最初に脱落するはず: %s", culled[0].StoreId)
-	}
-	if culled[0].FinalRank <= culled[1].FinalRank {
-		t.Fatalf("先に脱落した方が FinalRank が大きいはず: %d vs %d",
-			culled[0].FinalRank, culled[1].FinalRank)
-	}
-}
-
 // ── Plan-05: checkFinish / Results テスト ─────────────────────
-
-func TestCheckFinish_LastOneStanding(t *testing.T) {
-	sess := newTestSession(2)
-	p1 := PlayerId("s-1")
-	p2 := PlayerId("s-2")
-
-	st2 := sess.stores[p2]
-	st2.alive = false
-	st2.finalRank = 2
-	st2.elimination = string(proto.ElimCull)
-	sess.aliveCount = 1
-
-	out := sess.checkFinish(nil)
-
-	if sess.state != Finished {
-		t.Fatalf("state=%v, want Finished", sess.state)
-	}
-	if len(out) !=  3  {
-		t.Fatalf("outbound count=%d, want 2", len(out))
-	}
-
-	for _, o := range out {
-		// Filter MatchEnd
-		if _, ok := o.Msg.(proto.MatchEnd); ok { continue }
-		me, ok := o.Msg.(proto.PersonalResult)
-		if !ok {
-			t.Fatalf("unexpected msg type: %T", o.Msg)
-		}
-		pid := o.To.PlayerId
-		if pid == p1 && me.FinalRank != 1 {
-			t.Errorf("s-1 rank=%d, want 1", me.FinalRank)
-		}
-		if pid == p2 && me.FinalRank != 2 {
-			t.Errorf("s-2 rank=%d, want 2", me.FinalRank)
-		}
-	}
-}
-
-func TestCheckFinish_ThreePlayerRankOrder(t *testing.T) {
-	sess := newTestSession(3)
-
-	sess.stores[PlayerId("s-1")].alive = false
-	sess.stores[PlayerId("s-1")].finalRank = 3
-	sess.stores[PlayerId("s-1")].elimination = string(proto.ElimCull)
-
-	sess.stores[PlayerId("s-3")].alive = false
-	sess.stores[PlayerId("s-3")].finalRank = 2
-	sess.stores[PlayerId("s-3")].elimination = string(proto.ElimCull)
-
-	sess.aliveCount = 1
-
-	out := sess.checkFinish(nil)
-
-	if sess.state != Finished {
-		t.Fatal("should be Finished")
-	}
-
-	// checkFinish returns PersonalResult ONLY for the winner (s-2).
-	// Eliminated players (s-1, s-3) already received PersonalResult when they died.
-	ranks := map[PlayerId]int{}
-	for _, o := range out {
-		if _, ok := o.Msg.(proto.MatchEnd); ok { continue }
-		if me, ok := o.Msg.(proto.PersonalResult); ok {
-			ranks[o.To.PlayerId] = me.FinalRank
-		}
-	}
-	if ranks[PlayerId("s-2")] != 1 {
-		t.Errorf("s-2 rank=%d want 1", ranks[PlayerId("s-2")])
-	}
-	if _, ok := ranks[PlayerId("s-1")]; ok {
-		t.Errorf("s-1 should not receive PersonalResult in checkFinish")
-	}
-}
-
-func TestCheckFinish_StatsCalculation(t *testing.T) {
-	sess := newTestSession(2)
-	p1 := PlayerId("s-1")
-
-	sess.stores[p1].served = servedStats{
-		count:       3,
-		accuracySum: 0.9 + 0.8 + 0.7,
-		elapsedSum:  3000 + 4000 + 5000,
-	}
-
-	sess.stores[PlayerId("s-2")].alive = false
-	sess.stores[PlayerId("s-2")].finalRank = 2
-	sess.aliveCount = 1
-
-	out := sess.checkFinish(nil)
-
-	for _, o := range out {
-		if o.To.PlayerId != p1 {
-			continue
-		}
-		if _, ok := o.Msg.(proto.MatchEnd); ok { continue }
-		me := o.Msg.(proto.PersonalResult)
-		if me.Stats.ServedCount != 3 {
-			t.Errorf("ServedCount=%d want 3", me.Stats.ServedCount)
-		}
-		wantAcc := 2.4 / 3.0
-		if diff := me.Stats.AvgAccuracy - wantAcc; diff > 0.001 || diff < -0.001 {
-			t.Errorf("AvgAccuracy=%.4f want %.4f", me.Stats.AvgAccuracy, wantAcc)
-		}
-		if me.Stats.AvgElapsedMs != 4000 {
-			t.Errorf("AvgElapsedMs=%d want 4000", me.Stats.AvgElapsedMs)
-		}
-	}
-}
-
-func TestCheckFinish_ZeroServed(t *testing.T) {
-	sess := newTestSession(2)
-
-	sess.stores[PlayerId("s-2")].alive = false
-	sess.stores[PlayerId("s-2")].finalRank = 2
-	sess.aliveCount = 1
-
-	out := sess.checkFinish(nil)
-	if len(out) != 3 {
-		t.Fatalf("out=%d want 3", len(out))
-	}
-
-	for _, o := range out {
-		if _, ok := o.Msg.(proto.MatchEnd); ok { continue }
-		if o.To.PlayerId != PlayerId("s-2") {
-			continue
-		}
-		me, ok := o.Msg.(proto.PersonalResult)
-		if !ok { continue }
-		if me.Stats.ServedCount != 0 || me.Stats.AvgAccuracy != 0 || me.Stats.AvgElapsedMs != 0 {
-			t.Errorf("zero-served stats should be all zeros, got %+v", me.Stats)
-		}
-	}
-}
-
-func TestCheckFinish_SoloDoesNotEnd(t *testing.T) {
-	sess := newTestSession(1)
-	out := sess.checkFinish(nil)
-	if sess.state == Finished {
-		t.Fatal("solo session should not finish")
-	}
-	if len(out) != 0 {
-		t.Fatalf("solo should produce no outbound, got %d", len(out))
-	}
-}
-
-func TestCheckFinish_AllEliminatedSimultaneously(t *testing.T) {
-	sess := newTestSession(2)
-
-	for _, pid := range sess.order {
-		st := sess.stores[pid]
-		st.alive = false
-		st.finalRank = 1
-	}
-	sess.aliveCount = 0
-
-	out := sess.checkFinish(nil)
-	if sess.state != Finished {
-		t.Fatal("should be Finished when aliveCount=0")
-	}
-	if len(out) != 2 {
-		t.Fatalf("out=%d want 2", len(out))
-	}
-}
 
 // ── proto v0.3.0 追随（#33）──
 
@@ -598,74 +351,7 @@ func TestSummaries_FinalRankOnlyForEliminated(t *testing.T) {
 	}
 }
 
-// 試合は生存店=1 でのみ終わる。経過時間では終わらない（制限時間は廃止済み）。
-//
-// ⚠ h22（cullSchedule）で決着が「120秒に全店脱落」へ変わるため、このテストは
-// h22 で「cullSchedule の最終ステージ以外では終わらない」へ書き換わる。
-// 「素の経過時間で終わらせない」という意図そのものは h22 以降も残す。
-func TestCheckFinish_NeverEndsOnElapsedTime(t *testing.T) {
-	s := newTestSession(3)
-	s.state = Running
-
-	// 十分に長い時間を進めても、生存店が2以上なら終了しない。
-	for i := 0; i < 500; i++ {
-		s.elapsedMs += 1000
-		s.checkFinish(nil)
-		if s.state == Finished {
-			t.Fatalf("経過時間で試合が終了した（制限時間は廃止済み）: elapsedMs=%d aliveCount=%d",
-				s.elapsedMs, s.aliveCount)
-		}
-	}
-}
-
 // ── proto v0.3.0 値算出（#64）──
-
-// 予告の selfAtRisk は、実際に淘汰される店だけ true になる。
-//
-// 予告と実行で判定がズレると「警告が出ていないのに落ちる」が起きるため、
-// 同じ集合になることをここで固定する。
-func TestForcedEliminationWarning_SelfAtRiskMatchesCull(t *testing.T) {
-	s := newTestSession(10)
-	s.state = Running
-	s.params.Storm.ThresholdPct = 0.2 // 10店の20% = 2店が対象
-
-	// スコアに差を付ける（s-1 が最弱、s-10 が最強）。
-	for i, sid := range s.order {
-		s.stores[sid].score = i * 100
-		s.stores[sid].rank = 10 - i
-	}
-
-	atRisk := s.cullTargets()
-	if len(atRisk) != 2 {
-		t.Fatalf("淘汰対象は2店のはず: %d店 %v", len(atRisk), atRisk)
-	}
-	// 最弱2店（s-1, s-2）が対象。
-	for _, want := range []PlayerId{"s-1", "s-2"} {
-		if !atRisk[want] {
-			t.Fatalf("%s が対象に入っていない: %v", want, atRisk)
-		}
-	}
-	if atRisk["s-10"] {
-		t.Fatal("最強の s-10 が対象に入っている")
-	}
-
-	// 実際に淘汰を実行して、同じ集合が落ちることを確認する。
-	out := s.executeCull(nil)
-	eliminated := map[PlayerId]bool{}
-	for _, o := range out {
-		if se, ok := o.Msg.(proto.StoreEliminated); ok {
-			eliminated[se.StoreId] = true
-		}
-	}
-	if len(eliminated) != len(atRisk) {
-		t.Fatalf("予告と実行で対象数が違う: 予告=%d 実行=%d", len(atRisk), len(eliminated))
-	}
-	for sid := range atRisk {
-		if !eliminated[sid] {
-			t.Fatalf("予告された %s が実際には落ちていない", sid)
-		}
-	}
-}
 
 // 演出しきい値が公開パラメータに載る（既定値）。
 func TestPublicParams_PresentationThresholds(t *testing.T) {
@@ -746,7 +432,6 @@ func TestStepHeat_NeverGoesNegative(t *testing.T) {
 		}
 	}
 }
-
 
 // ── 本戦: スコア制（plan-h21）────────────────────────────────
 
@@ -1047,8 +732,8 @@ func TestStepDistribute_IgnoresScore(t *testing.T) {
 func TestTick_NoLeaveOrCreditMessages(t *testing.T) {
 	params := DefaultParameters()
 	params.Customer.Total = 0
-	params.Storm.IntervalTicks = 0 // 淘汰は別テストの担当
 	s := newTestSessionWith(params, 3)
+	disableCull(s) // 足切りは別テストの担当（200秒回すので既定だと全店落ちる）
 	s.Start(0)
 
 	for _, sid := range s.order {
@@ -1203,5 +888,382 @@ func TestMatchStats_NoServeIsSafe(t *testing.T) {
 	got := s.buildMatchStats(s.stores["s-1"])
 	if got.ServedCount != 0 || got.AvgAccuracy != 0 || got.AvgElapsedMs != 0 || got.FastestMs != 0 {
 		t.Fatalf("提供0なのに値が入っている: %+v", got)
+	}
+}
+
+// ── 本戦: 時刻足切りと決着（plan-h22）──────────────────────
+
+// cullAt は指定ステージの時刻へ一気に進めて tick を1回回す。
+func cullAt(s *Session, stageIdx int) []Outbound {
+	target := int64(s.params.Cull.Stages[stageIdx].AtMs)
+	return s.Tick(int(target - s.elapsedMs))
+}
+
+// ステージ時刻に到達すると、生存数がちょうど targetAliveCount になる。
+func TestStepCull_ReachesTargetAliveCount(t *testing.T) {
+	params := DefaultParameters()
+	params.Customer.Total = 0
+	s := newTestSessionWith(params, 99)
+	s.Start(0)
+
+	for i, stage := range s.params.Cull.Stages {
+		cullAt(s, i)
+		if s.aliveCount != stage.TargetAliveCount {
+			t.Fatalf("ステージ%d (%dms) 後の生存=%d, want %d",
+				i+1, stage.AtMs, s.aliveCount, stage.TargetAliveCount)
+		}
+	}
+}
+
+// 20秒より前には誰も脱落しない（企画 C4「どれだけ弱くても20秒は遊べる」）。
+func TestStepCull_NobodyEliminatedBeforeFirstStage(t *testing.T) {
+	params := DefaultParameters()
+	params.Customer.Total = 0
+	s := newTestSessionWith(params, 99)
+	s.Start(0)
+
+	firstAt := s.params.Cull.Stages[0].AtMs
+	for s.elapsedMs < int64(firstAt)-int64(params.Session.TickIntervalMs) {
+		out := s.Tick(params.Session.TickIntervalMs)
+		if elim := filterMsg[proto.StoreEliminated](out); len(elim) > 0 {
+			t.Fatalf("%dms 時点で脱落が発生した（第1ステージは %dms）: %+v", s.elapsedMs, firstAt, elim)
+		}
+	}
+	if s.aliveCount != 99 {
+		t.Fatalf("第1ステージ前に生存が減っている: %d", s.aliveCount)
+	}
+}
+
+// スコア下位から切られる（上位は切られない）。
+func TestStepCull_CutsLowestScoresFirst(t *testing.T) {
+	params := DefaultParameters()
+	params.Customer.Total = 0
+	// 10店 → 第1ステージで生存4まで落とす（6店カット）。
+	params.Cull.Stages[0] = CullStage{AtMs: 20000, TargetAliveCount: 4}
+	s := newTestSessionWith(params, 10)
+	s.Start(0)
+
+	// s-1 が最弱、s-10 が最強。
+	for i, sid := range s.order {
+		s.stores[sid].score = i * 100
+	}
+
+	out := cullAt(s, 0)
+	elim := map[PlayerId]int{}
+	for _, e := range filterMsg[proto.StoreEliminated](out) {
+		elim[e.StoreId] = e.FinalRank
+	}
+	if len(elim) != 6 {
+		t.Fatalf("6店が脱落するはず: %v", elim)
+	}
+	// 下位6店（s-1..s-6）が落ち、上位4店は残る。
+	for _, sid := range []PlayerId{"s-1", "s-2", "s-3", "s-4", "s-5", "s-6"} {
+		if _, ok := elim[sid]; !ok {
+			t.Fatalf("スコア下位の %s が切られていない: %v", sid, elim)
+		}
+	}
+	for _, sid := range []PlayerId{"s-7", "s-8", "s-9", "s-10"} {
+		if _, ok := elim[sid]; ok {
+			t.Fatalf("スコア上位の %s が切られている: %v", sid, elim)
+		}
+	}
+	// 同一ステージ内はスコア昇順で下から積む（最弱が最下位）。
+	if elim["s-1"] != 10 || elim["s-6"] != 5 {
+		t.Fatalf("finalRank の積み方が違う: s-1=%d(want 10) s-6=%d(want 5)", elim["s-1"], elim["s-6"])
+	}
+}
+
+// 生存数が既に目標以下のステージはスキップされる（切る数が負にならない）。
+func TestStepCull_SkipsWhenAlreadyBelowTarget(t *testing.T) {
+	params := DefaultParameters()
+	params.Customer.Total = 0
+	// 5店で開始。第1ステージの目標75は既に下回っている。
+	s := newTestSessionWith(params, 5)
+	s.Start(0)
+
+	out := cullAt(s, 0)
+	if elim := filterMsg[proto.StoreEliminated](out); len(elim) > 0 {
+		t.Fatalf("目標を既に下回っているのに脱落が発生した: %+v", elim)
+	}
+	if s.aliveCount != 5 {
+		t.Fatalf("生存=%d, want 5", s.aliveCount)
+	}
+	// ステージは消化済みとして進んでいる（同じステージを何度も実行しない）。
+	if s.cullStageIdx != 1 {
+		t.Fatalf("cullStageIdx=%d, want 1", s.cullStageIdx)
+	}
+}
+
+// 120秒で全店が脱落し、finalRank が 1..N で重複しない。「生存1店」が発生しない。
+func TestStepCull_FinalStageEliminatesEveryone(t *testing.T) {
+	params := DefaultParameters()
+	params.Customer.Total = 0
+	s := newTestSessionWith(params, 99)
+	s.Start(0)
+
+	sawAliveOne := false
+	for i := range s.params.Cull.Stages {
+		cullAt(s, i)
+		if s.aliveCount == 1 {
+			sawAliveOne = true
+		}
+	}
+	if sawAliveOne {
+		t.Fatal("「生存1店」の状態が発生した（本戦では全店同時脱落で終わる）")
+	}
+	if s.aliveCount != 0 {
+		t.Fatalf("最終ステージ後の生存=%d, want 0", s.aliveCount)
+	}
+	if s.state != Finished {
+		t.Fatalf("state=%v, want Finished", s.state)
+	}
+
+	// finalRank が 1..99 で重複なし。
+	seen := map[int]PlayerId{}
+	for _, sid := range s.order {
+		fr := s.stores[sid].finalRank
+		if fr < 1 || fr > 99 {
+			t.Fatalf("%s の finalRank=%d が範囲外", sid, fr)
+		}
+		if prev, dup := seen[fr]; dup {
+			t.Fatalf("finalRank=%d が重複: %s と %s", fr, prev, sid)
+		}
+		seen[fr] = sid
+	}
+	if len(seen) != 99 {
+		t.Fatalf("finalRank の種類=%d, want 99", len(seen))
+	}
+}
+
+// 全店が同じ経路（executeCull → PersonalResult）を通り、最後に MatchEnd が全員へ届く。
+func TestCheckFinish_EveryoneGetsResultThenMatchEnd(t *testing.T) {
+	params := DefaultParameters()
+	params.Customer.Total = 0
+	s := newTestSessionWith(params, 10)
+	s.Start(0)
+
+	results := map[PlayerId]proto.PersonalResult{}
+	var ends int
+	for i := range s.params.Cull.Stages {
+		for _, o := range cullAt(s, i) {
+			switch m := o.Msg.(type) {
+			case proto.PersonalResult:
+				if _, dup := results[o.To.PlayerId]; dup {
+					t.Fatalf("%s が PersonalResult を2回受け取っている", o.To.PlayerId)
+				}
+				results[o.To.PlayerId] = m
+			case proto.MatchEnd:
+				ends++
+			}
+		}
+	}
+
+	if len(results) != 10 {
+		t.Fatalf("PersonalResult を受け取った店=%d, want 10（優勝者も同じ経路を通る）", len(results))
+	}
+	if ends != 10 {
+		t.Fatalf("MatchEnd=%d, want 10（全員へ1通ずつ）", ends)
+	}
+	// 優勝者にも finalRank=1 の PersonalResult が届いている。
+	var winners int
+	for sid, r := range results {
+		if r.FinalRank == 1 {
+			winners++
+			if r.Reason != "" {
+				t.Fatalf("優勝店 %s に脱落理由が付いている: %q", sid, r.Reason)
+			}
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("finalRank=1 の店が %d 店", winners)
+	}
+}
+
+// 予告は常時配信され、UntilMs が次ステージまでの残り時間と一致する。
+func TestCullWarning_AlwaysBroadcastWithCountdown(t *testing.T) {
+	params := DefaultParameters()
+	params.Customer.Total = 0
+	s := newTestSessionWith(params, 10)
+	s.Start(0)
+
+	out := s.Tick(5000)
+	warns := filterMsg[proto.ForcedEliminationWarning](out)
+	if len(warns) != 10 {
+		t.Fatalf("予告は生存店それぞれへ毎tick届くはず: %d件", len(warns))
+	}
+	w := warns[0]
+	if w.UntilMs != s.params.Cull.Stages[0].AtMs-5000 {
+		t.Fatalf("UntilMs=%d, want %d", w.UntilMs, s.params.Cull.Stages[0].AtMs-5000)
+	}
+	if w.StageIndex != 1 || w.StageTotal != CullStageCount {
+		t.Fatalf("StageIndex/Total=%d/%d, want 1/%d", w.StageIndex, w.StageTotal, CullStageCount)
+	}
+	// 予選の廃止フィールドには値を入れない。
+	if w.UntilTick != 0 || w.ThresholdPct != 0 {
+		t.Fatalf("廃止フィールドに値が入っている: %+v", w)
+	}
+
+	// さらに進めると残りが減る。
+	out = s.Tick(5000)
+	warns = filterMsg[proto.ForcedEliminationWarning](out)
+	if warns[0].UntilMs != s.params.Cull.Stages[0].AtMs-10000 {
+		t.Fatalf("UntilMs が減っていない: %d", warns[0].UntilMs)
+	}
+}
+
+// 予告の対象（CutStoreIds / SelfAtRisk）と実際に切られた店が一致する。
+func TestCullWarning_MatchesActualElimination(t *testing.T) {
+	params := DefaultParameters()
+	params.Customer.Total = 0
+	params.Cull.Stages[0] = CullStage{AtMs: 20000, TargetAliveCount: 7}
+	s := newTestSessionWith(params, 10)
+	s.Start(0)
+	for i, sid := range s.order {
+		s.stores[sid].score = i * 100
+	}
+
+	// 直前の予告を取る。
+	out := s.Tick(19000)
+	warns := filterMsg[proto.ForcedEliminationWarning](out)
+	if len(warns) != 10 {
+		t.Fatalf("予告が10件出ていない: %d", len(warns))
+	}
+	predicted := map[proto.StoreId]bool{}
+	for _, id := range warns[0].CutStoreIds {
+		predicted[id] = true
+	}
+	if len(predicted) != 3 {
+		t.Fatalf("予告の対象=%d店, want 3", len(predicted))
+	}
+	if warns[0].CutLineRank != 8 {
+		t.Fatalf("CutLineRank=%d, want 8（targetAliveCount+1）", warns[0].CutLineRank)
+	}
+
+	// selfAtRisk が予告対象と一致する。
+	atRisk := map[PlayerId]bool{}
+	for _, o := range out {
+		if w, ok := o.Msg.(proto.ForcedEliminationWarning); ok && w.SelfAtRisk {
+			atRisk[o.To.PlayerId] = true
+		}
+	}
+	if len(atRisk) != 3 {
+		t.Fatalf("selfAtRisk=true の店=%d, want 3", len(atRisk))
+	}
+
+	// 実際に切られた店と一致する。
+	out = cullAt(s, 0)
+	actual := map[proto.StoreId]bool{}
+	for _, e := range filterMsg[proto.StoreEliminated](out) {
+		actual[e.StoreId] = true
+	}
+	if len(actual) != len(predicted) {
+		t.Fatalf("予告と実行で数が違う: 予告=%d 実行=%d", len(predicted), len(actual))
+	}
+	for id := range predicted {
+		if !actual[id] {
+			t.Fatalf("予告された %s が実際には落ちていない", id)
+		}
+		if !atRisk[PlayerId(id)] {
+			t.Fatalf("%s が cutStoreIds にいるのに selfAtRisk=false", id)
+		}
+	}
+}
+
+// ★最終ステージだけ CutLineRank=2 で、1位は表示上「対象外」になる（plan-h22 §3.2）。
+// 処理層は全店脱落のまま。
+func TestCullWarning_FinalStageShowsRankTwoButCutsEveryone(t *testing.T) {
+	params := DefaultParameters()
+	params.Customer.Total = 0
+	s := newTestSessionWith(params, 10)
+	s.Start(0)
+	for i, sid := range s.order {
+		s.stores[sid].score = i * 100
+	}
+
+	// 最終ステージの直前まで進める（中間ステージは10店なので全部スキップされる）。
+	last := len(s.params.Cull.Stages) - 1
+	out := s.Tick(s.params.Cull.Stages[last].AtMs - 1000)
+	warns := filterMsg[proto.ForcedEliminationWarning](out)
+	if len(warns) == 0 {
+		t.Fatal("最終ステージの予告が出ていない")
+	}
+	w := warns[0]
+	if w.CutLineRank != 2 {
+		t.Fatalf("最終ステージの CutLineRank=%d, want 2（表示層）", w.CutLineRank)
+	}
+	// 表示層: 最強の s-10（1位）は対象外。
+	if len(w.CutStoreIds) != 9 {
+		t.Fatalf("CutStoreIds=%d件, want 9（1位を除く）", len(w.CutStoreIds))
+	}
+	for _, id := range w.CutStoreIds {
+		if id == "s-10" {
+			t.Fatal("1位の s-10 が表示上の脱落対象に入っている")
+		}
+	}
+	for _, o := range out {
+		if ww, ok := o.Msg.(proto.ForcedEliminationWarning); ok && o.To.PlayerId == "s-10" && ww.SelfAtRisk {
+			t.Fatal("1位に selfAtRisk=true が届いている（CutLineRank=2 と矛盾する）")
+		}
+	}
+
+	// 処理層: 全店脱落する。
+	out = cullAt(s, last)
+	if got := len(filterMsg[proto.StoreEliminated](out)); got != 10 {
+		t.Fatalf("最終ステージの脱落=%d店, want 10（1位も落ちる）", got)
+	}
+	if s.aliveCount != 0 {
+		t.Fatalf("生存=%d, want 0", s.aliveCount)
+	}
+}
+
+// 大きい dt で複数ステージを跨いでも、1ステージずつ順に消化される。
+func TestStepCull_CatchesUpAcrossStages(t *testing.T) {
+	params := DefaultParameters()
+	params.Customer.Total = 0
+	s := newTestSessionWith(params, 99)
+	s.Start(0)
+
+	// 1tick で最終ステージまで飛ばす。
+	last := len(s.params.Cull.Stages) - 1
+	s.Tick(s.params.Cull.Stages[last].AtMs)
+
+	if s.cullStageIdx != len(s.params.Cull.Stages) {
+		t.Fatalf("cullStageIdx=%d, want %d", s.cullStageIdx, len(s.params.Cull.Stages))
+	}
+	if s.aliveCount != 0 || s.state != Finished {
+		t.Fatalf("alive=%d state=%v, want 0/Finished", s.aliveCount, s.state)
+	}
+	// 途中のステージを飛ばしていない＝finalRank が 1..99 で埋まる。
+	seen := map[int]bool{}
+	for _, sid := range s.order {
+		seen[s.stores[sid].finalRank] = true
+	}
+	if len(seen) != 99 {
+		t.Fatalf("finalRank の種類=%d, want 99（ステージを飛ばしている）", len(seen))
+	}
+}
+
+// MatchStart の公開パラメータに cullSchedule が載る（非nil・全ステージ）。
+func TestPublicParams_CarriesCullSchedule(t *testing.T) {
+	s := newTestSession(3)
+	p := s.publicParams()
+
+	if len(p.CullSchedule) != CullStageCount {
+		t.Fatalf("cullSchedule=%d件, want %d", len(p.CullSchedule), CullStageCount)
+	}
+	for i, st := range p.CullSchedule {
+		want := s.params.Cull.Stages[i]
+		if st.AtMs != want.AtMs || st.TargetAliveCount != want.TargetAliveCount {
+			t.Fatalf("cullSchedule[%d]=%+v, want %+v", i, st, want)
+		}
+	}
+
+	// nil スライスは JSON で null になり C#/TS 側が落ちる。必ず配列で出す。
+	b, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(b), `"cullSchedule":null`) {
+		t.Fatalf("cullSchedule が null で出ている: %s", b)
 	}
 }

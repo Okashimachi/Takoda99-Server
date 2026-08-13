@@ -32,7 +32,7 @@ type GameParameters struct {
 	Sanity       SanityParams       `json:"sanity"`
 	Phase        PhaseParams        `json:"phase"`
 	Heat         HeatParams         `json:"heat"`
-	Storm        StormParams        `json:"storm"`
+	Cull         CullParams         `json:"cull"`
 	Distribution DistributionParams `json:"distribution"`
 	Presentation PresentationParams `json:"presentation"`
 	Bot          BotParams          `json:"bot"`
@@ -126,12 +126,34 @@ type HeatParams struct {
 	MaxLevel int `json:"maxLevel"`
 }
 
-// StormParams: 下位淘汰（定期的に下位%を強制脱落）。
-type StormParams struct {
-	IntervalTicks int     `json:"intervalTicks"`
-	WarnTicks     int     `json:"warnTicks"`
-	ThresholdPct  float64 `json:"thresholdPct"`
+// CullStage: 段階的足切りの1ステージ（本戦・plan-h22）。
+//
+// AtMs に到達した時点で、生存数が TargetAliveCount になるまでスコア下位から脱落させる。
+// 最終ステージは TargetAliveCount=0（＝全店脱落＝試合終了）。
+type CullStage struct {
+	AtMs             int `json:"atMs"`
+	TargetAliveCount int `json:"targetAliveCount"`
 }
+
+// CullParams: 時刻足切りのスケジュール（本戦・plan-h22）。
+//
+// 予選の storm（tick周期で下位%を切る）を置き換えたもの。**下位%ではなく目標生存数**なのは、
+// %指定だと現在の生存数に依存して結果が揺れるため。目標生存数なら脱落カーブを直接設計でき、
+// Bot の強さのばらつきが脱落人数に波及しない。調整変数も targetAliveCount の1本に絞れる。
+//
+// ⚠ **Stages は slice ではなく配列**。Go では配列は要素が comparable なら `==` 可能なので、
+// AGENTS.md §1.3 の「map / slice をフィールドに入れない」を満たす。
+// ワイヤ（proto の GameParametersPublicSubset.CullSchedule）は slice なので、公開時に変換する。
+//
+// 🔴 段階数を変えるときは Validate と既定値を必ず一緒に直すこと。
+// encoding/json は**要素数が足りない JSON を渡されると残りをゼロ値で埋める**ため、
+// 「0秒時点で生存0＝開始直後に全店即死」が黙って成立してしまう（§2.2 のゼロ埋めの罠）。
+type CullParams struct {
+	Stages [CullStageCount]CullStage `json:"stages"`
+}
+
+// CullStageCount は足切りの段階数。20秒等間隔×6段階で企画確定（plan-h22 §1）。
+const CullStageCount = 6
 
 // DistributionParams: 客の分配（restPool→店の行列）。
 //
@@ -182,11 +204,8 @@ func (gp GameParameters) Validate() error {
 	if gp.Heat.MaxLevel <= 0 {
 		return fmt.Errorf("heat.maxLevel は正である必要 (got %d)", gp.Heat.MaxLevel)
 	}
-	if gp.Storm.IntervalTicks < 0 {
-		return fmt.Errorf("storm.intervalTicks は非負である必要 (got %d)", gp.Storm.IntervalTicks)
-	}
-	if gp.Storm.ThresholdPct < 0 || gp.Storm.ThresholdPct > 1 {
-		return fmt.Errorf("storm.thresholdPct は 0..1 の範囲である必要 (got %f)", gp.Storm.ThresholdPct)
+	if err := gp.Cull.validate(); err != nil {
+		return err
 	}
 	if gp.Phase.MidAliveThreshold < 0 {
 		return fmt.Errorf("phase.midAliveThreshold は非負である必要 (got %d)", gp.Phase.MidAliveThreshold)
@@ -217,6 +236,52 @@ func (gp GameParameters) Validate() error {
 	}
 	return nil
 }
+
+// validate は足切りスケジュールの破綻値を弾く（plan-h22 §2.2）。
+//
+// 🔴 **ゼロ埋めの罠がここの存在理由。** encoding/json は配列に要素数が足りない JSON を
+// 渡されると残りをゼロ値で埋める。config-front から5要素で保存されると
+// Stages[5] = {AtMs:0, TargetAliveCount:0} になり、これは「0秒時点で生存0＝
+// 開始直後に全店即死」を意味する。当日これが起きたら試合が成立しない。
+// AtMs > 0 と厳密増加の2つでゼロ埋めを検出できる。
+func (cp CullParams) validate() error {
+	prevAt := 0
+	prevTarget := -1
+	for i, st := range cp.Stages {
+		if st.AtMs <= 0 {
+			return fmt.Errorf("cull.stages[%d].atMs は正である必要 (got %d)。"+
+				"段階数が %d に足りない JSON を保存するとゼロ埋めでここに来る", i, st.AtMs, CullStageCount)
+		}
+		if st.AtMs <= prevAt {
+			return fmt.Errorf("cull.stages[%d].atMs は厳密に増加する必要 (got %d, 前段 %d)", i, st.AtMs, prevAt)
+		}
+		if st.TargetAliveCount < 0 {
+			return fmt.Errorf("cull.stages[%d].targetAliveCount は非負である必要 (got %d)", i, st.TargetAliveCount)
+		}
+		if prevTarget >= 0 && st.TargetAliveCount > prevTarget {
+			return fmt.Errorf("cull.stages[%d].targetAliveCount は単調非増加である必要 (got %d, 前段 %d)",
+				i, st.TargetAliveCount, prevTarget)
+		}
+		last := i == len(cp.Stages)-1
+		if last && st.TargetAliveCount != 0 {
+			return fmt.Errorf("最終ステージ cull.stages[%d].targetAliveCount は 0 である必要 (got %d)。"+
+				"120秒で全店が脱落して試合が終わる", i, st.TargetAliveCount)
+		}
+		if !last && st.TargetAliveCount <= 0 {
+			return fmt.Errorf("cull.stages[%d].targetAliveCount は正である必要 (got %d)。"+
+				"最終ステージより前で生存0にすると試合が途中で終わる", i, st.TargetAliveCount)
+		}
+		prevAt = st.AtMs
+		prevTarget = st.TargetAliveCount
+	}
+	return nil
+}
+
+// MatchDurationMs は試合時間（＝最終ステージの時刻）を返す。
+//
+// **これが試合の唯一のデッドライン**。別建ての「制限時間」パラメータを足さないこと
+// （時間の情報源が2つになり、片方だけ更新されて食い違う。AGENTS.md §8）。
+func (cp CullParams) MatchDurationMs() int { return cp.Stages[len(cp.Stages)-1].AtMs }
 
 // DefaultParameters はリモートコンフィグ取得失敗時のフォールバック内蔵デフォルト。
 func DefaultParameters() GameParameters {
@@ -264,10 +329,20 @@ func DefaultParameters() GameParameters {
 			// odai.MaxWordLevel（辞書の上端）と一致させる。
 			MaxLevel: 17,
 		},
-		Storm: StormParams{
-			IntervalTicks: 200,
-			WarnTicks:     30,
-			ThresholdPct:  0.10,
+		// 20秒等間隔×6段階（plan-h22 §1・企画確定）。
+		//
+		// 動かしてよい: 中間ステージ #2〜#4 の targetAliveCount
+		// 動かしてはいけない: 20秒等間隔 / 120秒（＝ゲーム時間）/ #5 の 10人（＝決勝の人数）/
+		//                     #1 が20秒より早くなること（どれだけ弱くても20秒は遊べる保証）
+		Cull: CullParams{
+			Stages: [CullStageCount]CullStage{
+				{AtMs: 20000, TargetAliveCount: 75},
+				{AtMs: 40000, TargetAliveCount: 55},
+				{AtMs: 60000, TargetAliveCount: 35},
+				{AtMs: 80000, TargetAliveCount: 20},
+				{AtMs: 100000, TargetAliveCount: 10},
+				{AtMs: 120000, TargetAliveCount: 0},
+			},
 		},
 		Distribution: DistributionParams{
 			QueueRefillThreshold: 5,

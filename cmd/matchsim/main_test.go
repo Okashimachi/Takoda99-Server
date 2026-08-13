@@ -70,7 +70,7 @@ func TestReportRun_ShowsBalanceMaterial(t *testing.T) {
 	reportRun(&buf, r, 1)
 	out := buf.String()
 
-	for _, want := range []string{"決着", "最終フェーズ", "最終heatLevel", "優勝", "脱落内訳", "生存数の推移"} {
+	for _, want := range []string{"決着", "最終フェーズ", "最終heatLevel", "優勝", "脱落", "足切りカーブ", "生存数の推移"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("レポートに %q が無い:\n%s", want, out)
 		}

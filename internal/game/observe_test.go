@@ -87,41 +87,20 @@ func TestObserve_StoreBoardFinalRank(t *testing.T) {
 	}
 }
 
-// StormState は予告フラグ・残tick・閾値を返す。
-func TestObserve_StormState(t *testing.T) {
-	s := newTestSession(3)
-	sp := s.params.Storm
 
-	// 予告前
-	if v := s.StormState(); v.Warning {
-		t.Fatalf("予告前は Warning=false のはず: %+v", v)
-	}
-
-	// 予告中を模擬（stepStorm が立てるフィールドを直接セット）
-	s.stormWarnSent = true
-	s.stormTickCounter = sp.IntervalTicks - 3
-	v := s.StormState()
-	if !v.Warning {
-		t.Fatal("Warning=true のはず")
-	}
-	if v.UntilTick != 3 {
-		t.Fatalf("UntilTick=%d, want 3", v.UntilTick)
-	}
-	if v.ThresholdPct != sp.ThresholdPct {
-		t.Fatalf("ThresholdPct=%v, want %v", v.ThresholdPct, sp.ThresholdPct)
-	}
-}
-
-// StoreBoard の AtRisk が storm の淘汰対象集合(cullTargets)と一致する（配線確認）。
+// StoreBoard の AtRisk が次の足切りの対象集合(cullTargetIds)と一致する（配線確認）。
 func TestObserve_StoreBoardAtRiskMatchesCull(t *testing.T) {
 	s := newTestSession(5)
+	// 5店なので、既定の第1ステージ（目標75）だと切る数が負になり対象0になる。
+	// 対象が出る目標に差し替える。
+	s.params.Cull.Stages[0] = CullStage{AtMs: 20000, TargetAliveCount: 3}
 	// 生存店に異なるスコアを与える（弱い順が決まるように）。
 	scores := map[PlayerId]int{"s-1": 900, "s-2": 100, "s-3": 500, "s-4": 200, "s-5": 700}
 	for id, sc := range scores {
 		s.stores[id].score = sc
 	}
 
-	want := s.cullTargets()
+	want := s.cullTargetIds()
 	if len(want) == 0 {
 		t.Fatal("前提: 淘汰対象が1店以上あるはず")
 	}
@@ -161,5 +140,44 @@ func TestObserve_PhaseHeatAndInitialPool(t *testing.T) {
 	}
 	if s.HeatLevel() < 0 {
 		t.Fatalf("HeatLevel=%d, want >=0", s.HeatLevel())
+	}
+}
+
+// CullState は次のステージ番号・残り時間・目標生存数・カットラインを返す。
+func TestObserve_CullState(t *testing.T) {
+	s := newTestSession(3)
+	stages := s.params.Cull.Stages
+
+	// 開始直後は第1ステージへ向かっている。
+	v := s.CullState()
+	if v.StageIndex != 1 || v.StageTotal != len(stages) {
+		t.Fatalf("StageIndex/Total=%d/%d, want 1/%d", v.StageIndex, v.StageTotal, len(stages))
+	}
+	if v.UntilMs != stages[0].AtMs {
+		t.Fatalf("UntilMs=%d, want %d", v.UntilMs, stages[0].AtMs)
+	}
+	if v.TargetAliveCount != stages[0].TargetAliveCount {
+		t.Fatalf("TargetAliveCount=%d, want %d", v.TargetAliveCount, stages[0].TargetAliveCount)
+	}
+	if v.CutLineRank != stages[0].TargetAliveCount+1 {
+		t.Fatalf("CutLineRank=%d, want %d", v.CutLineRank, stages[0].TargetAliveCount+1)
+	}
+
+	// 時間が進むと残りが減る。
+	s.elapsedMs = int64(stages[0].AtMs) - 3000
+	if got := s.CullState().UntilMs; got != 3000 {
+		t.Fatalf("UntilMs=%d, want 3000", got)
+	}
+
+	// 最終ステージだけ CutLineRank=2（表示層・plan-h22 §3.2）。
+	s.cullStageIdx = len(stages) - 1
+	if got := s.CullState().CutLineRank; got != 2 {
+		t.Fatalf("最終ステージの CutLineRank=%d, want 2", got)
+	}
+
+	// 全ステージ消化済みなら StageIndex=0。
+	s.cullStageIdx = len(stages)
+	if got := s.CullState(); got.StageIndex != 0 || got.UntilMs != 0 {
+		t.Fatalf("消化済みで %+v, want StageIndex=0 UntilMs=0", got)
 	}
 }

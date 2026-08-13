@@ -147,16 +147,21 @@ func (s *Session) Tick(dtMs int) []Outbound
 2. stepDistribute … 客分配（restPool→行列）。重みは行列の短さのみ
 3. stepRank       … 生存店をスコア降順に並べて rank → EvaluationUpdate
 4. stepHeat       … 火力（お題難度）更新
-5. stepStorm      … 下位淘汰の予告・実行  ← ⚠ 予選仕様。h22 で stepCull（時刻足切り）に置換
-6. checkFinish    … 終了条件・順位確定・MatchEnd ← ⚠ 同上（h22 で「120秒に全店脱落」へ）
+5. stepCull       … 時刻足切りの実行・予告（常時）
+6. checkFinish    … 最終ステージ到達（生存0）で終了・MatchEnd
 ```
 
 順序には意味がある。`stepPhase` が先なのは分配の Claimer 解禁判定に要るため、
-`stepStorm` が `stepRank` の後なのは淘汰判定に rank/スコアが要るため。
+`stepCull` が `stepRank` の後なのは足切り対象の選定に**その tick のスコア順位**が要るため。
 
-**本戦（plan-h21）で消えたステップ**: `stepPatience`（我慢ゲージ→離脱→信用減→自滅脱落）と
-`stepEvaluate`（バズ加点の時間減衰）。スコアは `ApplyOrderServed` で加算されるので、
-tick 側にスコアの処理は無い。
+**消えたステップ**: `stepPatience`（我慢ゲージ→離脱→信用減→自滅脱落）と
+`stepEvaluate`（バズ加点の時間減衰）と `stepNormalize`（パーセンタイル化）— plan-h21。
+`stepStorm`（tick周期の下位%淘汰）— plan-h22。
+スコアは `ApplyOrderServed` で加算されるので、tick 側にスコアの処理は無い。
+
+**決着は `cull.stages` の最終ステージ（120秒）で全店が同時に脱落して起きる。**
+「生存1店で終了」はもう無い（残った1店だけが試合に取り残される状態を作らないため）。
+勝者の特別扱いはサーバーが持たず、1位も他店と同じ経路で PersonalResult を受け取る。
 
 - **per-store 状態**は `storeState` が集約：**スコア（累積の絶対値）**・行列・提供済み客数・順位。
   信用（ライフ）・評価EMA・パーセンタイル正規化・バズ加点は**廃止済み**（復活させない）。
