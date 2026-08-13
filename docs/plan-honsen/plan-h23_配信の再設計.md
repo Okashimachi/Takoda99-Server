@@ -177,6 +177,40 @@ proto.StoreEliminatedBatch → proto.TypeStoreEliminatedBatch
 
 > h20-A で `internal/proto/messages.go` への再輸出が済んでいる前提。
 
+### 5.1 🔴 廃止型の**再輸出そのものを削除する**（SA1019 除外を外すための必須作業）
+
+**h20-A の実測**（抑止を外して `golangci-lint run` した結果）:
+
+```
+27  internal/game/session_test.go   … h21/h22 の書き換えで自然に消える
+ 5  internal/proto/messages.go      … ★自然には消えない
+ 1  internal/app/headless_test.go   … h21/h22 で消える
+ 0  internal/proto/wire_golden_test.go（クリーン）
+```
+
+`internal/proto/messages.go` の5件は、**ラッパが廃止型を名指しして再輸出している限り必ず SA1019 になる**。
+つまり h21〜h23 を進めても消えず、**このままでは §7 の「除外を外して緑」が達成不可能**。
+
+**対応：本 plan で以下の再輸出を削除する。**
+
+| 削除する再輸出 | 根拠 |
+|---|---|
+| `CustomerLeft` / `LeaveReason` / `LeaveTimeout` | 客が逃げないので送信しない（h21 で処理を削除済み） |
+| `CreditUpdate` / `CreditReason` / `CreditCustomerLeft` | 信用制の廃止（h21 で処理を削除済み） |
+| `StoreListUpdate` / `TypeStoreListUpdate` | 本 plan で定期配信を停止し、Ranking 系へ置換した |
+
+**サーバーがこれらを送らなくなった以上、ラッパが再輸出し続ける理由がない。**
+（proto 本体では方式Bで定義が残るので、契約は壊れない。Unity は引き続き受け取れる。）
+
+**副作用（意図した引退であって手戻りではない）**:
+
+- `internal/proto/wire_golden_test.go` の `StoreListUpdate` ケース2件を削除する
+- `envelopeOf` の `StoreListUpdate` 分岐を削除する（§5 の新3種の追加と同時に行う）
+
+> **これで「除外を外して緑」が本物の完了検知器になる。**
+> 代替案として `internal/proto/messages.go` のみファイル単位で nolint する手もあるが、
+> **検知器としての価値が失われる**ため採らない。
+
 ---
 
 ## 6. テスト（バグを注入して落ちることを確認する方式）
@@ -200,7 +234,12 @@ proto.StoreEliminatedBatch → proto.TypeStoreEliminatedBatch
 - [ ] `StoreEliminatedBatch` で足切りの脱落が1メッセージにまとまる
 - [ ] 足切り時・試合終了時の**配信順序が §3 のとおり固定**され、テストで守られている
 - [ ] `EvaluationUpdate` が 2〜4Hz に間引かれ、足切り直後は必ず送られる
-- [ ] `envelopeOf` に新3種が登録されている
+- [ ] `envelopeOf` に新3種が登録され、`StoreListUpdate` 分岐が削除されている
+- [ ] **`internal/proto/messages.go` から廃止型の再輸出が削除されている**（§5.1）
+      — `CustomerLeft` / `LeaveReason` / `LeaveTimeout` / `CreditUpdate` / `CreditReason` /
+      `CreditCustomerLeft` / `StoreListUpdate` / `TypeStoreListUpdate`
+- [ ] ゴールデンから `StoreListUpdate` のケースが削除されている（§5.1 の副作用）
 - [ ] **`.golangci.yml` の SA1019 除外を外して `golangci-lint run` が緑**
-      （＝廃止フィールドの参照がサーバーから消えた。plan-h20 §2.2 の解除条件）
+      （＝廃止フィールド**と廃止型**の参照がサーバーから消えた。plan-h20 §2.2 の解除条件）
+- [ ] 除外を外したまま**コミットする**（移行完了したので抑止はもう不要）
 - [ ] `go build` / `go vet` / `go test -race ./internal/game/...` が緑
