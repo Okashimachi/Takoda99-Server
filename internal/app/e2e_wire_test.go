@@ -33,7 +33,7 @@ func TestE2E_ClientWireFlow(t *testing.T) {
 	// 短時間で決着するよう調整値を設定。
 	deps := app.DefaultDeps()
 	deps.Params.Session.TickIntervalMs = 15
-	deps.Params.Session.PublishIntervalMs = 50
+	deps.Params.Publish.RankingIntervalMs = 50
 	deps.Params.Customer.Total = 20 // 少ない客で早期収束
 
 	var ids atomic.Int64

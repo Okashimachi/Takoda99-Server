@@ -63,7 +63,8 @@ type dummyStore struct {
 
 	// queue は session 側の storeQueues[id] を写した行列（先頭 = 対応中）。
 	// session は「行列先頭でない客」への OrderServed を弾くので、
-	// 来店(CustomerArrived)・離脱(CustomerLeft)・提供の3つで必ず同期を保つ。
+	// 来店(CustomerArrived)と提供の2つで必ず同期を保つ。
+	// （本戦では客が逃げないので、離脱による同期ズレはもう起きない。）
 	queue   []queuedOrder
 	current *pendingOrder
 }
@@ -76,21 +77,6 @@ func (d *dummyStore) arrive(v proto.CustomerView) {
 	})
 }
 
-// leave は我慢切れで帰った客を行列から外す。
-//
-// これを取りこぼすと、打鍵中の客が居なくなったのに current が残り続け、
-// その店は以後1人も捌けなくなる（＝ sim が実態と別物になる）。
-func (d *dummyStore) leave(cid proto.CustomerId) {
-	for i, q := range d.queue {
-		if q.customerId == cid {
-			d.queue = append(d.queue[:i], d.queue[i+1:]...)
-			break
-		}
-	}
-	if d.current != nil && d.current.customerId == cid {
-		d.current = nil
-	}
-}
 
 // step は dtMs ぶん打鍵を進め、打ち終わったら提供報告を返す。
 func (d *dummyStore) step(dtMs int, rng *rand.Rand) (proto.OrderServed, bool) {

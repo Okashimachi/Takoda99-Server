@@ -24,7 +24,7 @@ func TestScale_99Bots_RunsToCompletion(t *testing.T) {
 
 	params := game.DefaultParameters()
 	params.Session.TickIntervalMs = 15 // 高頻度tick
-	params.Session.PublishIntervalMs = 60
+	params.Publish.RankingIntervalMs = 60
 	params.Customer.Total = 50 // 少ない客で早期収束
 
 	const n = 99
@@ -46,7 +46,7 @@ func TestScale_99Bots_RunsToCompletion(t *testing.T) {
 	sess := game.NewSession("scale-99", params, odai.NewStaticPool(),
 		rand.New(rand.NewSource(99)), inits)
 	rm := room.New(sess, conns, params.Session.TickIntervalMs, room.RealClock{},
-		transport.NewFullPublisher(params.Session.PublishIntervalMs))
+		transport.NewRankingPublisher(params.Publish))
 
 	start := time.Now()
 	rm.Run(ctx) // Finished か ctx タイムアウトまでブロック
@@ -55,16 +55,18 @@ func TestScale_99Bots_RunsToCompletion(t *testing.T) {
 	_, aliveCount := sess.Snapshot()
 	t.Logf("99人試合: state=%v / 生存=%d / 実時間=%v", sess.State(), aliveCount, dur.Round(time.Millisecond))
 
-	// 現状の stub step では脱落が自然には発生しないため、aliveCount=1 まで到達しない。
-	// ここでは「デッドロックせず ctx タイムアウトまで走り切れる」ことの確認。
-	// step 実装後にアサーションを Finished + aliveCount<=1 に厳しくする。
+	// 本戦は cullSchedule の最終ステージ（既定120秒）で終わる。この試験は実時計で回すため
+	// ctx タイムアウト(40秒)の方が先に来ることがある。ここで見たいのは
+	// **デッドロックせず走り切れること・データ競合が無いこと(-race)**なので、
+	// 決着まで到達したかどうかは分岐して扱う。
 	if sess.State() == game.Finished {
 		t.Log("試合が Finished まで走った")
-		if aliveCount > 1 {
-			t.Fatalf("完走後の生存は1人以下のはず: got %d", aliveCount)
+		if aliveCount != 0 {
+			t.Fatalf("本戦は全店脱落で終わる。完走後の生存=%d, want 0", aliveCount)
 		}
 	} else {
-		t.Logf("試合が Finished にならなかった（stub step の可能性）: state=%v 生存=%d", sess.State(), aliveCount)
+		t.Logf("ctx タイムアウトが先に来た（決着は %dms 地点）: state=%v 生存=%d",
+			params.Cull.MatchDurationMs(), sess.State(), aliveCount)
 	}
 	cancel() // Bot goroutine を止める
 }

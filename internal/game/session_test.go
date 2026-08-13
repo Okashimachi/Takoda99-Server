@@ -63,6 +63,42 @@ func restCustomer(s *Session, cid proto.CustomerId, attr proto.CustomerAttribute
 	s.restPool = append(s.restPool, cid)
 }
 
+// assertZeroOnWire は「サーバーが値を入れない」廃止フィールドが、実際のワイヤ形式で
+// ゼロ値（または omitempty で欠落）になっていることを確かめる。
+//
+// 🔴 **廃止フィールドを Go の識別子で名指ししないこと。** 名指しすると staticcheck の
+// SA1019 になり、「移行が終わったか」を lint で検知する仕組み（plan-h20 §2.2）が死ぬ。
+// そもそも「サーバーは値を入れない」はワイヤ上の主張なので、JSON で見るほうが忠実。
+func assertZeroOnWire(t *testing.T, v any, keys ...string) {
+	t.Helper()
+	raw, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, k := range keys {
+		got, ok := m[k]
+		if !ok {
+			continue // omitempty で消えているのも「値を入れていない」
+		}
+		switch x := got.(type) {
+		case float64:
+			if x != 0 {
+				t.Fatalf("廃止フィールド %q に値が入っている: %v （ワイヤ: %s）", k, x, raw)
+			}
+		case string:
+			if x != "" {
+				t.Fatalf("廃止フィールド %q に値が入っている: %q （ワイヤ: %s）", k, x, raw)
+			}
+		default:
+			t.Fatalf("廃止フィールド %q の型が想定外: %T", k, got)
+		}
+	}
+}
+
 // ── テストケース ──────────────────────────────────────────────
 
 func TestSession_CountdownDelay(t *testing.T) {
@@ -374,7 +410,7 @@ func TestPublicParams_PresentationThresholds(t *testing.T) {
 // Textro #78 の類型: 種別で時間切れ判定を分岐した結果、一部の種別がタイムアウトから
 // 漏れ、キューの先頭が永遠に消化されず固まった。
 //
-// Takoda の相当機構は「客の我慢ゲージ → CustomerLeft / 信用減」。属性ごとに離脱の
+// Takoda の相当機構は「客の我慢ゲージ → 離脱 → 信用減」だった。属性ごとに離脱の
 // 発火可否を分岐すると、漏れた属性の客が行列に居座って店の対応が永久に止まる。
 // 属性差は「減算量やペナルティ量」で表現し、**離脱が起きうること自体は全属性で不変**。
 
@@ -565,10 +601,8 @@ func TestStepRank_ScoreDescending(t *testing.T) {
 		if ev.Rank != s.stores[o.To.PlayerId].rank {
 			t.Fatalf("配信 rank と店の rank が食い違う: %d vs %d", ev.Rank, s.stores[o.To.PlayerId].rank)
 		}
-		// 相対評価は廃止。ゼロ値のまま送る。
-		if ev.EvalRaw != 0 || ev.Normalized != 0 || ev.StarRating != 0 || ev.StarDelta != 0 {
-			t.Fatalf("廃止フィールドに値が入っている: %+v", ev)
-		}
+		// 相対評価・星は廃止。ゼロ値のまま送る。
+		assertZeroOnWire(t, ev, "evalRaw", "normalized", "starRating", "starDelta")
 	}
 }
 
@@ -725,11 +759,15 @@ func TestStepDistribute_IgnoresScore(t *testing.T) {
 	}
 }
 
-// 我慢ゲージ・信用が廃止され、CustomerLeft / CreditUpdate が一切出ない。
+// tick が本戦で使う種類のメッセージしか返さない。
 //
-// 客を行列に置いたまま長時間 tick を回しても、離脱も信用減も起きない
-// （＝「一度出たお題は必ず打ち切られる」）。
-func TestTick_NoLeaveOrCreditMessages(t *testing.T) {
+// 我慢ゲージ・信用の廃止で CustomerLeft / CreditUpdate は internal/proto の再輸出ごと
+// 消えた（h23 §5.1）ので、型を名指しで検査することはもうできない。代わりに
+// **許可リストにない型が出たら落とす**形にした。廃止処理が復活したらここで気づける。
+//
+// 客を行列に置いたまま長時間 tick を回しても離脱も信用減も起きないこと
+// （＝「一度出たお題は必ず打ち切られる」）も同時に見ている。
+func TestTick_EmitsOnlyHonsenMessages(t *testing.T) {
 	params := DefaultParameters()
 	params.Customer.Total = 0
 	s := newTestSessionWith(params, 3)
@@ -740,13 +778,23 @@ func TestTick_NoLeaveOrCreditMessages(t *testing.T) {
 		placeAssigned(s, proto.CustomerId("c-"+string(sid)), sid, proto.AttrNormal, 1, 10)
 	}
 
+	allowed := map[string]bool{
+		"proto.EvaluationUpdate":         true,
+		"proto.ForcedEliminationWarning": true,
+		"proto.CustomerView":             true,
+		"proto.DifficultyUpdate":         true,
+		"proto.PhaseChange":              true,
+		"proto.StoreEliminatedBatch":     true,
+		"proto.RankingSnapshot":          true,
+		"proto.PersonalResult":           true,
+		"proto.MatchEnd":                 true,
+	}
 	for i := 0; i < 200; i++ {
 		out := s.Tick(1000) // 合計200秒。予選なら全員とっくに離脱している
-		if got := filterMsg[proto.CustomerLeft](out); len(got) > 0 {
-			t.Fatalf("CustomerLeft が出た（客は逃げないはず）: %+v", got)
-		}
-		if got := filterMsg[proto.CreditUpdate](out); len(got) > 0 {
-			t.Fatalf("CreditUpdate が出た（信用制は廃止のはず）: %+v", got)
+		for _, o := range out {
+			if name := fmt.Sprintf("%T", o.Msg); !allowed[name] {
+				t.Fatalf("許可されていないメッセージが出た: %s（廃止処理の復活を疑う）", name)
+			}
 		}
 	}
 
@@ -773,9 +821,7 @@ func TestAdmitCustomer_NoPatienceFields(t *testing.T) {
 		t.Fatal("admitCustomer が失敗した")
 	}
 	cv := ob.Msg.(proto.CustomerView)
-	if cv.PatienceMaxMs != 0 || cv.PatienceStartedAtServerMs != 0 {
-		t.Fatalf("我慢ゲージの値が載っている: %+v", cv)
-	}
+	assertZeroOnWire(t, cv, "patienceMaxMs", "patienceStartedAtServerMs")
 	if cv.OrderCount != 2 || len(cv.Words) != 2 {
 		t.Fatalf("お題が2語配られるはず: %+v", cv)
 	}
@@ -795,9 +841,7 @@ func TestPublicParams_ScoreWeightsAndNoRetiredKeys(t *testing.T) {
 		t.Fatalf("maxStores=%d, want 3", p.MaxStores)
 	}
 	// 廃止フィールドはゼロ値のまま（クライアントに「効く値」と誤解させない）。
-	if p.InitialLife != 0 || p.StormThresholdPct != 0 || p.PatienceLateMul != 0 || p.PatienceAlertMs != 0 {
-		t.Fatalf("廃止フィールドに値が入っている: %+v", p)
-	}
+	assertZeroOnWire(t, p, "initialLife", "stormThresholdPct", "patienceLateMul", "patienceAlertMs")
 
 	b, err := json.Marshal(p)
 	if err != nil {
@@ -839,13 +883,8 @@ func TestPersonalResult_CarriesScoreNotCredit(t *testing.T) {
 	if got.Stats.TotalMisses != 3 {
 		t.Fatalf("TotalMisses=%d, want 3", got.Stats.TotalMisses)
 	}
-	// 廃止フィールドは入れない。
-	if got.Reason != "" {
-		t.Fatalf("Reason に値が入っている: %q（脱落経路は足切りの1本のみ）", got.Reason)
-	}
-	if got.CreditLeft != 0 || got.EvalRaw != 0 || got.EvalNormalized != 0 {
-		t.Fatalf("廃止フィールドに値が入っている: %+v", got)
-	}
+	// 廃止フィールドは入れない（reason は omitempty なのでキーごと消える）。
+	assertZeroOnWire(t, got, "reason", "creditLeft", "evalRaw", "evalNormalized")
 }
 
 // 客が逃げないので LeftCount / AttributeTally.Left は常に 0（集計欄は残す）。
@@ -894,6 +933,15 @@ func TestMatchStats_NoServeIsSafe(t *testing.T) {
 // ── 本戦: 時刻足切りと決着（plan-h22）──────────────────────
 
 // cullAt は指定ステージの時刻へ一気に進めて tick を1回回す。
+// eliminated は足切りバーストから脱落エントリを取り出す（h23 で Batch に畳まれた）。
+func eliminated(out []Outbound) []proto.StoreEliminated {
+	var all []proto.StoreEliminated
+	for _, b := range filterMsg[proto.StoreEliminatedBatch](out) {
+		all = append(all, b.Entries...)
+	}
+	return all
+}
+
 func cullAt(s *Session, stageIdx int) []Outbound {
 	target := int64(s.params.Cull.Stages[stageIdx].AtMs)
 	return s.Tick(int(target - s.elapsedMs))
@@ -925,7 +973,7 @@ func TestStepCull_NobodyEliminatedBeforeFirstStage(t *testing.T) {
 	firstAt := s.params.Cull.Stages[0].AtMs
 	for s.elapsedMs < int64(firstAt)-int64(params.Session.TickIntervalMs) {
 		out := s.Tick(params.Session.TickIntervalMs)
-		if elim := filterMsg[proto.StoreEliminated](out); len(elim) > 0 {
+		if elim := eliminated(out); len(elim) > 0 {
 			t.Fatalf("%dms 時点で脱落が発生した（第1ステージは %dms）: %+v", s.elapsedMs, firstAt, elim)
 		}
 	}
@@ -950,7 +998,7 @@ func TestStepCull_CutsLowestScoresFirst(t *testing.T) {
 
 	out := cullAt(s, 0)
 	elim := map[PlayerId]int{}
-	for _, e := range filterMsg[proto.StoreEliminated](out) {
+	for _, e := range eliminated(out) {
 		elim[e.StoreId] = e.FinalRank
 	}
 	if len(elim) != 6 {
@@ -982,7 +1030,7 @@ func TestStepCull_SkipsWhenAlreadyBelowTarget(t *testing.T) {
 	s.Start(0)
 
 	out := cullAt(s, 0)
-	if elim := filterMsg[proto.StoreEliminated](out); len(elim) > 0 {
+	if elim := eliminated(out); len(elim) > 0 {
 		t.Fatalf("目標を既に下回っているのに脱落が発生した: %+v", elim)
 	}
 	if s.aliveCount != 5 {
@@ -1069,9 +1117,8 @@ func TestCheckFinish_EveryoneGetsResultThenMatchEnd(t *testing.T) {
 	for sid, r := range results {
 		if r.FinalRank == 1 {
 			winners++
-			if r.Reason != "" {
-				t.Fatalf("優勝店 %s に脱落理由が付いている: %q", sid, r.Reason)
-			}
+			// 優勝店にも脱落理由は付かない（脱落経路が足切りの1本だけになったため）。
+			t.Run("winner="+string(sid), func(t *testing.T) { assertZeroOnWire(t, r, "reason") })
 		}
 	}
 	if winners != 1 {
@@ -1099,9 +1146,7 @@ func TestCullWarning_AlwaysBroadcastWithCountdown(t *testing.T) {
 		t.Fatalf("StageIndex/Total=%d/%d, want 1/%d", w.StageIndex, w.StageTotal, CullStageCount)
 	}
 	// 予選の廃止フィールドには値を入れない。
-	if w.UntilTick != 0 || w.ThresholdPct != 0 {
-		t.Fatalf("廃止フィールドに値が入っている: %+v", w)
-	}
+	assertZeroOnWire(t, w, "untilTick", "thresholdPct")
 
 	// さらに進めると残りが減る。
 	out = s.Tick(5000)
@@ -1153,7 +1198,7 @@ func TestCullWarning_MatchesActualElimination(t *testing.T) {
 	// 実際に切られた店と一致する。
 	out = cullAt(s, 0)
 	actual := map[proto.StoreId]bool{}
-	for _, e := range filterMsg[proto.StoreEliminated](out) {
+	for _, e := range eliminated(out) {
 		actual[e.StoreId] = true
 	}
 	if len(actual) != len(predicted) {
@@ -1208,7 +1253,7 @@ func TestCullWarning_FinalStageShowsRankTwoButCutsEveryone(t *testing.T) {
 
 	// 処理層: 全店脱落する。
 	out = cullAt(s, last)
-	if got := len(filterMsg[proto.StoreEliminated](out)); got != 10 {
+	if got := len(eliminated(out)); got != 10 {
 		t.Fatalf("最終ステージの脱落=%d店, want 10（1位も落ちる）", got)
 	}
 	if s.aliveCount != 0 {
@@ -1265,5 +1310,252 @@ func TestPublicParams_CarriesCullSchedule(t *testing.T) {
 	}
 	if strings.Contains(string(b), `"cullSchedule":null`) {
 		t.Fatalf("cullSchedule が null で出ている: %s", b)
+	}
+}
+
+// ── 本戦: 配信順序（plan-h23 §3）─────────────────────────────
+
+// msgNames は Outbound の型名を順番に並べた列を返す（順序契約の検査用）。
+func msgNames(out []Outbound) []string {
+	names := make([]string, 0, len(out))
+	for _, o := range out {
+		names = append(names, fmt.Sprintf("%T", o.Msg))
+	}
+	return names
+}
+
+// firstIndexOf は型名が最初に現れた位置（無ければ -1）。
+func firstIndexOf(names []string, want string) int {
+	for i, n := range names {
+		if n == want {
+			return i
+		}
+	}
+	return -1
+}
+
+// lastIndexOf は型名が最後に現れた位置（無ければ -1）。
+func lastIndexOf(names []string, want string) int {
+	for i := len(names) - 1; i >= 0; i-- {
+		if names[i] == want {
+			return i
+		}
+	}
+	return -1
+}
+
+// 🔴 足切りステージの配信順序（plan-h23 §3.1）。
+//
+//	1. StoreEliminatedBatch → 2. PersonalResult → 3. EvaluationUpdate
+//	→ 4. RankingSnapshot → 5. ForcedEliminationWarning
+//
+// **順位を配る前に脱落を配る。** 逆順だと脱落者を含んだ順位が一瞬表示される（予選 4-A）。
+// game が append した順序がそのまま配信順序になるので、ここが契約そのもの。
+func TestCullBurst_OutboundOrder(t *testing.T) {
+	params := DefaultParameters()
+	params.Customer.Total = 0
+	params.Cull.Stages[0] = CullStage{AtMs: 20000, TargetAliveCount: 6}
+	s := newTestSessionWith(params, 10)
+	s.Start(0)
+	for i, sid := range s.order {
+		s.stores[sid].score = i * 100
+	}
+
+	names := msgNames(cullAt(s, 0))
+
+	batch := firstIndexOf(names, "proto.StoreEliminatedBatch")
+	result := firstIndexOf(names, "proto.PersonalResult")
+	lastResult := lastIndexOf(names, "proto.PersonalResult")
+	eval := firstIndexOf(names, "proto.EvaluationUpdate")
+	lastEval := lastIndexOf(names, "proto.EvaluationUpdate")
+	snap := firstIndexOf(names, "proto.RankingSnapshot")
+	warn := firstIndexOf(names, "proto.ForcedEliminationWarning")
+
+	for name, idx := range map[string]int{
+		"StoreEliminatedBatch": batch, "PersonalResult": result,
+		"EvaluationUpdate": eval, "RankingSnapshot": snap, "ForcedEliminationWarning": warn,
+	} {
+		if idx < 0 {
+			t.Fatalf("%s が配信されていない: %v", name, names)
+		}
+	}
+
+	if batch >= result {
+		t.Fatalf("1.StoreEliminatedBatch は 2.PersonalResult より前のはず: %v", names)
+	}
+	if lastResult >= eval {
+		t.Fatalf("2.PersonalResult は 3.EvaluationUpdate より前のはず: %v", names)
+	}
+	if lastEval >= snap {
+		t.Fatalf("3.EvaluationUpdate は 4.RankingSnapshot より前のはず: %v", names)
+	}
+	if snap >= warn {
+		t.Fatalf("4.RankingSnapshot は 5.ForcedEliminationWarning より前のはず: %v", names)
+	}
+
+	// バーストより前に EvaluationUpdate が出ていないこと。
+	// 出ていると「脱落者を含んだ古い順位 → 脱落 → 新しい順位」の順で届く（予選 4-A）。
+	if eval < batch {
+		t.Fatalf("足切りの前に古い順位が配信されている: %v", names)
+	}
+}
+
+// 🔴 試合終了（120秒）の配信順序（plan-h23 §3.2）。
+//
+//	1. StoreEliminatedBatch → 2. PersonalResult → 3. RankingSnapshot → 4. MatchEnd
+//
+// **3 を省略しない。** StoreEliminated は score を持たないので、これが無いと
+// 「優勝 たこ太 12,400点」が出せない（MatchEnd を拡張せずに済ませる条件）。
+func TestMatchEnd_OutboundOrder(t *testing.T) {
+	params := DefaultParameters()
+	params.Customer.Total = 0
+	s := newTestSessionWith(params, 10)
+	s.Start(0)
+
+	last := len(s.params.Cull.Stages) - 1
+	names := msgNames(cullAt(s, last))
+
+	batch := firstIndexOf(names, "proto.StoreEliminatedBatch")
+	lastResult := lastIndexOf(names, "proto.PersonalResult")
+	snap := firstIndexOf(names, "proto.RankingSnapshot")
+	end := firstIndexOf(names, "proto.MatchEnd")
+
+	if batch < 0 || lastResult < 0 || snap < 0 || end < 0 {
+		t.Fatalf("終了時の配信が欠けている: %v", names)
+	}
+	if batch >= lastResult {
+		t.Fatalf("StoreEliminatedBatch は PersonalResult より前のはず: %v", names)
+	}
+	if lastResult >= snap {
+		t.Fatalf("PersonalResult は RankingSnapshot より前のはず: %v", names)
+	}
+	if snap >= end {
+		t.Fatalf("🔴 RankingSnapshot は MatchEnd より前のはず（最終スコアが配れない）: %v", names)
+	}
+
+	// 生存店が居ないので EvaluationUpdate は出ない。
+	if firstIndexOf(names, "proto.EvaluationUpdate") >= 0 {
+		t.Fatalf("全店脱落後に EvaluationUpdate が出ている: %v", names)
+	}
+	// 予告も出ない（次のステージが無い）。
+	if firstIndexOf(names, "proto.ForcedEliminationWarning") >= 0 {
+		t.Fatalf("全ステージ消化後に予告が出ている: %v", names)
+	}
+}
+
+// 足切りの脱落は1メッセージに畳まれる（24店脱落でも Envelope は1つ）。
+func TestCullBurst_EliminationIsSingleBatch(t *testing.T) {
+	params := DefaultParameters()
+	params.Customer.Total = 0
+	s := newTestSessionWith(params, 99)
+	s.Start(0)
+
+	out := cullAt(s, 0) // 99 → 75（24店脱落）
+	batches := filterMsg[proto.StoreEliminatedBatch](out)
+	if len(batches) != 1 {
+		t.Fatalf("バッチが %d 通（1通に畳めていない）", len(batches))
+	}
+	if len(batches[0].Entries) != 24 {
+		t.Fatalf("バッチの中身=%d店, want 24", len(batches[0].Entries))
+	}
+	if batches[0].StageIndex != 1 {
+		t.Fatalf("StageIndex=%d, want 1（1始まり）", batches[0].StageIndex)
+	}
+	// 個別の StoreEliminated は送らない。
+	if got := filterMsg[proto.StoreEliminated](out); len(got) > 0 {
+		t.Fatalf("個別の StoreEliminated が %d 通出ている（Batch に畳むはず）", len(got))
+	}
+}
+
+// RankingSnapshot が全99店を含み、生存店＝現在順位／脱落店＝確定順位になっている。
+func TestRankingSnapshot_AllStoresWithCorrectRank(t *testing.T) {
+	params := DefaultParameters()
+	params.Customer.Total = 0
+	s := newTestSessionWith(params, 99)
+	s.Start(0)
+	for i, sid := range s.order {
+		s.stores[sid].score = i * 100
+	}
+
+	out := cullAt(s, 0) // 99 → 75
+	snaps := filterMsg[proto.RankingSnapshot](out)
+	if len(snaps) != 1 {
+		t.Fatalf("RankingSnapshot=%d通, want 1", len(snaps))
+	}
+	snap := snaps[0]
+	if len(snap.Entries) != 99 {
+		t.Fatalf("entries=%d, want 99（脱落店も含めて全店）", len(snap.Entries))
+	}
+
+	var aliveN, deadN int
+	seenRank := map[int]bool{}
+	for _, e := range snap.Entries {
+		st := s.stores[e.StoreId]
+		if e.Score != st.score {
+			t.Fatalf("%s の score=%d, want %d", e.StoreId, e.Score, st.score)
+		}
+		if e.Alive {
+			aliveN++
+			if e.Rank != st.rank {
+				t.Fatalf("生存店 %s の rank=%d, want 現在順位 %d", e.StoreId, e.Rank, st.rank)
+			}
+		} else {
+			deadN++
+			if e.Rank != st.finalRank {
+				t.Fatalf("脱落店 %s の rank=%d, want 確定順位 %d", e.StoreId, e.Rank, st.finalRank)
+			}
+		}
+		if seenRank[e.Rank] {
+			t.Fatalf("rank=%d が重複している（99店を1本の Rank で並べられない）", e.Rank)
+		}
+		seenRank[e.Rank] = true
+	}
+	if aliveN != 75 || deadN != 24 {
+		t.Fatalf("生存=%d 脱落=%d, want 75/24", aliveN, deadN)
+	}
+}
+
+// 足切りの瞬間に1接続へ届く通数が、送信キューの深さに対して十分小さいこと。
+//
+// 🔴 これが h23 で StoreEliminatedBatch を入れた理由そのもの（plan-h23 §2.1）。
+// 送信キューは sendBuffer=64（internal/transport/connection.go）で、**溢れた接続は
+// 即座に切られる**（slow-consumer eviction）。1店1メッセージのままだと24店脱落＝
+// 24 Envelope が1tickで殺到し、軽く詰まっただけの健全なクライアントが
+// **最も盛り上がる瞬間に**切断され得る。
+func TestCullBurst_PerConnectionEnvelopeCountIsSmall(t *testing.T) {
+	params := DefaultParameters()
+	params.Customer.Total = 0
+	s := newTestSessionWith(params, 99)
+	s.Start(0)
+
+	out := cullAt(s, 0) // 99 → 75（24店脱落）
+
+	// 生存店1つと脱落店1つが受け取る通数を数える（broadcast は全員に届く）。
+	var alive, dead PlayerId
+	for _, sid := range s.order {
+		if s.stores[sid].alive && alive == "" {
+			alive = sid
+		}
+		if !s.stores[sid].alive && dead == "" {
+			dead = sid
+		}
+	}
+	count := func(target PlayerId) int {
+		n := 0
+		for _, o := range out {
+			if o.To.Broadcast || o.To.PlayerId == target {
+				n++
+			}
+		}
+		return n
+	}
+
+	// sendBuffer=64 に対する余裕。畳めていれば十数通で収まる。
+	const budget = 16
+	if got := count(alive); got > budget {
+		t.Fatalf("生存店へ %d 通（上限 %d）。sendBuffer=64 を圧迫する", got, budget)
+	}
+	if got := count(dead); got > budget {
+		t.Fatalf("脱落店へ %d 通（上限 %d）。sendBuffer=64 を圧迫する", got, budget)
 	}
 }

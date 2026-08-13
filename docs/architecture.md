@@ -193,7 +193,10 @@ type Connection interface {
 }
 ```
 - 実装：coder/websocket（本番）／InMemory（Bot・負荷検証）。**Bot も人間も同じ Connection**として room から区別しない（IsBot はプレイヤー属性）。
-- `StatePublisher`：`StoreListUpdate` を間引いて配信。差し替え可能（フル配信⇔間引き）。まずフル配信、負荷が見えてから間引き。
+- `StatePublisher`：全店ランキングを間引いて配信（`RankingPublisher`）。差し替え可能な継ぎ目として残す。
+  全量 `RankingSnapshot` 1Hz が既定で、差分 `RankingDelta` は config で有効化する（plan-h23）。
+  **足切り直後の全量は game が Outbound の順序契約の中で流す**ので、publisher は
+  `MarkSnapshotSent` で時計とベースラインを揃えて二重送信を避ける。
 - **`Send` は非同期**（送信キュー＋writeLoop）。room は単一 goroutine から全接続へ順に Send するため、
   ここで実 I/O をすると半開接続1つで試合全体が止まる。キューが埋まった接続は切る（slow-consumer eviction）。
   `Close` は残りを吐き切ってから閉じる（最終 `MatchEnd` を落とさないため）。

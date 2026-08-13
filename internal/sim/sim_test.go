@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"takoda99/internal/game"
-	"takoda99/internal/proto"
 )
 
 // maxTicks は膠着とみなす上限。150ms × 20000 = 50分ぶん。
@@ -137,27 +136,6 @@ func TestParseProfile(t *testing.T) {
 	}
 }
 
-// 待機中の客が帰った場合は、打鍵中の客の進行を巻き戻さないこと。
-func TestDummyStore_LeaveOfWaitingCustomerKeepsProgress(t *testing.T) {
-	d := &dummyStore{id: "s-1", msPerKey: 100, missRate: 0, alive: true}
-	rng := rand.New(rand.NewSource(1))
-
-	d.arrive(proto.CustomerView{CustomerId: "c-1", Words: []string{"たこやき"}})
-	d.arrive(proto.CustomerView{CustomerId: "c-2", Words: []string{"たこ"}})
-	d.step(100, rng)
-	before := d.current.remainingMs
-
-	d.leave("c-2")
-	if d.current == nil || d.current.customerId != "c-1" {
-		t.Fatal("打鍵中の客が巻き添えで消えた")
-	}
-	if d.current.remainingMs != before {
-		t.Fatalf("打鍵の進行が巻き戻った: %d → %d", before, d.current.remainingMs)
-	}
-	if len(d.queue) != 1 || d.queue[0].customerId != "c-1" {
-		t.Fatalf("行列の同期が壊れた: %+v", d.queue)
-	}
-}
 
 // 打鍵数はローマ字換算であること。ルーン数で数えると speed 評価が
 // SpeedCap に張り付いて全店同点になり、バランス検証にならない。

@@ -26,6 +26,7 @@ func (gp GameParameters) ConfigHash() string {
 // クライアントへは MatchStart で公開サブセット（proto側）に絞って配信する。
 type GameParameters struct {
 	Session      SessionParams      `json:"session"`
+	Publish      PublishParams      `json:"publish"`
 	Matching     MatchingParams     `json:"matching"`
 	Customer     CustomerParams     `json:"customer"`
 	Score        ScoreParams        `json:"score"`
@@ -44,8 +45,42 @@ type GameParameters struct {
 // 本戦では決着を cullSchedule の最終ステージ（120秒・全店脱落）が保証する（plan-h22）。
 // 「試合時間」を表す調整値をここへ足さないこと。
 type SessionParams struct {
-	TickIntervalMs    int `json:"tickIntervalMs"`
-	PublishIntervalMs int `json:"publishIntervalMs"`
+	TickIntervalMs int `json:"tickIntervalMs"`
+}
+
+// PublishParams: 配信頻度と方式（plan-h23）。
+//
+// game は毎tick分の Outbound を返し、**間引くのは配信層（room / publisher）**。
+// ここはその間引き間隔。試合の判定には一切影響しないので、当日に安全に触れる部類の値。
+//
+// 🔴 **足切りの瞬間だけは間引かない。** 順位が大量に入れ替わった直後を落とすと、
+// クライアントの表示が次の配信までズレたままになる（plan-h23 §4.1）。
+// room は StoreEliminatedBatch を含む配信を「バースト」とみなして全部通す。
+type PublishParams struct {
+	// EvaluationIntervalMs は自店スコア・順位の配信間隔（既定 250ms = 4Hz）。
+	// 唯一の指標なので遅延が体験に直結する。仕様は 2〜4Hz。
+	//
+	// ⚠ **OrderServed の即レスはこの間引きを通さない。** クライアントは
+	// 「提供したのに EvaluationUpdate が返らない＝リジェクト」で不正申告を検知しているので、
+	// ここを間引くとリジェクトが判別できなくなる（docs/client-integration.md §5.2）。
+	EvaluationIntervalMs int `json:"evaluationIntervalMs"`
+
+	// WarningIntervalMs は足切り予告の配信間隔（既定 500ms = 2Hz）。
+	// 秒読みはクライアントが受信時刻起点でローカル補間するので高頻度は要らない。
+	WarningIntervalMs int `json:"warningIntervalMs"`
+
+	// RankingIntervalMs は全店ランキング全量の配信間隔（既定 1000ms = 1Hz）。
+	RankingIntervalMs int `json:"rankingIntervalMs"`
+
+	// RankingDeltaEnabled は差分配信を使うか（既定 false = 全量のみ）。
+	//
+	// 全量のみでも 99台合計 4.8Mbps・1試合 71MB で会場Wi-Fiには余裕がある
+	// （予選の StoreListUpdate は 45Mbps・675MB だった）。差分が効くのは egress コストなので、
+	// **まず全量で確実に動かし、必要になったら config で有効化する**（plan-h23 §1.2）。
+	RankingDeltaEnabled bool `json:"rankingDeltaEnabled"`
+
+	// RankingDeltaIntervalMs は差分配信の間隔（既定 500ms = 2Hz）。Enabled のときだけ効く。
+	RankingDeltaIntervalMs int `json:"rankingDeltaIntervalMs"`
 }
 
 // MatchingParams: マッチング（試合前）。minPlayers は当日運用で下げられるよう可変性が重要。
@@ -195,6 +230,20 @@ func (gp GameParameters) Validate() error {
 	if gp.Session.TickIntervalMs <= 0 {
 		return fmt.Errorf("session.tickIntervalMs は正である必要 (got %d)", gp.Session.TickIntervalMs)
 	}
+	// 配信間隔（plan-h23 §4）。0 以下だと毎tick配信になり、予選の帯域問題（#81）が戻る。
+	for _, iv := range []struct {
+		key string
+		v   int
+	}{
+		{"publish.evaluationIntervalMs", gp.Publish.EvaluationIntervalMs},
+		{"publish.warningIntervalMs", gp.Publish.WarningIntervalMs},
+		{"publish.rankingIntervalMs", gp.Publish.RankingIntervalMs},
+		{"publish.rankingDeltaIntervalMs", gp.Publish.RankingDeltaIntervalMs},
+	} {
+		if iv.v <= 0 {
+			return fmt.Errorf("%s は正である必要 (got %d)。0 だと毎tick配信になり帯域が破綻する", iv.key, iv.v)
+		}
+	}
 	if gp.Bot.BaseElapsedMs <= 0 {
 		return fmt.Errorf("bot.baseElapsedMs は正である必要 (got %d)", gp.Bot.BaseElapsedMs)
 	}
@@ -287,8 +336,14 @@ func (cp CullParams) MatchDurationMs() int { return cp.Stages[len(cp.Stages)-1].
 func DefaultParameters() GameParameters {
 	return GameParameters{
 		Session: SessionParams{
-			TickIntervalMs:    150,
-			PublishIntervalMs: 250,
+			TickIntervalMs: 150,
+		},
+		Publish: PublishParams{
+			EvaluationIntervalMs:   250,
+			WarningIntervalMs:      500,
+			RankingIntervalMs:      1000,
+			RankingDeltaEnabled:    false,
+			RankingDeltaIntervalMs: 500,
 		},
 		Matching: MatchingParams{
 			MinPlayers:       20,

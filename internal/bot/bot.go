@@ -76,11 +76,8 @@ func (b *Bot) onMessage(env proto.Envelope) bool {
 		if json.Unmarshal(env.Payload, &m) == nil {
 			b.pendingCid = append(b.pendingCid, m.CustomerId)
 		}
-	case proto.TypeCustomerLeft:
-		var m proto.CustomerLeft
-		if json.Unmarshal(env.Payload, &m) == nil {
-			b.removePending(m.CustomerId)
-		}
+	// 客の離脱（CustomerLeft）は本戦で廃止された。客は逃げないので、
+	// 一度受け取ったお題は必ず打ち切られる（plan-h21）。
 	case proto.TypeMatchEnd, proto.TypePersonalResult:
 		return true
 	}
@@ -126,11 +123,3 @@ func (b *Bot) send(typ string, msg any) {
 	_ = b.conn.Send(proto.Envelope{Type: typ, Payload: data})
 }
 
-func (b *Bot) removePending(cid proto.CustomerId) {
-	for i, x := range b.pendingCid {
-		if x == cid {
-			b.pendingCid = append(b.pendingCid[:i], b.pendingCid[i+1:]...)
-			return
-		}
-	}
-}

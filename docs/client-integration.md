@@ -22,15 +22,8 @@
 
 **裏取り時点**: proto **v0.8.0** / plan-h21（スコア制）適用後。参照元のファイル名・関数名を各所に明記してある。
 
-> 🔴 **本戦ルールへの移行途中**（`docs/plan-honsen/plan-h20` の移行マップ）。
-> この文書は **h22（時刻足切りと決着）まで**を反映している。**まだ追随していない**のは:
->
-> | 未反映 | 担当 plan | 現在の記述 |
-> |---|---|---|
-> | `RankingSnapshot` / `RankingDelta` / `StoreEliminatedBatch`・配信順序・間引き | **h23** | §3.9 は `StoreListUpdate` のまま／足切りの脱落は1店ずつ `StoreEliminated` |
->
-> これはサーバー実装もまだ予選仕様なので、**この文書は現在のサーバーの実挙動と一致している**。
-> h23 の PR で書き換えること。
+> ✅ **本戦ルールへの移行は完了**（h21 スコア制 / h22 時刻足切り / h23 配信の再設計）。
+> この文書はサーバーの現在の実挙動と一致している。
 
 ---
 
@@ -75,7 +68,11 @@
   │  ├─→ C2S: OrderServed         ← 注文を打ち切ったとき
   │  │   └─← EvaluationUpdate     ← 成功時のみ即レス1通
   │  │
-  │  └─← StoreListUpdate          ← 250ms ごと・全員（tick とは別系統）
+  │  ├─← RankingSnapshot          ← 1秒ごと・全員（全99店の順位）
+  │  │
+  │  └─（足切り: 20/40/60/80/100/120秒）
+  │       StoreEliminatedBatch → PersonalResult → EvaluationUpdate
+  │       → RankingSnapshot → ForcedEliminationWarning   ★この順序は契約
   │
   └─← MatchEnd                    ← 全店へ（脱落済みの店にも届く）
 ```
@@ -199,11 +196,15 @@ UTF-16 単位で数えるので**完全一致はしない**。**サーバーの�
 | `PhaseChange` | 全員 | フェーズ移行 | 試合中2回 |
 | `ForcedEliminationWarning` | 生存店 | storm 予告 | 1周期に1回 |
 | `StoreEliminated` | 全員 | 脱落確定 | 98回 |
-| `StoreListUpdate` | 全員 | 一定間隔 | 250ms ごと |
+| `StoreEliminatedBatch` | 全員 | 足切り実行 | 6回（各ステージ1通） |
+| `RankingSnapshot` | 全員 | 一定間隔＋足切り直後 | **1秒ごと** |
+| `RankingDelta` | 全員 | 変化した店のみ | **既定OFF**（config で有効化） |
+| `PersonalResult` | 自分 | 自店の脱落確定時 | 1回 |
 | `MatchEnd` | 全員 | 試合終了 | 1回 |
 
-> ~~`CustomerLeft`~~ / ~~`CreditUpdate`~~ は**サーバーが送らなくなった**（h21）。
-> 型は proto に残っているが、受信ハンドラを書く必要は無い。
+> ~~`CustomerLeft`~~ / ~~`CreditUpdate`~~（h21）と ~~`StoreListUpdate`~~（h23）は
+> **サーバーが送らなくなった**。型は proto に残っているが、受信ハンドラを書く必要は無い。
+> 個別の `StoreEliminated` も単体では飛ばない（`StoreEliminatedBatch` の中身として届く）。
 
 ### 3.1 `MatchmakingStatus`
 
@@ -308,12 +309,13 @@ UTF-16 単位で数えるので**完全一致はしない**。**サーバーの�
 **★`score` は負になりうる。** サーバーは 0 でクランプしない（ミスが多ければ実際に負になる）。
 `uint` で受けたり `Mathf.Max(0, …)` で潰したりしないこと。順位表がその店だけ嘘になる。
 
-**★自店の順位はこれが権威。** 他店を含む一覧（h23 で入る `RankingSnapshot` / `RankingDelta`）は
+**★自店の順位はこれが権威。** 他店を含む一覧（`RankingSnapshot` / `RankingDelta`）は
 表示用で取りこぼしがありうる。自分の順位は必ずこちらを使う。
 
 届くのは2系統:
-1. **毎tick**（`stepRank`）— 生存店それぞれへ
-2. **`OrderServed` の成功レスポンス** — 提供直後の演出用に即座に1通
+1. **定期**（既定 250ms = 4Hz）— 生存店それぞれへ。**足切り直後は間引かれず必ず届く**
+2. **`OrderServed` の成功レスポンス** — 提供直後の演出用に即座に1通。**こちらは間引かれない**
+   （間引くと「返らない＝リジェクト」の判別ができなくなるため・§5.2）
 
 ### 3.5 `DifficultyUpdate`
 
@@ -379,30 +381,60 @@ UTF-16 単位で数えるので**完全一致はしない**。**サーバーの�
 
 **足切りでは複数店が同時に落ちる**（最初の足切りで24店）。現在は**1店につき1通**届く。
 
-> 🔴 **h23 で `StoreEliminatedBatch`（1回の足切りを1メッセージに畳む）へ移る。**
-> 演出を1つに集約できるようにするため。今は連続して届く前提で組んでおくこと。
+> **単体では飛ばない。** 下の `StoreEliminatedBatch` の `entries[]` の要素として届く。
 
 - **自店なら** → リザルトへ遷移。ただし**接続は切らない**（§5.4）
 - **他店なら** → ミニ盤面の更新
 
-### 3.9 `StoreListUpdate`
+### 3.9 `StoreEliminatedBatch`
 
 ```json
-{ "stores": [ … 99店ぶん … ], "aliveCount": 64 }
+{ "stageIndex": 1,
+  "entries": [ { "storeId": "p-98", "reason": "Cull", "finalRank": 99 },
+               { "storeId": "p-97", "reason": "Cull", "finalRank": 98 }, … ] }
 ```
 
-**tick とは別系統**で、現在 **250ms ごと**に全員へ全店分が届く。
+**1回の足切りで落ちた店をまとめて全員へ配る。** 最初の足切りでは24店ぶんが1通で届く。
 
-> 🔴 **これは予選仕様のまま。h23 で `RankingSnapshot`（全量・低頻度）と
-> `RankingDelta`（差分・高頻度）に置き換わる。**
-> `StoreSummary.score` には既に本戦のスコアが入っている（`evalNormalized` / `creditLife` は常に 0）。
+- `stageIndex` は第何段階か（1始まり・全6段階）
+- `entries` は**弱い順**（＝ `finalRank` の大きい順）
+- **1店1メッセージでは送らない。** 24通に分けると送信キュー（サーバー側 64 段）を圧迫し、
+  軽く詰まっただけのクライアントが**最も盛り上がる瞬間に切断され得る**
 
-`StoreSummary.finalRank` は**脱落済みの店にだけ入る**（生存店では**キーごと出ない**）。
+> **演出はこの1通に集約して組める。** 「24店が同時に脱落」を1イベントとして扱える。
 
-> ⚠ **欠落を 0 として扱わないこと。** 順位0は存在しない。
-> C# の `int` で受けると 0 になるので、**nullable（`int?`）で持つ**。
+### 3.10 `RankingSnapshot` / `RankingDelta`
 
-### 3.10 `PersonalResult`
+```json
+// RankingSnapshot（全量）
+{ "entries": [ { "storeId": "p-1", "rank": 1,  "score": 12300, "alive": true },
+               { "storeId": "p-2", "rank": 99, "score": -60,   "alive": false }, … ] }
+
+// RankingDelta（差分・既定OFF）
+{ "entries": [ { "storeId": "p-1", "score": 12400, "alive": true } ] }
+```
+
+予選の `StoreListUpdate`（99店フルを 250ms ごと）を置き換えたもの。
+
+| | 頻度 | 中身 | 分類 |
+|---|---|---|---|
+| `RankingSnapshot` | **1秒ごと**＋**足切り直後**＋**試合終了時** | 全99店 | 全量（丸ごと置き換える） |
+| `RankingDelta` | **既定OFF** | 変化した店のみ | 定期更新（取りこぼし可） |
+
+**★`rank` の意味**: 生存店は**現在順位**、脱落店は**確定順位（以後不変）**。
+これで観戦中も99店を1本の `rank` で並べられる。
+
+**★`displayName` は入らない。** `MatchStart.stores[]` で配布済み。`storeId` で引くこと。
+
+> **★`RankingDelta` は `rank` を持たない。** `rank` は相対値なので1店のスコア変動で
+> 間の全店の順位がずれ、「変化した店だけ送る」という差分の利点が消える。
+> クライアントは `score` でソートして表示順を復元し、
+> **自店の権威 `rank` は `EvaluationUpdate` から取る**。
+
+> `RankingDelta` は現在サーバーから飛ばない（config で有効化する）。
+> ただし**受信ハンドラは書いておくこと**。当日の帯域次第で有効化しうる。
+
+### 3.11 `PersonalResult`
 
 ```json
 {
@@ -454,11 +486,11 @@ UTF-16 単位で数えるので**完全一致はしない**。**サーバーの�
 > 加えて「コンボ」は企画転換で概念ごと廃止されている。
 > **リザルトに出すならクライアント側で自前に数えること。**
 
-> **全店の最終順位表は `PersonalResult` に入らない。** `StoreListUpdate` の最後のスナップショットに
-> 99店分が `finalRank` 込みで入っているので、それを保持しておけば順位表を描ける
-> （h23 で最後の `RankingSnapshot` がこの役目を引き継ぐ）。
+> **全店の最終順位表は `PersonalResult` に入らない。** 試合終了時に
+> **`MatchEnd` の直前へ最後の `RankingSnapshot`** が届く。99店ぶんの最終スコアと確定順位が
+> そこに入っているので、保持しておけば順位表を描ける（「優勝 たこ太 12,400点」もこれで出す）。
 
-### 3.11 `MatchEnd`
+### 3.12 `MatchEnd`
 
 ```json
 {}
@@ -467,6 +499,37 @@ UTF-16 単位で数えるので**完全一致はしない**。**サーバーの�
 試合全体の終了を全員へ知らせる締めの合図。**ペイロードは持たない。**
 勝者の特別扱いはサーバーが持たないので、クライアントは `PersonalResult.finalRank` に応じて
 リザルト演出を分岐する。
+
+## 3.13 ★配信順序（契約の一部）
+
+型では表現できないが、**守られている前提で組んでよい**。サーバー側はテストで固定している。
+
+### 足切りステージ（20/40/60/80/100秒）
+
+```
+1. StoreEliminatedBatch      … 誰が落ちたかを先に配る
+2. PersonalResult            … 脱落した店にだけ
+3. EvaluationUpdate          … 生存店の新しい順位
+4. RankingSnapshot           … 全量で整合をとる
+5. ForcedEliminationWarning  … 次ステージの秒読み
+```
+
+> **★順位より先に脱落が届く。** 逆だと脱落者を含んだ順位が一瞬表示される。
+> 予選で実際に起きた表示崩れなので、**足切りの演出は 1 を受けてから始めてよい**。
+
+### 試合終了（120秒）
+
+```
+1. StoreEliminatedBatch   … 残り10店（finalRank 1..10）を全員へ
+2. PersonalResult         … 10店それぞれへ
+3. RankingSnapshot        … ★最終スコアを全員へ
+4. MatchEnd               … 空。全体の締め
+```
+
+> **★`MatchEnd` の直前の `RankingSnapshot` が最終順位表**。`StoreEliminatedBatch` は
+> `score` を持たないので、スコア付きの順位表を描くにはこれが要る。
+
+---
 
 ## 4. 試合の終了条件
 
@@ -505,7 +568,7 @@ UTF-16 単位で数えるので**完全一致はしない**。**サーバーの�
 
 ### 5.4 脱落しても接続を切らない
 
-サーバーは脱落した店の接続を保持し、`StoreListUpdate` / `StoreEliminated` / `MatchEnd` を送り続ける
+サーバーは脱落した店の接続を保持し、`RankingSnapshot` / `StoreEliminatedBatch` / `MatchEnd` を送り続ける
 （`internal/room/room.go` は試合終了まで `conns` を閉じない）。**観戦とリザルトのため接続を維持する。**
 
 ### 5.5 `clientTimestamp` は現在使われていない

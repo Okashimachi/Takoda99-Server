@@ -159,9 +159,12 @@ func Simulate(cfg Config) Result {
 				if m.HeatLevel > r.MaxHeatLevel {
 					r.MaxHeatLevel = m.HeatLevel
 				}
-			case proto.StoreEliminated:
-				if d := byId[m.StoreId]; d != nil {
-					d.alive = false
+			case proto.StoreEliminatedBatch:
+				// 足切りは1メッセージに畳まれて届く（h23）。
+				for _, e := range m.Entries {
+					if d := byId[e.StoreId]; d != nil {
+						d.alive = false
+					}
 				}
 			}
 		}

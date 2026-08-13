@@ -72,7 +72,7 @@ func RunMatch(ctx context.Context, d Deps, players []matchmaking.Player) {
 	}
 	matchId := nextMatchID()
 	sess := game.NewSession(matchId, d.Params, d.Words, newRng(), inits)
-	pub := transport.NewFullPublisher(d.Params.Session.PublishIntervalMs)
+	pub := transport.NewRankingPublisher(d.Params.Publish)
 	rm := room.New(sess, conns, d.Params.Session.TickIntervalMs, d.Clock, pub)
 	rm.SetAdminHub(d.Hub) // nil 安全（plan-h00 §3.2）
 	rm.Run(ctx)

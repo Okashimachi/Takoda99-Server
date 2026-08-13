@@ -323,7 +323,12 @@ func (s *Session) Tick(dt int) []Outbound {
 	var out []Outbound
 	out = s.stepPhase(out)
 	out = s.stepDistribute(out)
-	out = s.stepRank(out)
+	// 足切りが起きる tick では順位を出さない。executeCull が**脱落を配った後に**
+	// 新しい順位を出すので（plan-h23 §3.1 の3）、ここで出すと脱落者を含んだ古い順位が
+	// バーストの直前に流れる。予選の「脱落者を含んだ順位が一瞬表示される」（4-A）の再来。
+	if !s.cullDueNow() {
+		out = s.stepRank(out)
+	}
 	out = s.stepHeat(out)
 	out = s.stepCull(out)
 	out = s.checkFinish(out)
@@ -446,7 +451,13 @@ func (s *Session) weightedSelect(weights []float64) int {
 // 相対位置ではない。同値のタイブレークは weakerForRank（§2.1）。
 //
 // 配信頻度の間引きは h23 の担当。ここでは毎tick返す。
-func (s *Session) stepRank(out []Outbound) []Outbound {
+func (s *Session) stepRank(out []Outbound) []Outbound { return s.rankAlive(out) }
+
+// rankAlive は生存店の rank を振り直し、各店へ EvaluationUpdate を返す。
+//
+// stepRank（毎tick）と executeCull（足切り直後）の両方から呼ぶ。足切り直後に
+// 呼ばないと、脱落者を除いた新しい順位が次のtickまで配られない。
+func (s *Session) rankAlive(out []Outbound) []Outbound {
 	alive := s.aliveStores()
 	if len(alive) == 0 {
 		return out
@@ -517,16 +528,23 @@ func (s *Session) stepHeat(out []Outbound) []Outbound {
 // 「実行 → 予告」の順なのは、足切りが起きた tick に**次のステージの予告へ即座に切り替える**ため。
 // 逆順にすると、切られた直後の1tickだけ「もう終わったステージ」の残り0秒を配ることになる。
 func (s *Session) stepCull(out []Outbound) []Outbound {
-	stages := s.params.Cull.Stages
-
 	// dt が大きい（sim・テスト）と1tickで複数ステージを跨ぐことがあるので loop で追いつかせる。
-	for s.cullStageIdx < len(stages) && s.elapsedMs >= int64(stages[s.cullStageIdx].AtMs) {
+	for s.cullDueNow() {
 		idx := s.cullStageIdx
 		s.cullStageIdx++
 		out = s.executeCull(idx, out)
 	}
 
 	return s.cullWarnings(out)
+}
+
+// cullDueNow は「この tick で足切りが起きるか」。
+//
+// stepCull の発火条件そのもの。Tick が stepRank を出すかどうかの判定と**同じ関数**を
+// 使うことで、「順位を出したのに足切りが起きた（またはその逆）」がズレようがない形にする。
+func (s *Session) cullDueNow() bool {
+	stages := s.params.Cull.Stages
+	return s.cullStageIdx < len(stages) && s.elapsedMs >= int64(stages[s.cullStageIdx].AtMs)
 }
 
 // cullWarnings は次の足切りの予告を生存店それぞれへ返す。
@@ -629,6 +647,17 @@ func (s *Session) cullTargetIds() map[PlayerId]bool {
 }
 
 // executeCull はステージ stageIdx の足切りを実行する。
+//
+// 🔴 **Outbound を append する順序がそのまま配信順序になる**（room.dispatch は受け取った順に配る）。
+// plan-h23 §3.1 の契約を守ること:
+//
+//	1. StoreEliminatedBatch      … 誰が落ちたかを先に配る
+//	2. PersonalResult            … 脱落した店にだけ
+//	3. EvaluationUpdate          … 生存店の新しい順位（stepRank ではなくここで出す）
+//	4. RankingSnapshot           … 全量で整合をとる
+//	5. ForcedEliminationWarning  … 次ステージの秒読み（呼び出し元の cullWarnings）
+//
+// **順位を配る前に脱落を配る。** 逆順だと脱落者を含んだ順位が一瞬表示される（予選のつまずき 4-A）。
 func (s *Session) executeCull(stageIdx int, out []Outbound) []Outbound {
 	target := s.params.Cull.Stages[stageIdx].TargetAliveCount
 
@@ -639,6 +668,7 @@ func (s *Session) executeCull(stageIdx int, out []Outbound) []Outbound {
 	}
 
 	// 弱い順に落とす＝弱い店ほど下の finalRank が付く。
+	entries := make([]proto.StoreEliminated, 0, len(culled))
 	for _, st := range culled {
 		st.alive = false
 		st.survivedMs = s.elapsedMs
@@ -652,15 +682,32 @@ func (s *Session) executeCull(stageIdx int, out []Outbound) []Outbound {
 		st.finalRank = s.aliveCount + 1
 		st.elimination = string(proto.ElimCull)
 
-		// h23 で StoreEliminatedBatch（1回の足切りを1メッセージに畳む）へ移す。
-		// 本 plan は「値を作る」ところまでで、配信の再設計は h23 の担当。
-		out = append(out, broadcastMsg(proto.StoreEliminated{
+		entries = append(entries, proto.StoreEliminated{
 			StoreId:   st.id,
 			Reason:    proto.ElimCull,
 			FinalRank: st.finalRank,
-		}))
+		})
+	}
+
+	// 1. 脱落を1メッセージに畳んで全員へ。
+	//
+	// 1店1メッセージだと24店脱落＝24 Envelope になり、送信キュー(sendBuffer=64)を圧迫して
+	// 健全なクライアントまで slow-consumer として切られ得る。最も盛り上がる瞬間に。
+	out = append(out, broadcastMsg(proto.StoreEliminatedBatch{
+		StageIndex: stageIdx + 1, // 1始まり
+		Entries:    entries,
+	}))
+
+	// 2. 脱落した店へリザルト（全員の試合終了を待たない）。
+	for _, st := range culled {
 		out = append(out, to(st.id, s.buildPersonalResult(st)))
 	}
+
+	// 3. 生存店へ新しい順位。4. 全員へ全量ランキング。
+	//
+	// 大量の順位変動の直後なので差分にしない（取りこぼすとズレたままになる）。
+	out = s.rankAlive(out)
+	out = append(out, broadcastMsg(s.RankingSnapshot()))
 
 	return out
 }
@@ -744,6 +791,12 @@ func (s *Session) checkFinish(out []Outbound) []Outbound {
 
 	s.state = Finished
 
+	// plan-h23 §3.2 の順序: StoreEliminatedBatch → PersonalResult → RankingSnapshot → MatchEnd。
+	// 前3つは executeCull が既に append 済みなので、ここは締めの MatchEnd だけ。
+	//
+	// 🔴 **最終 RankingSnapshot を省略しない。** StoreEliminated は score を持たないので、
+	// これが無いと「優勝 たこ太 12,400点」が出せない。MatchEnd を拡張せずに済ませる条件
+	// （plan-h10 §1.6）でもある。executeCull の末尾で必ず流れる。
 	for _, pid := range s.order {
 		out = append(out, to(pid, proto.MatchEnd{}))
 	}
@@ -1118,4 +1171,38 @@ func (s *Session) StoreBoard() []StoreBoardRow {
 		out = append(out, row)
 	}
 	return out
+}
+
+// ── ランキング（plan-h23）────────────────────────────────
+
+// RankingSnapshot は全店の順位の全量を返す。
+//
+// **Rank の意味**: 生存店は現在順位、脱落店は確定順位（以後不変）。
+// これで観戦中も99店を1本の Rank で並べられる。DisplayName は含めない
+// （MatchStart.stores[] で配布済み。以降は storeId で引く）。
+//
+// 並びは s.order（＝決定的）。map を走査しないこと。
+func (s *Session) RankingSnapshot() proto.RankingSnapshot {
+	return proto.RankingSnapshot{Entries: s.RankingEntries()}
+}
+
+// RankingEntries は全店ぶんの RankingEntry を order 順で返す（配信層が間引きに使う）。
+func (s *Session) RankingEntries() []proto.RankingEntry {
+	entries := make([]proto.RankingEntry, 0, len(s.order))
+	for _, sid := range s.order {
+		st := s.stores[sid]
+		rank := st.rank
+		if !st.alive {
+			// 脱落店は確定順位。rank（生存中の現在順位）は脱落時点で止まっているので、
+			// finalRank を使わないと生存店と同じ番号が並ぶ。
+			rank = st.finalRank
+		}
+		entries = append(entries, proto.RankingEntry{
+			StoreId: st.id,
+			Rank:    rank,
+			Score:   st.score,
+			Alive:   st.alive,
+		})
+	}
+	return entries
 }
