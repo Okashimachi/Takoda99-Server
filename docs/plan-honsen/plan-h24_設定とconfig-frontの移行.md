@@ -155,8 +155,24 @@ curl -s https://takoda99.mooo.com/api/params | jq '.score, .cull'
 | `storm` | **削除**（`cull` が置き換え） |
 | **`sanity`（新規・旧 `eval` から改名）** | ★**h21 で確定**：`eval` グループは廃止し、残る `minMsPerWord` を **`sanity.minMsPerWord`** へ移した。JSON キーが変わるので UI も追従する |
 | `distribution.weightFloor` | ★**h21 で削除**（分配の単純化で参照ゼロになったため）。`queueRefillThreshold` は残る |
+| **`publish`（新規）** | ★**h23 で追加**：配信間隔5キー（下記 4.2.1）。`session.publishIntervalMs` は**削除済み** |
 | `customer` の `patienceBaseMs` 列 | **削除**（属性テーブルの列） |
 | `matching` / `phase` / `heat` / `distribution` / `bot` / `session` | 変更なし |
+
+#### 4.2.1 `publish` グループ（h23 で追加）
+
+| キー | 既定 | 意味 |
+|---|---|---|
+| `evaluationIntervalMs` | 250（4Hz） | 自店スコア・順位。**唯一の指標なので遅延が体験に直結** |
+| `warningIntervalMs` | 500（2Hz） | 足切り予告。秒読みはクライアントがローカル補間するので高頻度不要 |
+| `rankingIntervalMs` | 1000（1Hz） | 全店ランキング全量 |
+| `rankingDeltaEnabled` | false | 差分配信の有効化（**既定OFF**。まず全量だけで動かす方針） |
+| `rankingDeltaIntervalMs` | 500 | 差分の配信間隔（`rankingDeltaEnabled` が true のときだけ効く） |
+
+> ⚠ **`rankingDeltaEnabled` は bool。** `NumberField` では扱えないのでトグルUIが要る。
+>
+> ⚠ **`evaluationIntervalMs` を大きくしすぎない。** `OrderServed` の即レスは間引きを通らない設計だが、
+> 定期配信が遅いと順位表示のもたつきが体験に直結する（h23 で 2〜4Hz と決めた根拠）。
 
 ### 4.3 `cullSchedule` の UI — ★時刻は編集させない
 
