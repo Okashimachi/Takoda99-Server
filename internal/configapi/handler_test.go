@@ -213,15 +213,15 @@ func TestParams_ConfigHashInBody(t *testing.T) {
 	if want := gp.ConfigHash(); got != want {
 		t.Fatalf("configHash = %q, want %q", got, want)
 	}
-	// 本戦（plan-h21）で credit / eval / patience を廃止し score / sanity を追加した。
-	// config-front の UI 側の追随は h24。
+	// 本戦で credit / eval / patience（h21）と storm（h22）を廃止し、
+	// score / sanity（h21）と cull（h22）を追加した。config-front の UI 側の追随は h24。
 	for _, k := range []string{"session", "matching", "customer", "score", "sanity",
-		"phase", "heat", "storm", "distribution", "presentation", "bot"} {
+		"phase", "heat", "cull", "distribution", "presentation", "bot"} {
 		if _, ok := m[k]; !ok {
 			t.Errorf("既存セクション %q が消えた", k)
 		}
 	}
-	for _, k := range []string{"credit", "eval", "patience"} {
+	for _, k := range []string{"credit", "eval", "patience", "storm"} {
 		if _, ok := m[k]; ok {
 			t.Errorf("廃止セクション %q が残っている（当日「効かない値」をいじる事故のもと）", k)
 		}

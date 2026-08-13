@@ -32,9 +32,15 @@ func reportRun(w io.Writer, r runResult, index int) {
 	if r.Winner != "" {
 		p.f("優勝       : %s (msPerKey=%d missRate=%.3f)\n", r.Winner, r.WinnerMsPerKey, r.WinnerMissRate)
 	}
-	// 自滅が0だと「決着が下位淘汰100%頼み」＝我慢ゲージが効いていない兆候なので必ず出す。
-	p.f("脱落内訳   : 自滅 %d / 淘汰 %d\n", r.SelfCollapses, r.Culls)
-	p.f("客の捌き   : 提供 %d / 離脱 %d\n", r.Served, r.Left)
+	p.f("脱落       : 足切り %d 店（本戦の脱落経路はこれ1本）\n", r.Culls)
+	p.f("客の捌き   : 提供 %d\n", r.Served)
+	if len(r.CullStages) > 0 {
+		p.f("足切りカーブ:")
+		for _, cs := range r.CullStages {
+			p.f(" %.0fs→%d", seconds(cs.ElapsedMs), cs.Alive)
+		}
+		p.f("\n")
+	}
 	if r.Rejected > 0 {
 		p.f("⚠ 弾かれた提供報告: %d（ダミー店の行列が session とズレている）\n", r.Rejected)
 	}
@@ -88,10 +94,8 @@ func reportSummary(w io.Writer, results []runResult, targetMinSec, targetMaxSec 
 		inTarget  int
 		heatSum   int
 		heatMax   int
-		selfSum   int
 		cullSum   int
 		servedSum int
-		leftSum   int
 		rejectSum int
 		secMin    = -1.0
 		secMax    = 0.0
@@ -106,10 +110,8 @@ func reportSummary(w io.Writer, results []runResult, targetMinSec, targetMaxSec 
 		if r.HeatLevel > heatMax {
 			heatMax = r.HeatLevel
 		}
-		selfSum += r.SelfCollapses
 		cullSum += r.Culls
 		servedSum += r.Served
-		leftSum += r.Left
 		rejectSum += r.Rejected
 
 		if r.Stalled {
@@ -148,10 +150,8 @@ func reportSummary(w io.Writer, results []runResult, targetMinSec, targetMaxSec 
 		p.f("決着時間     : （決着した試行なし）\n")
 	}
 	p.f("最終heatLevel: 平均 %.1f / 最大 %d\n", float64(heatSum)/float64(n), heatMax)
-	p.f("脱落内訳     : 自滅 平均 %.1f / 淘汰 平均 %.1f\n",
-		float64(selfSum)/float64(n), float64(cullSum)/float64(n))
-	p.f("客の捌き     : 提供 平均 %.0f / 離脱 平均 %.0f\n",
-		float64(servedSum)/float64(n), float64(leftSum)/float64(n))
+	p.f("脱落         : 足切り 平均 %.1f 店\n", float64(cullSum)/float64(n))
+	p.f("客の捌き     : 提供 平均 %.0f\n", float64(servedSum)/float64(n))
 	p.f("膠着(max-ticks到達): %d / %d\n", stalled, n)
 	if rejectSum > 0 {
 		p.f("⚠ 弾かれた提供報告 合計: %d\n", rejectSum)

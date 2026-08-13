@@ -139,8 +139,8 @@ func backfillDefaults(gp *game.GameParameters, def game.GameParameters) {
 	if gp.Heat == (game.HeatParams{}) {
 		gp.Heat = def.Heat
 	}
-	if gp.Storm == (game.StormParams{}) {
-		gp.Storm = def.Storm
+	if gp.Cull == (game.CullParams{}) {
+		gp.Cull = def.Cull
 	}
 	if gp.Distribution == (game.DistributionParams{}) {
 		gp.Distribution = def.Distribution

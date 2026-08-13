@@ -1,6 +1,9 @@
 package game
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestGameParameters_Validate(t *testing.T) {
 	t.Run("デフォルトは妥当", func(t *testing.T) {
@@ -99,6 +102,82 @@ func TestGameParameters_Validate(t *testing.T) {
 		}
 	})
 
+	// ── 足切りスケジュール（plan-h22 §2.2）──
+
+	t.Run("cull: 5要素のゼロ埋めを弾く", func(t *testing.T) {
+		// 🔴 これが Validate の存在理由。encoding/json は配列に要素数が足りない JSON を
+		// 渡されると残りをゼロ値で埋める。config-front から5要素で保存されると
+		// Stages[5]={AtMs:0,TargetAliveCount:0} になり「0秒時点で生存0＝開始直後に全店即死」。
+		gp := DefaultParameters()
+		var raw = `{"stages":[{"atMs":20000,"targetAliveCount":75},{"atMs":40000,"targetAliveCount":55},` +
+			`{"atMs":60000,"targetAliveCount":35},{"atMs":80000,"targetAliveCount":20},` +
+			`{"atMs":100000,"targetAliveCount":10}]}`
+		if err := json.Unmarshal([]byte(raw), &gp.Cull); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		// 前提: ゼロ埋めが実際に起きていること（起きなければこのテストは無意味）。
+		if gp.Cull.Stages[5] != (CullStage{}) {
+			t.Fatalf("前提が崩れた: ゼロ埋めされていない %+v", gp.Cull.Stages[5])
+		}
+		if err := gp.Validate(); err == nil {
+			t.Fatal("5要素のゼロ埋めはエラーになるべき（開始直後に全店即死する設定）")
+		}
+	})
+
+	t.Run("cull: atMs が厳密増加でないものを弾く", func(t *testing.T) {
+		gp := DefaultParameters()
+		gp.Cull.Stages[2].AtMs = gp.Cull.Stages[1].AtMs
+		if err := gp.Validate(); err == nil {
+			t.Fatal("atMs が同値はエラーになるべき")
+		}
+		gp = DefaultParameters()
+		gp.Cull.Stages[2].AtMs = gp.Cull.Stages[1].AtMs - 1
+		if err := gp.Validate(); err == nil {
+			t.Fatal("atMs が減少はエラーになるべき")
+		}
+	})
+
+	t.Run("cull: atMs<=0 を弾く", func(t *testing.T) {
+		gp := DefaultParameters()
+		gp.Cull.Stages[0].AtMs = 0
+		if err := gp.Validate(); err == nil {
+			t.Fatal("atMs=0 はエラーになるべき")
+		}
+	})
+
+	t.Run("cull: targetAliveCount が単調非増加でないものを弾く", func(t *testing.T) {
+		gp := DefaultParameters()
+		gp.Cull.Stages[2].TargetAliveCount = gp.Cull.Stages[1].TargetAliveCount + 1
+		if err := gp.Validate(); err == nil {
+			t.Fatal("生存数が増えるスケジュールはエラーになるべき")
+		}
+	})
+
+	t.Run("cull: 最終ステージ以外の targetAliveCount=0 を弾く", func(t *testing.T) {
+		gp := DefaultParameters()
+		gp.Cull.Stages[3].TargetAliveCount = 0
+		if err := gp.Validate(); err == nil {
+			t.Fatal("最終より前で生存0はエラーになるべき（試合が途中で終わる）")
+		}
+	})
+
+	t.Run("cull: 最終ステージの targetAliveCount!=0 を弾く", func(t *testing.T) {
+		gp := DefaultParameters()
+		gp.Cull.Stages[CullStageCount-1].TargetAliveCount = 1
+		if err := gp.Validate(); err == nil {
+			t.Fatal("最終ステージで生存1はエラーになるべき（全店脱落で終わる）")
+		}
+	})
+
+	t.Run("cull: 中間ステージの targetAliveCount は動かしてよい", func(t *testing.T) {
+		gp := DefaultParameters()
+		gp.Cull.Stages[1].TargetAliveCount = 60
+		gp.Cull.Stages[2].TargetAliveCount = 40
+		if err := gp.Validate(); err != nil {
+			t.Fatalf("中間ステージの調整は許容されるべき: %v", err)
+		}
+	})
+
 	t.Run("customer.*.orderCount<=0 を弾く", func(t *testing.T) {
 		gp := DefaultParameters()
 		gp.Customer.Buzz.OrderCount = 0
@@ -122,5 +201,35 @@ func TestConfigHash(t *testing.T) {
 	h3 := p.ConfigHash()
 	if h == h3 {
 		t.Error("hash should differ with changed params")
+	}
+}
+
+// MatchDurationMs は最終ステージの時刻（＝試合時間の唯一の情報源）を返す。
+func TestCullParams_MatchDurationMs(t *testing.T) {
+	gp := DefaultParameters()
+	want := gp.Cull.Stages[CullStageCount-1].AtMs
+	if got := gp.Cull.MatchDurationMs(); got != want {
+		t.Fatalf("MatchDurationMs=%d, want %d", got, want)
+	}
+	if want != 120000 {
+		t.Fatalf("既定の試合時間=%dms, want 120000（企画確定値）", want)
+	}
+}
+
+// 既定の足切りスケジュールが企画確定値どおりであること（plan-h22 §1）。
+//
+// 20秒等間隔・99→75→55→35→20→10→0。ここを崩すと企画の
+// 「どれだけ弱くても20秒は遊べる」「決勝は10人」が壊れる。
+func TestDefaultCullSchedule_MatchesSpec(t *testing.T) {
+	want := [CullStageCount]CullStage{
+		{AtMs: 20000, TargetAliveCount: 75},
+		{AtMs: 40000, TargetAliveCount: 55},
+		{AtMs: 60000, TargetAliveCount: 35},
+		{AtMs: 80000, TargetAliveCount: 20},
+		{AtMs: 100000, TargetAliveCount: 10},
+		{AtMs: 120000, TargetAliveCount: 0},
+	}
+	if got := DefaultParameters().Cull.Stages; got != want {
+		t.Fatalf("既定の cullSchedule が企画確定値と違う\n got=%+v\nwant=%+v", got, want)
 	}
 }

@@ -23,15 +23,14 @@
 **裏取り時点**: proto **v0.8.0** / plan-h21（スコア制）適用後。参照元のファイル名・関数名を各所に明記してある。
 
 > 🔴 **本戦ルールへの移行途中**（`docs/plan-honsen/plan-h20` の移行マップ）。
-> この文書は **h21（スコア制）まで**を反映している。**まだ追随していない**のは:
+> この文書は **h22（時刻足切りと決着）まで**を反映している。**まだ追随していない**のは:
 >
 > | 未反映 | 担当 plan | 現在の記述 |
 > |---|---|---|
-> | 20秒等間隔の時刻足切り（`cullSchedule`）・120秒で全店脱落 | **h22** | §3.8・§4 は**予選の storm 仕様のまま** |
-> | `RankingSnapshot` / `RankingDelta` / `StoreEliminatedBatch`・配信順序・間引き | **h23** | §3.10 は `StoreListUpdate` のまま |
+> | `RankingSnapshot` / `RankingDelta` / `StoreEliminatedBatch`・配信順序・間引き | **h23** | §3.9 は `StoreListUpdate` のまま／足切りの脱落は1店ずつ `StoreEliminated` |
 >
-> 上記2つはサーバー実装もまだ予選仕様なので、**この文書は現在のサーバーの実挙動と一致している**。
-> h22 / h23 の PR でそれぞれ書き換えること。
+> これはサーバー実装もまだ予選仕様なので、**この文書は現在のサーバーの実挙動と一致している**。
+> h23 の PR で書き換えること。
 
 ---
 
@@ -233,7 +232,13 @@ UTF-16 単位で数えるので**完全一致はしない**。**サーバーの�
 {
   "matchId": "m-3",
   "selfStoreId": "p-42",
-  "params": { "maxStores": 99, "cullSchedule": [],
+  "params": { "maxStores": 99,
+              "cullSchedule": [ { "atMs": 20000,  "targetAliveCount": 75 },
+                                { "atMs": 40000,  "targetAliveCount": 55 },
+                                { "atMs": 60000,  "targetAliveCount": 35 },
+                                { "atMs": 80000,  "targetAliveCount": 20 },
+                                { "atMs": 100000, "targetAliveCount": 10 },
+                                { "atMs": 120000, "targetAliveCount": 0  } ],
               "scoreWeightTakoyaki": 100, "scoreWeightMiss": 30,
               "finalStageAliveThreshold": 20, "finalRushAliveThreshold": 10,
               "initialLife": 0, "stormThresholdPct": 0,
@@ -252,6 +257,9 @@ UTF-16 単位で数えるので**完全一致はしない**。**サーバーの�
 - `scoreWeightTakoyaki` / `scoreWeightMiss` — スコアの重み。
   `deltaScore = scoreWeightTakoyaki × たこ焼き数 − scoreWeightMiss × ミス数`。
   **スコア算出はサーバー権威**で、これを配るのは「+100」等の**加点演出のためだけ**
+- **`cullSchedule` が試合のタイムライン**。`atMs` に到達すると、生存数が `targetAliveCount` に
+  なるまでスコア下位から脱落する。**最終ステージ（120秒 / `targetAliveCount: 0`）で全店が
+  同時に脱落して試合が終わる**。**残り時間UIはここから組む**（別建ての制限時間フィールドは無い）
 - `finalStageAliveThreshold` / `finalRushAliveThreshold` は**演出の切り替え専用**。ゲーム進行には影響しない
 
 > 🔴 **ゼロ値で届く廃止フィールドを読まないこと。**
@@ -259,7 +267,7 @@ UTF-16 単位で数えるので**完全一致はしない**。**サーバーの�
 > 契約（proto v0.8.0・方式B）に定義が残っているだけで、**サーバーは値を入れない**。
 > `initialLife` をライフゲージの最大値に使うと 0 除算やゲージ消滅になる。
 >
-> `cullSchedule` は **h22 で埋まるまで空配列**。タイムラインUIはそれまで組めない。
+> `cullSchedule` は**全6ステージが必ず入る**（空配列では届かない）。これが試合のタイムラインの骨格。
 
 ### 3.3 `CustomerArrived`（= `CustomerView`）
 
@@ -326,7 +334,7 @@ UTF-16 単位で数えるので**完全一致はしない**。**サーバーの�
 
 フェーズが変えるもの: Claimer の解禁（Early は来ない）／火力（お題難度）の加算。
 
-> **本戦では脱落は Phase では起きない**（足切りの時刻スケジュールで起きる・h22）。
+> **脱落は Phase では起きない**（`cullSchedule` の時刻で起きる）。Phase は演出とお題難度の目安。
 > Phase は**演出の切り替えとお題難度の目安**として使う。
 
 ### 3.7 `ForcedEliminationWarning`
@@ -335,11 +343,26 @@ UTF-16 単位で数えるので**完全一致はしない**。**サーバーの�
 { "untilTick": 30, "thresholdPct": 0.1, "selfAtRisk": true }
 ```
 
-storm（下位淘汰）の予告。**1周期に1回だけ**届く。
+次の足切りの予告。**生存店それぞれへ常時届く**（予選は予告時のみだった）。
+右パネルが常設UIなので、「次の足切りまであと何秒」「誰が切られるか」が常に届いている。
 
-> 🔴 **これは予選仕様のまま。h22 で書き換わる。** 本戦では `untilMs` / `stageIndex` /
-> `stageTotal` / `cutLineRank` / `cutStoreIds` を持つ**常時配信**になり、`untilTick` /
-> `thresholdPct` は廃止される。**今この2つに依存した実装をしないこと。**
+| フィールド | 意味 |
+|---|---|
+| `untilMs` | 次の足切りまでの残りミリ秒。**受信時刻を起点にローカル補間する**（1秒ごとの正確な配信は保証しない） |
+| `stageIndex` / `stageTotal` | 第何段階 / 全何段階（1始まり・全6段階） |
+| `cutLineRank` | この順位より下が切られる境界（= `targetAliveCount + 1`）。**最終ステージだけ例外 → 下記** |
+| `cutStoreIds` | 現時点で切られる予定の店。**最大10件**（右パネルの表示件数ぶん）。危ない順 |
+| `selfAtRisk` | 自店が対象圏内か |
+| ~~`untilTick`~~ / ~~`thresholdPct`~~ | **常に 0**。予選の storm 由来（読まない） |
+
+**★`selfAtRisk` をそのまま使う。** `rank` と `cutLineRank` の比較をクライアントでやらない
+（勝敗に関わる推測をサーバー以外にさせない原則）。
+
+> **★最終ステージ（120秒）だけ `cutLineRank` は 2 が届く。**
+> 処理上は**1位を含む全店が脱落する**が、表示は「1位以外が脱落対象」とするのが企画意図
+> （決勝の緊張を最大化する）。表示を揃えるため、1位には `selfAtRisk: false` が届き、
+> `cutStoreIds` にも入らない。**「自分は安全」と表示されていても最後は必ず脱落する**ので、
+> 120秒の演出をこの値に依存させないこと。
 
 - `untilTick` は**実行までの残りtick数**。秒に直すなら `tickIntervalMs` を掛ける
 - **`selfAtRisk` は店ごとに違う**（だから全体配信ではなく個別配信）
@@ -354,7 +377,10 @@ storm（下位淘汰）の予告。**1周期に1回だけ**届く。
 `reason` は**常に `Cull`**。本戦（h21）で信用制が廃止され、`SelfCollapse`（自滅）の経路が消えたため、
 脱落経路は足切りの1本だけになった。`reason` で分岐する意味は無い。
 
-> h22 で複数店が同時に落ちるようになるため、`StoreEliminatedBatch`（1メッセージにまとめる）へ移る。
+**足切りでは複数店が同時に落ちる**（最初の足切りで24店）。現在は**1店につき1通**届く。
+
+> 🔴 **h23 で `StoreEliminatedBatch`（1回の足切りを1メッセージに畳む）へ移る。**
+> 演出を1つに集約できるようにするため。今は連続して届く前提で組んでおくこと。
 
 - **自店なら** → リザルトへ遷移。ただし**接続は切らない**（§5.4）
 - **他店なら** → ミニ盤面の更新
@@ -444,12 +470,16 @@ storm（下位淘汰）の予告。**1周期に1回だけ**届く。
 
 ## 4. 試合の終了条件
 
-**現在のサーバーは「生存店が1になったときだけ」終わる**（予選仕様のまま）。
+**`cullSchedule` の最終ステージ（120秒）で全店が同時に脱落して終わる。**
 
-> 🔴 **h22 で変わる。** 本戦は `cullSchedule` の最終ステージ（**120秒**）で**全店が同時に脱落**して終わる。
-> 実質の制限時間は `cullSchedule` の最終 `atMs`。`matchTimeLimitMs` は契約から削除されたままなので、
-> **残り時間は `cullSchedule` から自前で組む**（h22 で `MatchStart.params.cullSchedule` が埋まる）。
-> それまでは `cullSchedule` が空配列で届くため、タイムラインUIは組めない。
+- 「生存店が1になったら終了」は**廃止**。残った1店だけが試合に取り残される状態を作らないため
+- **1位も他の98店と同じ経路で脱落する**。`StoreEliminated`（`finalRank: 1`）と
+  `PersonalResult` を受け取ってから `MatchEnd` が届く
+- **勝者の特別扱いはサーバーが持たない**。リザルト演出は `PersonalResult.finalRank` で分岐する
+
+> **残り時間UIは `MatchStart.params.cullSchedule` の最終 `atMs` から組む。**
+> `matchTimeLimitMs` は契約から削除されたままで、**別建ての「制限時間」フィールドは増えない**
+> （時間の情報源を2つにすると、片方だけ更新されて食い違う）。
 
 ---
 
@@ -490,7 +520,7 @@ proto のコメントには「同時脱落のタイブレーク等に使用」�
 
 ### 5.7 数値をハードコードしない
 
-スコアの重み・演出のしきい値（および h22 以降は `cullSchedule`）は、すべて `MatchStart.params` から取る。
+スコアの重み・足切りスケジュール・演出のしきい値は、すべて `MatchStart.params` から取る。
 サーバー側は運営UIから試合中でも変更できる（次の試合から反映）。
 
 **ゼロ値で届く廃止フィールドを「設定されていない」と解釈して独自の既定値で補わないこと**

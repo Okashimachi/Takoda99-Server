@@ -12,14 +12,16 @@ import (
 // session.go は【層1コア】1試合の状態機械＋権威データ。純粋・Tick(dt)駆動（時計は持たず room が dt を渡す）。
 //
 // たこ焼き経営 BR: 99店が客を捌き合う。直接攻撃なし。
-// Tick loop: stepPhase → stepDistribute → stepRank → stepHeat → stepStorm → checkFinish
+// Tick loop: stepPhase → stepDistribute → stepRank → stepHeat → stepCull → checkFinish
 //
-// 本戦ルール（plan-h21）で順位を決める値が **評価（EMA×パーセンタイル正規化の相対値）→
-// スコア（累積の絶対値）** に変わった。あわせて信用・我慢ゲージ・客属性の評価効果を削除した。
-// スコアは ApplyOrderServed で加算されるので、tick 側にスコアの処理は無い（stepRank は並べるだけ）。
+// 本戦ルールの2本柱:
 //
-// ⚠ stepStorm / checkFinish は**まだ予選仕様**（tick周期の下位%淘汰・生存1店で終了）。
-// 20秒等間隔の時刻足切りと120秒全店脱落への置き換えは plan-h22。
+//   - 順位を決める値が **評価（EMA×パーセンタイル正規化の相対値）→ スコア（累積の絶対値）**
+//     （plan-h21）。信用・我慢ゲージ・客属性の評価効果は削除済み。
+//     スコアは ApplyOrderServed で加算されるので、tick 側にスコアの処理は無い。
+//   - 脱落が **storm の tick 周期・下位% → 20秒等間隔の時刻スケジュール・目標生存数**
+//     （plan-h22）。**120秒の最終ステージで全店が同時に脱落して試合が終わる**。
+//     「生存1店で終了」はもう無い（残った1店だけが試合に取り残される状態を作らないため）。
 
 // SessionState は試合の状態。
 type SessionState int
@@ -160,8 +162,9 @@ type Session struct {
 	aliveCount int
 
 	heatLevel        int
-	stormTickCounter int
-	stormWarnSent    bool
+	// cullStageIdx は**次に実行する**足切りステージの番号（0始まり）。
+	// len(params.Cull.Stages) に達したら全ステージ消化済み＝試合終了。
+	cullStageIdx int
 	customerSeq      int
 }
 
@@ -322,7 +325,7 @@ func (s *Session) Tick(dt int) []Outbound {
 	out = s.stepDistribute(out)
 	out = s.stepRank(out)
 	out = s.stepHeat(out)
-	out = s.stepStorm(out)
+	out = s.stepCull(out)
 	out = s.checkFinish(out)
 	return out
 }
@@ -509,78 +512,115 @@ func (s *Session) stepHeat(out []Outbound) []Outbound {
 	return out
 }
 
-func (s *Session) stepStorm(out []Outbound) []Outbound {
-	sp := s.params.Storm
-	if sp.IntervalTicks <= 0 {
+// stepCull は時刻足切り（本戦・plan-h22）。予選の storm（tick周期で下位%）を置き換えたもの。
+//
+// 「実行 → 予告」の順なのは、足切りが起きた tick に**次のステージの予告へ即座に切り替える**ため。
+// 逆順にすると、切られた直後の1tickだけ「もう終わったステージ」の残り0秒を配ることになる。
+func (s *Session) stepCull(out []Outbound) []Outbound {
+	stages := s.params.Cull.Stages
+
+	// dt が大きい（sim・テスト）と1tickで複数ステージを跨ぐことがあるので loop で追いつかせる。
+	for s.cullStageIdx < len(stages) && s.elapsedMs >= int64(stages[s.cullStageIdx].AtMs) {
+		idx := s.cullStageIdx
+		s.cullStageIdx++
+		out = s.executeCull(idx, out)
+	}
+
+	return s.cullWarnings(out)
+}
+
+// cullWarnings は次の足切りの予告を生存店それぞれへ返す。
+//
+// 予選は warnTicks 前だけ配信していたが、**本戦の右パネルは常設UI**なので毎tick配る
+// （「次の足切りまであと何秒」「誰が切られるか」が常に届いている必要がある）。
+// 実際の配信頻度の間引きは h23 の担当。ここは値を作るところまで。
+func (s *Session) cullWarnings(out []Outbound) []Outbound {
+	stages := s.params.Cull.Stages
+	if s.cullStageIdx >= len(stages) || s.aliveCount == 0 {
 		return out
 	}
-	s.stormTickCounter++
+	stage := stages[s.cullStageIdx]
 
-	warnAt := sp.IntervalTicks - sp.WarnTicks
-	if warnAt < 1 {
-		warnAt = 1
+	untilMs := stage.AtMs - int(s.elapsedMs)
+	if untilMs < 0 {
+		untilMs = 0
 	}
-	if s.stormTickCounter == warnAt && !s.stormWarnSent {
-		s.stormWarnSent = true
-		remaining := sp.IntervalTicks - s.stormTickCounter
 
-		// selfAtRisk は店ごとに異なるので broadcast できない（宛先別に配る）。
-		// 「今 storm が起きたら淘汰される集合」を淘汰本体と同じロジックで求める。
-		atRisk := s.cullTargets()
-		for _, sid := range s.order {
-			if !s.stores[sid].alive {
-				continue
-			}
-			out = append(out, to(sid, proto.ForcedEliminationWarning{
-				UntilTick:    remaining,
-				ThresholdPct: sp.ThresholdPct,
-				SelfAtRisk:   atRisk[sid],
-			}))
+	// 予告と実行で同じ選定関数を使う。ここがズレると「予告が嘘になる」。
+	candidates := s.cullCandidates(stage.TargetAliveCount)
+
+	// ★最終ステージだけ表示層を分ける（plan-h22 §3.2）。
+	//
+	// 処理層は targetAliveCount=0 のまま「1位を含む全店脱落」。
+	// 表示層は「1位以外が脱落対象」と見せる（決勝の緊張を最大化する企画意図）。
+	// cutLineRank だけ 2 にして selfAtRisk / cutStoreIds を据え置くと、同じ画面で
+	// 「カットラインは2位から」なのに1位に「あなたは脱落圏内」と出て矛盾するので、
+	// 表示層としてまとめて1位を外す。淘汰処理はこの分岐を一切見ない。
+	cutLineRank := stage.TargetAliveCount + 1
+	if stage.TargetAliveCount == 0 {
+		cutLineRank = 2
+		if len(candidates) > 0 {
+			candidates = candidates[:len(candidates)-1] // 末尾＝最強＝1位を外す
 		}
 	}
 
-	if s.stormTickCounter < sp.IntervalTicks {
-		return out
+	atRisk := make(map[PlayerId]bool, len(candidates))
+	for _, st := range candidates {
+		atRisk[st.id] = true
 	}
 
-	s.stormTickCounter = 0
-	s.stormWarnSent = false
-
-	if s.aliveCount <= 1 {
-		return out
+	// 表示件数の上限。候補は弱い順に並んでいるので、先頭から＝最も危ない店から詰める。
+	cutIds := make([]proto.StoreId, 0, cullWarnMaxIds)
+	for _, st := range candidates {
+		if len(cutIds) >= cullWarnMaxIds {
+			break
+		}
+		cutIds = append(cutIds, st.id)
 	}
 
-	out = s.executeCull(out)
+	for _, sid := range s.order {
+		if !s.stores[sid].alive {
+			continue
+		}
+		out = append(out, to(sid, proto.ForcedEliminationWarning{
+			UntilMs:     untilMs,
+			StageIndex:  s.cullStageIdx + 1, // 1始まり
+			StageTotal:  len(stages),
+			CutLineRank: cutLineRank,
+			CutStoreIds: cutIds,
+			SelfAtRisk:  atRisk[sid],
+		}))
+	}
 	return out
 }
 
-// cullCandidates は「今 storm が起きたら淘汰される店」を弱い順に返す。
+// cullWarnMaxIds は ForcedEliminationWarning.CutStoreIds の上限（右パネルの表示件数ぶん）。
+// 最終ステージでは候補が全店になるため、上限が無いと99件を毎tick全員へ配ることになる。
+const cullWarnMaxIds = 10
+
+// cullCandidates は「生存数を target まで減らすとき切られる店」を**弱い順**に返す。
 //
 // 予告(selfAtRisk)と実行(executeCull)で別々に判定すると、予告が嘘になったり
 // 「警告が出ていないのに落ちる」が起きる。両者はこの1関数を共有する。
-func (s *Session) cullCandidates() []*storeState {
-	sp := s.params.Storm
-
+func (s *Session) cullCandidates(target int) []*storeState {
 	alive := s.aliveStores()
-	if len(alive) <= 1 {
+	cutCount := len(alive) - target
+	if cutCount <= 0 {
+		// 既に目標を下回っている。切る数が負になる事故の保険（plan-h22 §3）。
 		return nil
 	}
-
-	cullCount := int(float64(len(alive))*sp.ThresholdPct + 0.999999)
-	if cullCount < 1 {
-		cullCount = 1
-	}
-	if cullCount >= len(alive) {
-		cullCount = len(alive) - 1
-	}
-
 	sortWeakestFirst(alive)
-	return alive[:cullCount]
+	return alive[:cutCount]
 }
 
-// cullTargets は淘汰対象の店IDの集合（予告の selfAtRisk 用）。
-func (s *Session) cullTargets() map[PlayerId]bool {
-	targets := s.cullCandidates()
+// cullTargetIds は「次の足切りで切られる店」のIDの集合（観測用）。
+// 全ステージ消化済みなら空。
+func (s *Session) cullTargetIds() map[PlayerId]bool {
+	stages := s.params.Cull.Stages
+	if s.cullStageIdx >= len(stages) {
+		return nil
+	}
+	targets := s.cullCandidates(stages[s.cullStageIdx].TargetAliveCount)
 	m := make(map[PlayerId]bool, len(targets))
 	for _, st := range targets {
 		m[st.id] = true
@@ -588,18 +628,18 @@ func (s *Session) cullTargets() map[PlayerId]bool {
 	return m
 }
 
-func (s *Session) executeCull(out []Outbound) []Outbound {
-	// 対象の選定は予告(selfAtRisk)と同じ関数を使う。ここがズレると予告が嘘になる。
-	culled := s.cullCandidates()
+// executeCull はステージ stageIdx の足切りを実行する。
+func (s *Session) executeCull(stageIdx int, out []Outbound) []Outbound {
+	target := s.params.Cull.Stages[stageIdx].TargetAliveCount
+
+	// 対象の選定は予告と同じ関数を使う。ここがズレると予告が嘘になる。
+	culled := s.cullCandidates(target)
 	if len(culled) == 0 {
 		return out
 	}
 
-	// 淘汰対象の中での順位は、自滅と同じ総合判定で決める。
-	sortWeakestFirst(culled)
-
-	for i := 0; i < len(culled); i++ {
-		st := culled[i]
+	// 弱い順に落とす＝弱い店ほど下の finalRank が付く。
+	for _, st := range culled {
 		st.alive = false
 		st.survivedMs = s.elapsedMs
 		s.aliveCount--
@@ -612,6 +652,8 @@ func (s *Session) executeCull(out []Outbound) []Outbound {
 		st.finalRank = s.aliveCount + 1
 		st.elimination = string(proto.ElimCull)
 
+		// h23 で StoreEliminatedBatch（1回の足切りを1メッセージに畳む）へ移す。
+		// 本 plan は「値を作る」ところまでで、配信の再設計は h23 の担当。
 		out = append(out, broadcastMsg(proto.StoreEliminated{
 			StoreId:   st.id,
 			Reason:    proto.ElimCull,
@@ -685,32 +727,24 @@ func sortStrongestFirst(stores []*storeState) {
 	sort.SliceStable(stores, func(i, j int) bool { return weakerForRank(stores[j], stores[i]) })
 }
 
+// checkFinish は最終ステージの実行（＝全店脱落）で試合を終える（本戦・plan-h22 §4）。
+//
+// **「生存1店で終了」はやめた。** 9店を落として1店を残す形にすると、残った1店だけが
+// 試合に取り残される状態が生まれ得る（予選の開発で実際に発生）。全店が同じタイミングで
+// 同じ状態に入れば、その特殊ケースが消える。
+//
+// **勝者の特別扱いはサーバーが持たない。** 1位も他の98店と同じ経路で
+// executeCull → PersonalResult を受け取る（優勝者の識別子は finalRank=1 の
+// StoreEliminated が全員へブロードキャストされることで届く）。
+// ここで送るのは締めの MatchEnd（空）だけ。
 func (s *Session) checkFinish(out []Outbound) []Outbound {
-	if len(s.order) <= 1 {
-		return out
-	}
-	if s.aliveCount > 1 {
+	if s.state == Finished || s.aliveCount > 0 {
 		return out
 	}
 
 	s.state = Finished
 
 	for _, pid := range s.order {
-		if st := s.stores[pid]; st.alive {
-			st.finalRank = 1
-			st.elimination = ""
-			st.survivedMs = s.elapsedMs
-			break
-		}
-	}
-
-	for _, pid := range s.order {
-		st := s.stores[pid]
-		if st.alive {
-			// 優勝者には PersonalResult と MatchEnd の両方を送る
-			out = append(out, to(pid, s.buildPersonalResult(st)))
-		}
-		// 全体へは MatchEnd (空) を送る
 		out = append(out, to(pid, proto.MatchEnd{}))
 	}
 	return out
@@ -886,10 +920,20 @@ func (s *Session) summaries() []proto.StoreSummary {
 // publicParams は MatchStart で配る公開サブセット。
 //
 // 廃止フィールド（initialLife / stormThresholdPct / patience*）には値を入れない。
-// CullSchedule は h22（時刻足切り）で GameParameters に入ってから詰める。
 func (s *Session) publicParams() proto.GameParametersPublicSubset {
+	// 内部は配列（== 比較可能に保つため）、ワイヤは slice。ここで変換する。
+	// **常に非nilで送る**（Go の nil スライスは [] ではなく null になり、C#/TS 側が落ちる）。
+	stages := s.params.Cull.Stages
+	schedule := make([]proto.CullStageView, 0, len(stages))
+	for _, st := range stages {
+		schedule = append(schedule, proto.CullStageView{
+			AtMs:             st.AtMs,
+			TargetAliveCount: st.TargetAliveCount,
+		})
+	}
 	return proto.GameParametersPublicSubset{
-		MaxStores: len(s.order),
+		MaxStores:    len(s.order),
+		CullSchedule: schedule,
 		// スコア算出はサーバー権威。これを配るのは「+100」等の加点演出のためだけ。
 		ScoreWeightTakoyaki:      s.params.Score.WeightTakoyaki,
 		ScoreWeightMiss:          s.params.Score.WeightMiss,
@@ -962,11 +1006,20 @@ func (a *AttrCounts) add(attr proto.CustomerAttribute) {
 	}
 }
 
-// StormView は下位淘汰(storm)の観測用ビュー。
-type StormView struct {
-	Warning      bool    // 予告中（stepStorm が予告を出してから実行までの間）
-	UntilTick    int     // 実行までの残りtick（Warning 中のみ有効）
-	ThresholdPct float64 // 淘汰される正規化評価下位の割合
+// CullView は時刻足切りの観測用ビュー（本戦・plan-h22）。
+//
+// 予選の StormView（Warning / UntilTick / ThresholdPct）を置き換えたもの。
+// 本戦の予告は常時なので「予告中かどうか」のフラグは無い。
+type CullView struct {
+	// StageIndex は次に来るステージ（1始まり）。全ステージ消化済みなら 0。
+	StageIndex int
+	StageTotal int
+	// UntilMs は次のステージまでの残りミリ秒。全ステージ消化済みなら 0。
+	UntilMs int
+	// TargetAliveCount は次のステージ実行後の目標生存数。
+	TargetAliveCount int
+	// CutLineRank はこの順位より下が切られる境界（表示用。最終ステージは 2）。
+	CutLineRank int
 }
 
 // StoreBoardRow は1店の観測用の行（AdminSnapshot 用の素材）。
@@ -1017,22 +1070,30 @@ func (s *Session) CustomerMix() AttrCounts {
 	return a
 }
 
-// StormState は storm 予告の状態を返す。
-func (s *Session) StormState() StormView {
-	sp := s.params.Storm
-	v := StormView{Warning: s.stormWarnSent, ThresholdPct: sp.ThresholdPct}
-	if s.stormWarnSent {
-		if u := sp.IntervalTicks - s.stormTickCounter; u > 0 {
-			v.UntilTick = u
-		}
+// CullState は次の足切りの状態を返す（観測用）。
+func (s *Session) CullState() CullView {
+	stages := s.params.Cull.Stages
+	v := CullView{StageTotal: len(stages)}
+	if s.cullStageIdx >= len(stages) {
+		return v
+	}
+	stage := stages[s.cullStageIdx]
+	v.StageIndex = s.cullStageIdx + 1
+	v.TargetAliveCount = stage.TargetAliveCount
+	v.CutLineRank = stage.TargetAliveCount + 1
+	if stage.TargetAliveCount == 0 {
+		v.CutLineRank = 2 // 表示層のみ（plan-h22 §3.2）
+	}
+	if u := stage.AtMs - int(s.elapsedMs); u > 0 {
+		v.UntilMs = u
 	}
 	return v
 }
 
-// StoreBoard は99店の観測用の行を order 順で返す。行列長・提供数・storm対象圏・
-// 行列の属性内訳を含む。AtRisk は「今 storm が起きたら淘汰される店」（予告と同一ロジック）。
+// StoreBoard は99店の観測用の行を order 順で返す。行列長・提供数・足切り対象圏・
+// 行列の属性内訳を含む。AtRisk は「次の足切りで切られる店」（予告と同一ロジック）。
 func (s *Session) StoreBoard() []StoreBoardRow {
-	atRisk := s.cullTargets()
+	atRisk := s.cullTargetIds()
 	out := make([]StoreBoardRow, 0, len(s.order))
 	for _, sid := range s.order {
 		st := s.stores[sid]
