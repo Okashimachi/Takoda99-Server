@@ -5,6 +5,14 @@
 > **依存**: なし（既存 `StoreListUpdate` に相乗り）
 > **参照**: **[plan-h00 共有コントラクト](plan-h00_共有コントラクト.md)（AdminHub I/F・配線・`/admin`サーフェスの正典。まず読む）**, `docs/architecture.md` §7, `internal/transport/publisher.go`, `internal/configapi/handler.go`（トークン方式）
 
+> ✅ **実装済み**（Server #106 / DashBoard #1、2026-08-12 マージ）。
+>
+> ⚠ **本戦版は [plan-h25](plan-h25_観測ダッシュボードの本戦対応.md)。** 本 plan は予選ルール前提で書かれている：
+> - 表示する「体力（`creditLife`）・評価（`evalNormalized`）」は本戦で**廃止**され、`score` へ置き換わる（h21）。
+> - MVP が相乗りした **`StoreListUpdate` の定期配信は h23 で停止**する（`RankingSnapshot`/`RankingDelta` へ）。
+>   → **h01 のデータ源そのものが消える**ので、本戦ダッシュボードは h02 の `AdminSnapshot` 系（→ h25 で v2 化）に一本化する。
+> - **配管（AdminHub / `/admin` / `/admin/ws` / 静的配信）は無傷で流用される。** 消えるのは表示フィールドとデータ源だけ。
+
 ---
 
 ## 0. 前提知識
