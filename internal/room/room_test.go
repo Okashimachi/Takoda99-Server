@@ -83,7 +83,7 @@ func TestRoom_CoreLoopThroughConnection(t *testing.T) {
 	}
 }
 
-// hub を注入すると、publish() のたびに観測 conn へ StoreListUpdate が届く（plan-h01）。
+// hub を注入すると、publish() のたびに観測 conn へ AdminSnapshot が届く（plan-h01/h02）。
 func TestRoom_BroadcastsToAdminHub(t *testing.T) {
 	sess := game.NewSession("m1", game.DefaultParameters(),
 		stubWords{},
@@ -96,7 +96,7 @@ func TestRoom_BroadcastsToAdminHub(t *testing.T) {
 
 	tickCh := make(chan time.Time, 1)
 	rm := New(sess, conns, 150, manualClock{ticker: manualTicker{c: tickCh}},
-		transport.NewFullPublisher(0))
+		transport.NewRankingPublisher(game.DefaultParameters().Publish))
 
 	// 観測者を hub に登録（/admin/ws 相当）。
 	hub := admin.NewHub()
@@ -164,5 +164,152 @@ func TestRoom_ClosesConnectionsOnExit(t *testing.T) {
 	}
 	if !drained {
 		t.Fatal("Run 終了後も接続が閉じていない")
+	}
+}
+
+// ── 配信層（plan-h23）───────────────────────────────────────
+
+// Recipient はテスト用の宛先ヘルパ（空文字＝ブロードキャスト）。
+func Recipient(t *testing.T, pid game.PlayerId) game.Recipient {
+	t.Helper()
+	if pid == "" {
+		return game.Recipient{Broadcast: true}
+	}
+	return game.Recipient{PlayerId: pid}
+}
+
+// newThrottleSession は間引きテスト用の最小セッション（パラメータだけ使う）。
+func newThrottleSession(t *testing.T) *game.Session {
+	t.Helper()
+	return game.NewSession("t", game.DefaultParameters(), stubWords{},
+		rand.New(rand.NewSource(1)), []game.PlayerInit{{Id: "s-1"}})
+}
+
+// envelopeOf が本戦で使う全メッセージを変換できる。
+//
+// 🔴 **ここに無い型は dispatch で黙って捨てられる。** 追加漏れは「なぜか届かない」という
+// 追いにくい不具合になるので、game が返しうる型を網羅して固定する。
+func TestEnvelopeOf_CoversAllHonsenMessages(t *testing.T) {
+	cases := []struct {
+		msg  any
+		want string
+	}{
+		{proto.MatchStart{}, proto.TypeMatchStart},
+		{proto.CustomerView{}, proto.TypeCustomerArrived},
+		{proto.EvaluationUpdate{}, proto.TypeEvaluationUpdate},
+		{proto.DifficultyUpdate{}, proto.TypeDifficultyUpdate},
+		{proto.PhaseChange{}, proto.TypePhaseChange},
+		{proto.ForcedEliminationWarning{}, proto.TypeForcedEliminationWarning},
+		{proto.StoreEliminated{}, proto.TypeStoreEliminated},
+		{proto.StoreEliminatedBatch{}, proto.TypeStoreEliminatedBatch},
+		{proto.RankingSnapshot{}, proto.TypeRankingSnapshot},
+		{proto.RankingDelta{}, proto.TypeRankingDelta},
+		{proto.PersonalResult{}, proto.TypePersonalResult},
+		{proto.MatchEnd{}, proto.TypeMatchEnd},
+		{proto.MatchmakingStatus{}, proto.TypeMatchmakingStatus},
+	}
+	for _, c := range cases {
+		env, ok := envelopeOf(c.msg)
+		if !ok {
+			t.Fatalf("%T が変換できない（dispatch で捨てられる）", c.msg)
+		}
+		if env.Type != c.want {
+			t.Fatalf("%T → type=%q, want %q", c.msg, env.Type, c.want)
+		}
+	}
+
+	// 未知の型は捨てる（型を足したのに envelopeOf を直し忘れたら false になる）。
+	if _, ok := envelopeOf(struct{ X int }{}); ok {
+		t.Fatal("未知の型が変換されている")
+	}
+}
+
+// 定期の EvaluationUpdate / ForcedEliminationWarning が間引かれる（plan-h23 §4）。
+func TestDispatchTick_ThrottlesPeriodicMessages(t *testing.T) {
+	r := &Room{
+		session:   newThrottleSession(t),
+		conns:     map[game.PlayerId]transport.Connection{},
+		elapsedMs: 0,
+	}
+	evalIv := int64(r.session.Params().Publish.EvaluationIntervalMs)
+
+	out := []game.Outbound{
+		{To: Recipient(t, "s-1"), Msg: proto.EvaluationUpdate{}},
+		{To: Recipient(t, "s-1"), Msg: proto.ForcedEliminationWarning{}},
+	}
+
+	// 初回は必ず通る（起動直後に何も届かない時間を作らない）。
+	if got := r.throttle(out); len(got) != 2 {
+		t.Fatalf("初回=%d件, want 2", len(got))
+	}
+	// 間隔未満 → 両方落ちる。
+	r.elapsedMs = evalIv - 1
+	if got := r.throttle(out); len(got) != 0 {
+		t.Fatalf("間引かれていない: %d件", len(got))
+	}
+	// EvaluationUpdate の間隔だけ経過 → EvaluationUpdate は通り、予告はまだ落ちる。
+	r.elapsedMs = evalIv
+	got := r.throttle(out)
+	if len(got) != 1 {
+		t.Fatalf("evalのみ通るはず: %d件", len(got))
+	}
+	if _, ok := got[0].Msg.(proto.EvaluationUpdate); !ok {
+		t.Fatalf("通ったのが EvaluationUpdate でない: %T", got[0].Msg)
+	}
+}
+
+// 🔴 足切りバースト（StoreEliminatedBatch を含む配信）は間引かれない。
+//
+// 順位が大量に入れ替わった直後を落とすと、次の配信まで表示がズレたままになる。
+func TestDispatchTick_BurstBypassesThrottle(t *testing.T) {
+	r := &Room{
+		session: newThrottleSession(t),
+		conns:   map[game.PlayerId]transport.Connection{},
+	}
+	periodic := []game.Outbound{{To: Recipient(t, "s-1"), Msg: proto.EvaluationUpdate{}}}
+	r.throttle(periodic) // 初回を消費して throttle を効かせる
+
+	r.elapsedMs = 1 // 間隔には遠く及ばない
+	if got := r.throttle(periodic); len(got) != 0 {
+		t.Fatalf("前提が崩れた: 間引かれていない %d件", len(got))
+	}
+
+	burst := []game.Outbound{
+		{To: Recipient(t, ""), Msg: proto.StoreEliminatedBatch{}},
+		{To: Recipient(t, "s-1"), Msg: proto.PersonalResult{}},
+		{To: Recipient(t, "s-1"), Msg: proto.EvaluationUpdate{}},
+		{To: Recipient(t, ""), Msg: proto.RankingSnapshot{}},
+		{To: Recipient(t, "s-1"), Msg: proto.ForcedEliminationWarning{}},
+	}
+	got := r.throttle(burst)
+	if len(got) != len(burst) {
+		t.Fatalf("バーストが間引かれた: %d件, want %d", len(got), len(burst))
+	}
+}
+
+// OrderServed の即レスは間引かれない（dispatch を直接通る）。
+//
+// クライアントは「提供したのに EvaluationUpdate が返らない＝リジェクト」で不正申告を
+// 検知している。ここを間引くとリジェクトが判別できなくなる。
+func TestDispatch_ImmediateResponseIsNotThrottled(t *testing.T) {
+	srv, cli := transport.Pipe()
+	r := &Room{
+		session: newThrottleSession(t),
+		conns:   map[game.PlayerId]transport.Connection{"s-1": srv},
+	}
+	// 直前に tick 由来の EvaluationUpdate を通しておく（throttle の時計を進める）。
+	r.throttle([]game.Outbound{{To: Recipient(t, "s-1"), Msg: proto.EvaluationUpdate{}}})
+
+	// 間隔未満でも dispatch は素通しする。
+	r.elapsedMs = 1
+	r.dispatch([]game.Outbound{{To: Recipient(t, "s-1"), Msg: proto.EvaluationUpdate{}}})
+
+	select {
+	case env := <-cli.Receive():
+		if env.Type != proto.TypeEvaluationUpdate {
+			t.Fatalf("type=%s, want EvaluationUpdate", env.Type)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("即レスが間引かれた（リジェクト検知が壊れる）")
 	}
 }

@@ -5,6 +5,18 @@
 // canonical に新メッセージ/型が増えたら、この再輸出リストにも1行追加する
 // （未追加の型を使うと "undefined" の明示的コンパイルエラーになる）。型の追加・変更・削除は
 // canonical 側で人間（りーせ）承認を得てから行う。
+//
+// 🔴 **サーバーが送らなくなった型は、ここから再輸出も消すこと**（plan-h23 §5.1）。
+// canonical 側は方式B（Deprecated マーカーを付けて定義は残す）なので契約は壊れず、
+// 旧クライアントも受け取れる。だが**ラッパが名指しで再輸出している限り staticcheck の
+// SA1019 が消えない**ため、「廃止フィールドの参照が消えたか」を lint で検知できなくなる。
+//
+// 本戦移行（h21〜h23）で以下を削除した。復活させないこと:
+//
+//	CustomerLeft / LeaveReason / LeaveTimeout          … 客が逃げない（h21）
+//	CreditUpdate / CreditReason / CreditCustomerLeft   … 信用制の廃止（h21）
+//	ElimSelfCollapse                                   … 自滅の経路が消えた（h21・脱落は Cull のみ）
+//	StoreListUpdate / TypeStoreListUpdate              … Ranking 系へ置換（h23）
 package proto
 
 import canon "github.com/Okashimachi/Takoda99-Proto/proto"
@@ -21,8 +33,6 @@ type (
 	CustomerAttribute = canon.CustomerAttribute
 	Phase             = canon.Phase
 	EliminationReason = canon.EliminationReason
-	LeaveReason       = canon.LeaveReason
-	CreditReason      = canon.CreditReason
 )
 
 const (
@@ -35,12 +45,7 @@ const (
 	PhaseMid   = canon.PhaseMid
 	PhaseLate  = canon.PhaseLate
 
-	ElimSelfCollapse = canon.ElimSelfCollapse
-	ElimCull         = canon.ElimCull
-
-	LeaveTimeout = canon.LeaveTimeout
-
-	CreditCustomerLeft = canon.CreditCustomerLeft
+	ElimCull = canon.ElimCull
 )
 
 // ── 共通DTO ────────────────────────────────────────────────
@@ -67,12 +72,9 @@ const (
 	// S2C
 	TypeMatchStart               = canon.TypeMatchStart
 	TypeCustomerArrived          = canon.TypeCustomerArrived
-	TypeCustomerLeft             = canon.TypeCustomerLeft
-	TypeCreditUpdate             = canon.TypeCreditUpdate
 	TypeEvaluationUpdate         = canon.TypeEvaluationUpdate
 	TypeDifficultyUpdate         = canon.TypeDifficultyUpdate
 	TypePhaseChange              = canon.TypePhaseChange
-	TypeStoreListUpdate          = canon.TypeStoreListUpdate
 	TypeForcedEliminationWarning = canon.TypeForcedEliminationWarning
 	TypeStoreEliminated          = canon.TypeStoreEliminated
 	TypePersonalResult           = canon.TypePersonalResult
@@ -96,12 +98,9 @@ type (
 type (
 	MatchStart               = canon.MatchStart
 	CustomerArrived          = canon.CustomerArrived
-	CustomerLeft             = canon.CustomerLeft
-	CreditUpdate             = canon.CreditUpdate
 	EvaluationUpdate         = canon.EvaluationUpdate
 	DifficultyUpdate         = canon.DifficultyUpdate
 	PhaseChange              = canon.PhaseChange
-	StoreListUpdate          = canon.StoreListUpdate
 	ForcedEliminationWarning = canon.ForcedEliminationWarning
 	StoreEliminated          = canon.StoreEliminated
 	PersonalResult           = canon.PersonalResult

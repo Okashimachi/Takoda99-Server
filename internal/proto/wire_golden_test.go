@@ -13,7 +13,11 @@ import (
 //
 // 廃止（Deprecated）フィールドは方式Bで型定義に残っているので JSON にも出続ける。
 // **ここにゼロ値で出ていることは「サーバーがもう値を入れない」ことの固定**であって、
-// 使ってよいという意味ではない（h21〜h23 でサーバー側の参照そのものを消す）。
+// 使ってよいという意味ではない。
+//
+// 廃止**型**（CustomerLeft / CreditUpdate / StoreListUpdate）のケースは h23 で削除した。
+// internal/proto から再輸出そのものを消したため（plan-h23 §5.1）、ここでも参照できない。
+// canonical 側には方式Bで定義が残っており、契約は壊れていない。
 func TestWireGolden(t *testing.T) {
 	cases := []struct {
 		name string
@@ -40,12 +44,6 @@ func TestWireGolden(t *testing.T) {
 		{"CustomerArrived/我慢ゲージは廃止（サーバーは値を入れない）",
 			CustomerView{CustomerId: "c-1", Attribute: AttrNormal, OrderCount: 2, Words: []string{"ねこ", "いぬ"}},
 			`{"customerId":"c-1","attribute":"Normal","orderCount":2,"words":["ねこ","いぬ"],"patienceMaxMs":0,"patienceStartedAtServerMs":0}`},
-		{"CustomerLeft",
-			CustomerLeft{CustomerId: "c-1", Reason: LeaveTimeout},
-			`{"customerId":"c-1","reason":"Timeout"}`},
-		{"CreditUpdate",
-			CreditUpdate{Life: 2, Delta: -1, Reason: CreditCustomerLeft},
-			`{"life":2,"delta":-1,"reason":"CustomerLeft"}`},
 		{"EvaluationUpdate/自店の順位の権威は score と rank",
 			EvaluationUpdate{Score: 12300, Rank: 3, AliveCount: 50},
 			`{"score":12300,"rank":3,"aliveCount":50,"evalRaw":0,"normalized":0,"starRating":0,"starDelta":0}`},
@@ -55,12 +53,6 @@ func TestWireGolden(t *testing.T) {
 		{"PhaseChange",
 			PhaseChange{Phase: PhaseMid},
 			`{"phase":"Mid"}`},
-		{"StoreListUpdate/生存店はfinalRankを出さない",
-			StoreListUpdate{Stores: []StoreSummary{{StoreId: "s1", DisplayName: "s1", Alive: true, Score: 4200}}, AliveCount: 1},
-			`{"stores":[{"storeId":"s1","displayName":"s1","rank":0,"alive":true,"score":4200,"evalNormalized":0,"creditLife":0}],"aliveCount":1}`},
-		{"StoreListUpdate/脱落店はfinalRankを出す",
-			StoreListUpdate{Stores: []StoreSummary{{StoreId: "s2", DisplayName: "s2", Alive: false, Score: -60, FinalRank: ptrInt(42)}}, AliveCount: 1},
-			`{"stores":[{"storeId":"s2","displayName":"s2","rank":0,"alive":false,"score":-60,"evalNormalized":0,"creditLife":0,"finalRank":42}],"aliveCount":1}`},
 		{"ForcedEliminationWarning/常時配信の秒読みとカットライン",
 			ForcedEliminationWarning{
 				UntilMs: 8200, StageIndex: 3, StageTotal: 6, CutLineRank: 36,
@@ -133,5 +125,3 @@ func TestWireGolden(t *testing.T) {
 		}
 	}
 }
-
-func ptrInt(v int) *int { return &v }

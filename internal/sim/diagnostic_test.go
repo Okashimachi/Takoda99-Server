@@ -55,7 +55,6 @@ func TestDiagnostic_CustomerLifecycle(t *testing.T) {
 	emptyWordCount := 0
 	duplicateIdCount := 0
 	totalArrived := 0
-	totalLeft := 0
 	totalServed := 0
 	rejected := 0
 
@@ -103,26 +102,18 @@ func TestDiagnostic_CustomerLifecycle(t *testing.T) {
 					d.arrive(m)
 				}
 
-			case proto.CustomerLeft:
-				totalLeft++
-				delete(activeCustomers, m.CustomerId)
-				events = append(events, customerEvent{
-					tick: tick, action: "left", store: o.To.PlayerId,
-					cid: m.CustomerId,
-				})
-				if d := byId[o.To.PlayerId]; d != nil {
-					d.leave(m.CustomerId)
-				}
-
-			case proto.StoreEliminated:
-				// 脱落した店の客をactiveCustomersから除去
-				for cid, store := range activeCustomers {
-					if store == game.PlayerId(m.StoreId) {
-						delete(activeCustomers, cid)
+			case proto.StoreEliminatedBatch:
+				// 足切りは1メッセージに畳まれて届く（h23）。
+				for _, e := range m.Entries {
+					// 脱落した店の客をactiveCustomersから除去
+					for cid, store := range activeCustomers {
+						if store == game.PlayerId(e.StoreId) {
+							delete(activeCustomers, cid)
+						}
 					}
-				}
-				if d := byId[game.PlayerId(m.StoreId)]; d != nil {
-					d.alive = false
+					if d := byId[game.PlayerId(e.StoreId)]; d != nil {
+						d.alive = false
+					}
 				}
 			}
 		}
@@ -179,9 +170,9 @@ func TestDiagnostic_CustomerLifecycle(t *testing.T) {
 		elapsed := sess.ElapsedMs()
 		if elapsed >= nextLogMs {
 			alive := sess.AliveCount()
-			t.Logf("[%5.1fs | tick=%d] alive=%d arrived=%d left=%d served=%d rejected=%d active=%d emptyWords=%d dupeId=%d starved=%dticks",
+			t.Logf("[%5.1fs | tick=%d] alive=%d arrived=%d served=%d rejected=%d active=%d emptyWords=%d dupeId=%d starved=%dticks",
 				float64(elapsed)/1000.0, tick, alive,
-				totalArrived, totalLeft, totalServed, rejected,
+				totalArrived, totalServed, rejected,
 				len(activeCustomers), emptyWordCount, duplicateIdCount,
 				starvedTicks)
 
@@ -207,7 +198,6 @@ func TestDiagnostic_CustomerLifecycle(t *testing.T) {
 	t.Logf("")
 	t.Logf("========== 診断結果サマリー ==========")
 	t.Logf("  総来店数 (CustomerView 送信):  %d", totalArrived)
-	t.Logf("  総離脱数 (CustomerLeft):       %d", totalLeft)
 	t.Logf("  総提供数 (OrderServed):        %d", totalServed)
 	t.Logf("  拒否数   (Rejected):           %d", rejected)
 	t.Logf("  お題空配信:                    %d", emptyWordCount)

@@ -16,26 +16,6 @@ linters:
     - staticcheck
     - unused
 
-  # ── 一時的な除外（本戦ルール移行の期間限定） ──────────────────
-  exclusions:
-    rules:
-      # 本戦ルール移行（plan-h20〜h23）の期間だけ SA1019 を抑止する。
-      #
-      # proto v0.8.0 で信用・我慢ゲージ・相対評価のフィールドに Deprecated: を付けたが、
-      # サーバー側の移行はこれから（h21〜h23）。移行前のコードが全部警告になり CI が赤くなるため、
-      # 移行期間だけ黙らせる。
-      #
-      # 抑止時点の内訳（33件）: internal/game/session_test.go 27 / internal/proto/messages.go 5 /
-      # internal/app/headless_test.go 1。本体コードはほぼゼロで、大半が移行で書き換わるテスト。
-      #
-      # ★解除条件: h23 完了時（廃止フィールドの参照がサーバーから消えた時点）にこの除外を外す。
-      #   外した状態で golangci-lint run が緑なら、移行が本当に完了している証拠になる。
-      #   → この除外は「移行完了の検知器」を兼ねる。緑なら完了、赤なら参照が残っている。
-      #   （plan-h20 §2.2 / plan-h23 の完了条件）
-      - linters:
-          - staticcheck
-        text: "SA1019"
-
   settings:
     depguard:
       rules:
