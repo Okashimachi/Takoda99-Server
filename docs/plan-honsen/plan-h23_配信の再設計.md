@@ -71,8 +71,17 @@ RankingChange{ StoreId, Score, Alive }                 // ★Rank を持たな�
 
 ### 1.3 差分の判定基準（差分を有効化するとき）
 
-**epsilon 不要。** `score` は整数アキュムレータで `OrderServed` の瞬間しか動かないため、
-`ApplyOrderServed` で dirty フラグを立てれば**厳密かつ安価**に「変化した店」が取れる。
+**epsilon 不要。** `score` は整数アキュムレータなので厳密比較でよい。
+
+> ★**実装で確定（PR #116）：判定は publisher 側に置く**（当初案の「`game` に dirty フラグ」は採らない）。
+>
+> `game` に dirty フラグを持たせると **配信都合の状態がコアに入る**（AGENTS.md §1.4 違反）。
+> さらに「前回配信からの dirty」は本質的に **publisher 相対の状態**なので、
+> publish 間隔 > tick 間隔のときコア側で正しく管理できない（送る前にフラグが消える／
+> 「いつからの dirty か」をコアが知る必要が出る）。
+>
+> **publisher が前回送信分と厳密比較する**方式なら、状態の持ち主が正しく
+> （何を最後に送ったかを知っているのは publisher）、コアは純粋なまま同じ結果が得られる。
 
 ### 1.4 `StoreListUpdate` をやめる
 
