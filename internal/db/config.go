@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 	"time"
 
@@ -132,36 +133,42 @@ func (s *ConfigStore) Save(ctx context.Context, gp game.GameParameters) error {
 	return nil
 }
 
+// backfillDefaults は DB に無いグループを内蔵デフォルトで補完する。
+//
+// **なぜ要るか**: DB の JSON に無いキーは unmarshal でゼロ値のまま残る。そのゼロ値は
+// Validate を通らない（例: `publish.evaluationIntervalMs = 0`）ので Load 全体が失敗し、
+// **config が丸ごと内蔵デフォルト起動になる**。ログを見ていないと気付けないうえ、
+// 「config-front から変えても何も起きない」という形で当日に効く。
+//
+// 🔴 **列挙で書かない。** 以前はグループを1つずつ `if gp.X == (game.XParams{})` と
+// 並べていたが、**h23 で Publish を足したときに追記を忘れて本番が実際に壊れた**
+// （2026-08-14・本戦10日前）。h21 で Score/Sanity を足したときは気付けたのに、
+// 次に足したグループで同じ穴に落ちている。「気をつける」では再発する。
+//
+// そこでリフレクションで **GameParameters の全フィールドを機械的に走査**する。
+// これなら**新しいグループを足しても自動で対象になる**（忘れようがない）。
+// GameParameters の全フィールドは `*Params` 構造体で `==` 比較可能（AGENTS.md §1.3）なので
+// `IsZero()` がそのまま「DBに無かった」の判定になる。
+//
+// 起動時に1回しか走らないのでリフレクションのコストは無視できる。
+//
+// ⚠ 補完はグループ単位。グループが**部分的に**入っている JSON（一部キーだけ欠ける）は
+// 補完されない。config-front は常にフルオブジェクトを送るので実運用では起きないが、
+// 手で DB を編集するときは1グループを丸ごと入れるか丸ごと消すこと。
+//
+// ⚠ 廃止キー（credit / patience / eval / distribution.weightFloor / storm）は DB に残り続ける。
+// JSON の未知キーは無視されるので害は無いが、config-front の UI からは消すこと（h24 で対応済み）。
 func backfillDefaults(gp *game.GameParameters, def game.GameParameters) {
-	if gp.Phase == (game.PhaseParams{}) {
-		gp.Phase = def.Phase
-	}
-	if gp.Heat == (game.HeatParams{}) {
-		gp.Heat = def.Heat
-	}
-	if gp.Cull == (game.CullParams{}) {
-		gp.Cull = def.Cull
-	}
-	if gp.Distribution == (game.DistributionParams{}) {
-		gp.Distribution = def.Distribution
-	}
-	if gp.Presentation == (game.PresentationParams{}) {
-		gp.Presentation = def.Presentation
-	}
-	if gp.Bot == (game.BotParams{}) {
-		gp.Bot = def.Bot
-	}
-	// 本戦（plan-h21）で追加したグループ。予選スキーマのまま保存されている本番DBには
-	// これらのキーが無く、ゼロ値のままだと Validate が weightTakoyaki<=0 で弾く
-	// （＝config 取得が丸ごと失敗し、内蔵デフォルトで起動してしまう）。ここで補完する。
-	//
-	// ⚠ 廃止キー（credit / patience / eval / distribution.weightFloor）は DB に残り続ける。
-	// JSON の未知キーは無視されるので害は無いが、config-front の UI からは消すこと（h24）。
-	if gp.Score == (game.ScoreParams{}) {
-		gp.Score = def.Score
-	}
-	if gp.Sanity == (game.SanityParams{}) {
-		gp.Sanity = def.Sanity
+	dst := reflect.ValueOf(gp).Elem()
+	src := reflect.ValueOf(def)
+	for i := 0; i < dst.NumField(); i++ {
+		f := dst.Field(i)
+		if !f.CanSet() {
+			continue // 非公開フィールド（現状は無いが、足されても壊さない）
+		}
+		if f.IsZero() {
+			f.Set(src.Field(i))
+		}
 	}
 }
 
