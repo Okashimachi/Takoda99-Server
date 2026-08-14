@@ -365,3 +365,20 @@ func TestBalance_HeatReachesDictionaryTop(t *testing.T) {
 			r.MaxHeatLevel, r.WordMaxLevel)
 	}
 }
+
+// 試合を通すと attempts の件数が提供回数と一致する（plan-h03）。
+//
+// 記録の取りこぼし・二重計上をここで検出する。sim は実試合を最後まで回すので、
+// ユニットテストより現実的な件数（数千）で確認できる。
+func TestOrderAttempts_CountMatchesServed(t *testing.T) {
+	r := Simulate(newConfig(99, ProfileNormal, 5))
+	if r.Stalled {
+		t.Fatal("決着せず")
+	}
+	if r.Served == 0 {
+		t.Fatal("1件も提供できていない")
+	}
+	if r.Attempts != r.Served {
+		t.Fatalf("attempts=%d, 提供数=%d（記録の取りこぼしか二重計上）", r.Attempts, r.Served)
+	}
+}

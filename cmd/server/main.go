@@ -55,6 +55,14 @@ func main() {
 	hub := admin.NewHub()
 	baseDeps.Hub = hub
 
+	// Bot の注文記録も残すか（plan-h03 §2）。既定は人間のみ。
+	// 学習の入力に Bot を混ぜると「Bot を真似た Bot」ができるので、
+	// A/B 検証したい時だけ SAVE_BOT_ORDERS=1 で ON にする。
+	baseDeps.SaveBotOrders = os.Getenv("SAVE_BOT_ORDERS") == "1"
+	if baseDeps.SaveBotOrders {
+		log.Printf("order_attempt: Bot の記録も保存する（SAVE_BOT_ORDERS=1）")
+	}
+
 	loadDeps := func() app.Deps {
 		d := baseDeps
 		p, err := provider.Load(ctx)

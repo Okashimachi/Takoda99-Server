@@ -106,6 +106,8 @@ type Result struct {
 
 	Culls  int // 足切りで落ちた店数（本戦では脱落経路がこれ1本なので = 全店数）
 	Served int // 提供できた客の延べ数
+	// Attempts は注文単位の記録の件数（plan-h03）。Served と一致するはず。
+	Attempts int
 
 	// CullStages は各足切りステージ直後の生存数（plan-h22 §5）。
 	// targetAliveCount どおりに脱落カーブが出ているかを見る。
@@ -266,6 +268,7 @@ func finalize(r Result, sess *game.Session, byId map[game.PlayerId]*dummyStore,
 		})
 	}
 
+	r.Attempts = len(sess.Attempts())
 	r.Results = sess.Results()
 	for _, res := range r.Results {
 		r.Served += res.Stats.ServedCount

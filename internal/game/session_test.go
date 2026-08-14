@@ -1559,3 +1559,124 @@ func TestCullBurst_PerConnectionEnvelopeCountIsSmall(t *testing.T) {
 		t.Fatalf("脱落店へ %d 通（上限 %d）。sendBuffer=64 を圧迫する", got, budget)
 	}
 }
+
+// ── 本戦: 注文単位の記録（plan-h03）───────────────────────────
+
+// ApplyOrderServed 1回で attempt が1件積まれ、中身が引数と一致する。
+//
+// フィールドを取り違えても気づけるよう、**全項目を別々の値**にしてある
+// （orderCount 3 / keystrokes 40 / elapsed 3300 / miss 7 / heat 5）。
+func TestApplyOrderServed_RecordsAttempt(t *testing.T) {
+	params := DefaultParameters()
+	params.Customer.Total = 0
+	params.Sanity.MinMsPerWord = 0 // クランプを効かせずに申告値をそのまま見る
+	s := newTestSessionWith(params, 2)
+	s.Start(0)
+	s.heatLevel = 5
+
+	placeAssigned(s, "c-1", "s-1", proto.AttrBuzz, 3, 40)
+	s.ApplyOrderServed("s-1", proto.OrderServed{CustomerId: "c-1", ElapsedMs: 3300, MissCount: 7})
+
+	got := s.Attempts()
+	if len(got) != 1 {
+		t.Fatalf("attempts=%d, want 1", len(got))
+	}
+	want := OrderAttempt{
+		StoreId: "s-1", CustomerId: "c-1", Attribute: proto.AttrBuzz,
+		HeatLevel: 5, OrderCount: 3, Keystrokes: 40, ElapsedMs: 3300, MissCount: 7,
+	}
+	if got[0] != want {
+		t.Fatalf("attempt が引数と一致しない\n got=%+v\nwant=%+v", got[0], want)
+	}
+}
+
+// keystrokes は**サーバーが発行したお題語の合計**であって、クライアント申告ではない。
+//
+// OrderServed は打鍵数を持たないので、ここを取り違えると精度の分母が嘘になる。
+func TestAttempt_KeystrokesComeFromServer(t *testing.T) {
+	params := DefaultParameters()
+	params.Customer.Total = 0
+	s := newTestSessionWith(params, 2)
+	s.Start(0)
+
+	// サーバーが発行した打鍵数は 40。クライアントは打鍵数を送れない。
+	placeAssigned(s, "c-1", "s-1", proto.AttrNormal, 2, 40)
+	s.ApplyOrderServed("s-1", proto.OrderServed{CustomerId: "c-1", ElapsedMs: 5000, MissCount: 1})
+
+	if got := s.Attempts()[0].Keystrokes; got != 40 {
+		t.Fatalf("Keystrokes=%d, want 40（サーバー発行語の打鍵合計）", got)
+	}
+}
+
+// elapsed / miss は**クランプ後**の値を残す。
+//
+// クライアントの異常値（下限割れ・keys超過のミス）をそのまま残すと BOT プロファイルが汚れる。
+func TestAttempt_StoresClampedValues(t *testing.T) {
+	params := DefaultParameters()
+	params.Customer.Total = 0
+	params.Sanity.MinMsPerWord = 200
+	s := newTestSessionWith(params, 2)
+	s.Start(0)
+
+	// 注文2語 → 下限 400ms。10ms の申告は 400 に持ち上がる。
+	// ミス 9999 は打鍵数 10 にクランプされる。
+	placeAssigned(s, "c-1", "s-1", proto.AttrNormal, 2, 10)
+	s.ApplyOrderServed("s-1", proto.OrderServed{CustomerId: "c-1", ElapsedMs: 10, MissCount: 9999})
+
+	a := s.Attempts()[0]
+	if a.ElapsedMs != 400 {
+		t.Fatalf("ElapsedMs=%d, want 400（下限クランプ後）", a.ElapsedMs)
+	}
+	if a.MissCount != 10 {
+		t.Fatalf("MissCount=%d, want 10（打鍵数でクランプ後）", a.MissCount)
+	}
+}
+
+// heatLevel は**提供時点**の値を残す（後から現在の heat で代用しない）。
+//
+// ここを取り違えると「難度別の速度・ミス率分布」が崩れ、h04 のプロファイル生成が狂う。
+func TestAttempt_HeatIsCapturedAtServeTime(t *testing.T) {
+	params := DefaultParameters()
+	params.Customer.Total = 0
+	s := newTestSessionWith(params, 2)
+	s.Start(0)
+
+	s.heatLevel = 3
+	placeAssigned(s, "c-1", "s-1", proto.AttrNormal, 1, 10)
+	s.ApplyOrderServed("s-1", proto.OrderServed{CustomerId: "c-1", ElapsedMs: 2000, MissCount: 0})
+
+	// 提供後に heat が上がっても、既に記録した値は動かない。
+	s.heatLevel = 12
+	placeAssigned(s, "c-2", "s-1", proto.AttrNormal, 1, 10)
+	s.ApplyOrderServed("s-1", proto.OrderServed{CustomerId: "c-2", ElapsedMs: 2000, MissCount: 0})
+
+	got := s.Attempts()
+	if len(got) != 2 {
+		t.Fatalf("attempts=%d, want 2", len(got))
+	}
+	if got[0].HeatLevel != 3 || got[1].HeatLevel != 12 {
+		t.Fatalf("提供時点の heat が残っていない: %d, %d（want 3, 12）", got[0].HeatLevel, got[1].HeatLevel)
+	}
+}
+
+// 弾かれた OrderServed は記録しない（行列先頭でない客への報告など）。
+func TestAttempt_RejectedOrderIsNotRecorded(t *testing.T) {
+	params := DefaultParameters()
+	params.Customer.Total = 0
+	s := newTestSessionWith(params, 2)
+	s.Start(0)
+
+	placeAssigned(s, "c-1", "s-1", proto.AttrNormal, 1, 10)
+	placeAssigned(s, "c-2", "s-1", proto.AttrNormal, 1, 10)
+
+	// 2人目（行列先頭でない）への報告は弾かれる。
+	s.ApplyOrderServed("s-1", proto.OrderServed{CustomerId: "c-2", ElapsedMs: 2000, MissCount: 0})
+	if got := len(s.Attempts()); got != 0 {
+		t.Fatalf("弾かれた報告が記録された: %d件", got)
+	}
+	// 存在しない客も同様。
+	s.ApplyOrderServed("s-1", proto.OrderServed{CustomerId: "nope", ElapsedMs: 2000, MissCount: 0})
+	if got := len(s.Attempts()); got != 0 {
+		t.Fatalf("存在しない客の報告が記録された: %d件", got)
+	}
+}

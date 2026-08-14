@@ -161,11 +161,13 @@ type Session struct {
 	tick       int
 	aliveCount int
 
-	heatLevel        int
+	heatLevel int
+	// attempts は注文単位の記録（plan-h03）。メモリのみ・DB は知らない。
+	attempts []OrderAttempt
 	// cullStageIdx は**次に実行する**足切りステージの番号（0始まり）。
 	// len(params.Cull.Stages) に達したら全ステージ消化済み＝試合終了。
 	cullStageIdx int
-	customerSeq      int
+	customerSeq  int
 }
 
 // NewSession は WaitingStart 状態の試合を作る。
@@ -288,6 +290,29 @@ func (s *Session) ApplyOrderServed(from PlayerId, r proto.OrderServed) []Outboun
 		st.served.slowestMs = elapsed
 	}
 	st.served.byAttr[attrIndex(c.attribute)].Served++
+
+	// ── 注文単位の記録（plan-h03）──
+	//
+	// BOT を人間らしくするには **heat 別の速度・ミス率の分布**が要るので、
+	// 試合×店の集計（store_result）より細かい粒度をここで残す。
+	//
+	// **メモリに溜めるだけで DB は知らない**（game は純粋コア）。書き出しは app が試合終了時に一括で行う。
+	// tick 中に INSERT すると 99店×数十注文で DB が詰まる。
+	s.attempts = append(s.attempts, OrderAttempt{
+		StoreId:    from,
+		CustomerId: r.CustomerId,
+		Attribute:  c.attribute,
+		// ★提供**時点**の火力。後から現在の heat で代用すると難度別の分布が崩れる。
+		HeatLevel:  s.heatLevel,
+		OrderCount: c.orderCount,
+		// keystrokes は **サーバーが発行したお題語の打鍵数合計**（c.keystrokeTotal）。
+		// OrderServed は打鍵数を持たないので、クライアント申告ではなくサーバー権威値を使う。
+		Keystrokes: keys,
+		// elapsed / miss は**クランプ後**。サーバーが実際に信頼して使った値なので、
+		// クライアントの異常値（負・巨大・keys超過）で BOT プロファイルを汚さない。
+		ElapsedMs: elapsed,
+		MissCount: miss,
+	})
 
 	s.releaseToRest(r.CustomerId)
 
@@ -445,6 +470,7 @@ func (s *Session) weightedSelect(weights []float64) int {
 	}
 	return len(weights) - 1
 }
+
 // stepRank は生存店をスコア降順に並べて rank を振り、各店へ EvaluationUpdate を返す。
 //
 // パーセンタイル正規化は廃止した（plan-h21 §2）。順位は「スコアが高い順」であって、
@@ -651,11 +677,11 @@ func (s *Session) cullTargetIds() map[PlayerId]bool {
 // 🔴 **Outbound を append する順序がそのまま配信順序になる**（room.dispatch は受け取った順に配る）。
 // plan-h23 §3.1 の契約を守ること:
 //
-//	1. StoreEliminatedBatch      … 誰が落ちたかを先に配る
-//	2. PersonalResult            … 脱落した店にだけ
-//	3. EvaluationUpdate          … 生存店の新しい順位（stepRank ではなくここで出す）
-//	4. RankingSnapshot           … 全量で整合をとる
-//	5. ForcedEliminationWarning  … 次ステージの秒読み（呼び出し元の cullWarnings）
+//  1. StoreEliminatedBatch      … 誰が落ちたかを先に配る
+//  2. PersonalResult            … 脱落した店にだけ
+//  3. EvaluationUpdate          … 生存店の新しい順位（stepRank ではなくここで出す）
+//  4. RankingSnapshot           … 全量で整合をとる
+//  5. ForcedEliminationWarning  … 次ステージの秒読み（呼び出し元の cullWarnings）
 //
 // **順位を配る前に脱落を配る。** 逆順だと脱落者を含んだ順位が一瞬表示される（予選のつまずき 4-A）。
 func (s *Session) executeCull(stageIdx int, out []Outbound) []Outbound {
@@ -743,10 +769,10 @@ func (st *storeState) rankAvgElapsedMs() float64 {
 //
 // 比較順: スコア → 正確性 → 速度 → storeId
 //
-//	1. score が低い方が下位
-//	2. 同値 → 正確性（1 − 総ミス/総打鍵）が低い方が下位。未提供店は 0
-//	3. 同値 → 平均所要が大きい（遅い）方が下位。未提供店は +∞
-//	4. 同値 → storeId（決定性の最終担保）
+//  1. score が低い方が下位
+//  2. 同値 → 正確性（1 − 総ミス/総打鍵）が低い方が下位。未提供店は 0
+//  3. 同値 → 平均所要が大きい（遅い）方が下位。未提供店は +∞
+//  4. 同値 → storeId（決定性の最終担保）
 //
 // 🔴 **4段目を省略しない。** 完全同値が残ると並びが揺れ、シード固定の matchsim が
 // 再現しなくなってバランス調整とテストが信用できなくなる。
@@ -1180,6 +1206,32 @@ func (s *Session) StoreBoard() []StoreBoardRow {
 	}
 	return out
 }
+
+// ── 注文単位の記録（plan-h03）────────────────────────────
+//
+// BOT強化（h04/h05）の燃料。試合×店の集計（store_result）より1段細かい粒度で、
+// 「1注文をどう捌いたか」を heat レベル別に残す。
+
+// OrderAttempt は1注文ぶんの記録。
+//
+// ⚠ **IsBot を持たない。** game は Bot と人間を区別しない（AGENTS.md §4.2）ので、
+// 合成ルート（app.saveResults）が botIds で埋める。store.Result.IsBot と同じ流儀。
+type OrderAttempt struct {
+	StoreId    PlayerId
+	CustomerId proto.CustomerId
+	Attribute  proto.CustomerAttribute
+	// HeatLevel は**提供時点**の火力（お題難度の代理）。
+	HeatLevel  int
+	OrderCount int
+	// Keystrokes はサーバーが発行したお題語の打鍵数合計（クライアント申告ではない）。
+	Keystrokes int
+	// ElapsedMs / MissCount はサニティ検証でクランプした後の値。
+	ElapsedMs int
+	MissCount int
+}
+
+// Attempts は注文単位の記録を返す（試合終了後に app が永続化する）。
+func (s *Session) Attempts() []OrderAttempt { return s.attempts }
 
 // ── ランキング（plan-h23）────────────────────────────────
 

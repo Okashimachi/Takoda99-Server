@@ -31,6 +31,16 @@ type Deps struct {
 	// main が baseDeps に載せ、loadDeps() のコピーでも同じポインタを指す（plan-h00 §3.1）。
 	// nil 安全（未設定なら room は観測配信をしない）。
 	Hub *admin.Hub
+
+	// SaveBotOrders は Bot の注文記録も order_attempt に保存するか（plan-h03 §2）。
+	//
+	// **既定 false（人間のみ）。** 学習の入力は人間の分布なので、Bot を混ぜると
+	// h04 が「Bot を真似た Bot」を作ってしまう。Bot の A/B 検証をしたい時だけ ON にする。
+	//
+	// ⚠ **GameParameters には置かない。** これはゲームの調整値ではなく永続化の運用スイッチで、
+	// DATABASE_URL などと同じ層の設定（環境変数 SAVE_BOT_ORDERS=1）。
+	// GameParameters に足すと config-front のミラーも増えるが、当日いじる値ではない。
+	SaveBotOrders bool
 }
 
 // DefaultDeps は DefaultLoader 相当の内蔵デフォルトで Deps を組む（solo/検証用の手軽な既定）。
@@ -129,6 +139,27 @@ func saveResults(ctx context.Context, d Deps, sess *game.Session, matchId string
 		})
 	}
 
+	// 注文単位の記録（plan-h03）。game は Bot を区別しないので、ここで is_bot を埋める。
+	// 既定は人間のみ保存（学習の入力を人間の分布に保つ）。
+	attempts := make([]store.OrderAttempt, 0, len(sess.Attempts()))
+	for _, a := range sess.Attempts() {
+		isBot := botIds[a.StoreId]
+		if isBot && !d.SaveBotOrders {
+			continue
+		}
+		attempts = append(attempts, store.OrderAttempt{
+			StoreId:    string(a.StoreId),
+			CustomerId: string(a.CustomerId),
+			Attribute:  string(a.Attribute),
+			HeatLevel:  a.HeatLevel,
+			OrderCount: a.OrderCount,
+			Keystrokes: a.Keystrokes,
+			ElapsedMs:  a.ElapsedMs,
+			MissCount:  a.MissCount,
+			IsBot:      isBot,
+		})
+	}
+
 	mr := store.MatchResult{
 		MatchId:    matchId,
 		DurationMs: sess.ElapsedMs(),
@@ -137,6 +168,7 @@ func saveResults(ctx context.Context, d Deps, sess *game.Session, matchId string
 		WinnerId:   winnerId,
 		ConfigHash: d.Params.ConfigHash(),
 		Results:    storeResults,
+		Attempts:   attempts,
 	}
 
 	if err := d.Store.SaveMatch(ctx, mr); err != nil {
