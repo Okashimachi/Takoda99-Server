@@ -339,7 +339,17 @@ func startMatchAndConnect(ctx context.Context, t *testing.T, rec *recorder) (*ht
 	t.Helper()
 
 	const selfId = proto.StoreId("p-1")
-	const botCount = 4
+
+	// 既定は検証用の短縮設定（17秒で完走・CI で回せる）。
+	// WIRE_LOG_PRODUCTION=1 のときは**本番と同じ設定**（99店・20秒間隔・120秒）で走らせる。
+	// クライアントへ渡す生ログは、24店まとめての StoreEliminatedBatch や
+	// 99件の RankingSnapshot が入っていないと受信側の検証にならないため。
+	production := os.Getenv("WIRE_LOG_PRODUCTION") == "1"
+
+	botCount := 4
+	if production {
+		botCount = 98 // 自分 + Bot98 = 99店（本番と同じ）
+	}
 
 	params := game.DefaultParameters()
 	// 足切りスケジュールを**時間だけ**短縮する（20秒間隔 → 2秒間隔）。
@@ -350,16 +360,18 @@ func startMatchAndConnect(ctx context.Context, t *testing.T, rec *recorder) (*ht
 	//
 	// 目標生存数は参加人数（5）に合わせる。本番の 75/55/... のままだと
 	// aliveCount <= target でスキップされ、足切りが1回も起きない。
-	params.Cull.Stages = [game.CullStageCount]game.CullStage{
-		{AtMs: 2000, TargetAliveCount: 4},
-		{AtMs: 4000, TargetAliveCount: 3},
-		{AtMs: 6000, TargetAliveCount: 2},
-		{AtMs: 8000, TargetAliveCount: 1},
-		{AtMs: 10000, TargetAliveCount: 1},
-		{AtMs: 12000, TargetAliveCount: 0}, // 最終＝全店脱落
-	}
-	if err := params.Validate(); err != nil {
-		t.Fatalf("短縮スケジュールが Validate を通らない: %v", err)
+	if !production {
+		params.Cull.Stages = [game.CullStageCount]game.CullStage{
+			{AtMs: 2000, TargetAliveCount: 4},
+			{AtMs: 4000, TargetAliveCount: 3},
+			{AtMs: 6000, TargetAliveCount: 2},
+			{AtMs: 8000, TargetAliveCount: 1},
+			{AtMs: 10000, TargetAliveCount: 1},
+			{AtMs: 12000, TargetAliveCount: 0}, // 最終＝全店脱落
+		}
+		if err := params.Validate(); err != nil {
+			t.Fatalf("短縮スケジュールが Validate を通らない: %v", err)
+		}
 	}
 
 	deps := app.DefaultDeps()
@@ -745,4 +757,79 @@ func lastIndexBefore(seq []string, typ string, before int) int {
 		}
 	}
 	return -1
+}
+
+// TestWireContract_ProductionLog は**本番と同じ設定**（99店・20秒間隔×6・120秒）で
+// 1試合を走らせ、クライアントへ渡す生ログを書き出す。
+//
+// ⚠ 実時間で 120 秒以上かかるので **CI では走らせない**（WIRE_LOG_PRODUCTION 必須）。
+//
+// なぜ本番同等が要るか: 検証用の短縮ログ（5店・2秒間隔）では
+//   - StoreEliminatedBatch.entries が 1件（本番は初回 24件）
+//   - RankingSnapshot.entries が 5件（本番は 99件）
+//
+// となり、**クライアントが一番確かめたい「まとめて来たときの挙動」が再現できない**。
+//
+//	make wirelog
+func TestWireContract_ProductionLog(t *testing.T) {
+	if os.Getenv("WIRE_LOG_PRODUCTION") != "1" {
+		t.Skip("WIRE_LOG_PRODUCTION=1 のときだけ走る（実時間で120秒かかる）")
+	}
+	out := os.Getenv("WIRE_LOG_OUT")
+	if out == "" {
+		t.Skip("WIRE_LOG_OUT が未設定")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 280*time.Second)
+	defer cancel()
+
+	rec := newRecorder()
+	srv, _ := startMatchAndConnect(ctx, t, rec)
+	defer srv.Close()
+
+	if err := rec.dump(out); err != nil {
+		t.Fatalf("生ログ出力に失敗: %v", err)
+	}
+
+	// 本番同等になっているかを、ログ自体から確かめる。
+	// ここが満たされていないと「本番同等ログ」と言って渡せない。
+	raws := rec.all(proto.TypeRankingSnapshot)
+	var snap proto.RankingSnapshot
+	if err := json.Unmarshal(raws[len(raws)-1], &snap); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(snap.Entries) != 99 {
+		t.Errorf("RankingSnapshot が %d 店（本番は99店であるべき）", len(snap.Entries))
+	}
+
+	batches := rec.all(proto.TypeStoreEliminatedBatch)
+	if len(batches) != game.CullStageCount {
+		t.Errorf("足切りが %d 回（本番は %d 回）", len(batches), game.CullStageCount)
+	}
+	var firstBatch proto.StoreEliminatedBatch
+	if len(batches) > 0 {
+		if err := json.Unmarshal(batches[0], &firstBatch); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if len(firstBatch.Entries) != 24 {
+			t.Errorf("初回の足切りが %d 店（99→75 なので24店であるべき）", len(firstBatch.Entries))
+		}
+	}
+
+	// cutStoreIds が 24 件まで入ること（クライアントと合意した上限）。
+	maxCut := 0
+	for _, raw := range rec.all(proto.TypeForcedEliminationWarning) {
+		var w proto.ForcedEliminationWarning
+		if json.Unmarshal(raw, &w) != nil {
+			continue
+		}
+		if n := len(w.CutStoreIds); n > maxCut {
+			maxCut = n
+		}
+	}
+
+	t.Logf("✅ 本番同等ログを書き出した: %s", out)
+	t.Logf("   RankingSnapshot=%d店 / 足切り=%d回 / 初回バッチ=%d店 / cutStoreIds最大=%d件",
+		len(snap.Entries), len(batches), len(firstBatch.Entries), maxCut)
+	t.Logf("   受信サマリ: %s", summarize(rec))
 }
