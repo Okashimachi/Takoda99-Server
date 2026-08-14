@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"takoda99/internal/store"
@@ -87,7 +88,29 @@ func (rs *ResultStore) Migrate(ctx context.Context) error {
 		ADD COLUMN IF NOT EXISTS claimer_served   INT   NOT NULL DEFAULT 0,
 		ADD COLUMN IF NOT EXISTS claimer_left     INT   NOT NULL DEFAULT 0,
 		ADD COLUMN IF NOT EXISTS buzz_served      INT   NOT NULL DEFAULT 0,
-		ADD COLUMN IF NOT EXISTS buzz_left        INT   NOT NULL DEFAULT 0;`
+		ADD COLUMN IF NOT EXISTS buzz_left        INT   NOT NULL DEFAULT 0;
+
+	-- 注文単位の記録（plan-h03）。store_result より1段細かい粒度で、
+	-- 「1注文をどう捌いたか」を heat レベル別に残す。BOT強化（h04/h05）の燃料。
+	--
+	-- store_result とは粒度が違うだけで出所は同じ（session の per-order 値）。
+	-- 両者は積み上がるので衝突しない。
+	CREATE TABLE IF NOT EXISTS order_attempt (
+		id            BIGSERIAL PRIMARY KEY,
+		match_id      TEXT NOT NULL REFERENCES match(id),
+		store_id      TEXT NOT NULL,
+		customer_id   TEXT NOT NULL,
+		attribute     TEXT NOT NULL,
+		heat_level    INT  NOT NULL,
+		order_count   INT  NOT NULL,
+		keystrokes    INT  NOT NULL,
+		elapsed_ms    INT  NOT NULL,
+		miss_count    INT  NOT NULL,
+		is_bot        BOOLEAN NOT NULL DEFAULT FALSE,
+		created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	);
+	-- h04 は「heat 別・人間のみ」で分位を取るので、その2列で引けるようにする。
+	CREATE INDEX IF NOT EXISTS order_attempt_heat_bot_idx ON order_attempt (heat_level, is_bot);`
 	_, err := rs.pool.Exec(ctx, ddl)
 	if err != nil {
 		return fmt.Errorf("db: result migrate: %w", err)
@@ -134,7 +157,41 @@ func (rs *ResultStore) SaveMatch(ctx context.Context, m store.MatchResult) error
 		}
 	}
 
+	if err := insertAttempts(ctx, tx, m); err != nil {
+		return err
+	}
+
 	return tx.Commit(ctx)
+}
+
+// insertAttempts は注文単位の記録を一括INSERTする（plan-h03）。
+//
+// **store_result と同じトランザクション**で入れる。別トランザクションにすると
+// 「試合結果はあるのに注文が無い（またはその逆）」という半端な状態が残りうる。
+//
+// tick 中には一切 INSERT しない（99店×数十注文で DB が詰まる）。session がメモリに
+// 溜めたものを、試合終了時にここでまとめて流す。
+func insertAttempts(ctx context.Context, tx pgx.Tx, m store.MatchResult) error {
+	if len(m.Attempts) == 0 {
+		return nil
+	}
+	rows := make([][]any, 0, len(m.Attempts))
+	for _, a := range m.Attempts {
+		rows = append(rows, []any{
+			m.MatchId, a.StoreId, a.CustomerId, a.Attribute, a.HeatLevel,
+			a.OrderCount, a.Keystrokes, a.ElapsedMs, a.MissCount, a.IsBot,
+		})
+	}
+	_, err := tx.CopyFrom(ctx,
+		pgx.Identifier{"order_attempt"},
+		[]string{"match_id", "store_id", "customer_id", "attribute", "heat_level",
+			"order_count", "keystrokes", "elapsed_ms", "miss_count", "is_bot"},
+		pgx.CopyFromRows(rows),
+	)
+	if err != nil {
+		return fmt.Errorf("db: insert order_attempt (%d件): %w", len(rows), err)
+	}
+	return nil
 }
 
 var _ store.ResultStore = (*ResultStore)(nil)
