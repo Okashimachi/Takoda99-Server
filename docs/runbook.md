@@ -5,6 +5,9 @@
 
 > **前提**: デプロイは手元クロスコンパイル → GCPコンソールSSHでアップロード → `install` + `restart`。
 > 詳細は [deploy.md](deploy.md)。**unit ファイル（`deploy/takoda99.service`）は触らない**（過去に本番を止めている）。
+>
+> **本戦前にやること**（デプロイ・実プレイ確認・バイナリ保管）は [pre-event-checklist.md](pre-event-checklist.md)。
+> 本書は**当日おかしくなったときの対処**に絞っている。
 
 ---
 
