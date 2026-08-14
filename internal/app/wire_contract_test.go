@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -40,10 +41,19 @@ type recorder struct {
 	mu    sync.Mutex
 	order []string                     // 受信順（順序の検証に使う）
 	byTyp map[string][]json.RawMessage // type ごとの生ペイロード
+	log   []logEntry                   // 全受信の生ログ（時刻つき・クライアントへ渡す用）
+	t0    time.Time
+}
+
+// logEntry は生ログ1行。クライアント（Unity）に渡して受信側の検証に使ってもらう。
+type logEntry struct {
+	AtMs    int64           `json:"atMs"` // 接続からの経過ms
+	Type    string          `json:"type"`
+	Payload json.RawMessage `json:"payload"`
 }
 
 func newRecorder() *recorder {
-	return &recorder{byTyp: map[string][]json.RawMessage{}}
+	return &recorder{byTyp: map[string][]json.RawMessage{}, t0: time.Now()}
 }
 
 func (r *recorder) add(typ string, payload json.RawMessage) {
@@ -53,6 +63,11 @@ func (r *recorder) add(typ string, payload json.RawMessage) {
 	cp := make(json.RawMessage, len(payload))
 	copy(cp, payload)
 	r.byTyp[typ] = append(r.byTyp[typ], cp)
+	r.log = append(r.log, logEntry{
+		AtMs:    time.Since(r.t0).Milliseconds(),
+		Type:    typ,
+		Payload: cp,
+	})
 }
 
 func (r *recorder) count(typ string) int {
@@ -491,4 +506,243 @@ func summarize(rec *recorder) string {
 		parts = append(parts, fmt.Sprintf("%s=%d", k, len(rec.byTyp[k])))
 	}
 	return strings.Join(parts, " ")
+}
+
+// ── クライアント（みかみ）からの確認事項 A〜D に実測で答えるための検証 ────────
+//
+// 2026-08-15 に受けた質問に、推測ではなく**実際に飛んだメッセージ**で回答するためのもの。
+// ここが緑である限り、回答内容はサーバーの実挙動として保証される。
+
+// TestWireContract_ClientQuestions は A〜D を1試合の実測で確かめる。
+func TestWireContract_ClientQuestions(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	rec := newRecorder()
+	srv, _ := startMatchAndConnect(ctx, t, rec)
+	defer srv.Close()
+
+	seq := rec.seq()
+
+	// 【A-1】PersonalResult は MatchEnd より必ず「前」に届くか。
+	//
+	// 後に届くとクライアントは試合終了状態に移った後なので取りこぼす、という指摘。
+	t.Run("A-1_PersonalResultはMatchEndより前", func(t *testing.T) {
+		pi, ei := indexOf(seq, proto.TypePersonalResult), indexOf(seq, proto.TypeMatchEnd)
+		if pi < 0 {
+			t.Fatal("PersonalResult が届いていない")
+		}
+		if ei < 0 {
+			t.Fatal("MatchEnd が届いていない")
+		}
+		if pi > ei {
+			t.Fatalf("PersonalResult(%d) が MatchEnd(%d) より後。クライアントが取りこぼす", pi, ei)
+		}
+		t.Logf("✅ PersonalResult は MatchEnd より %d メッセージ前に届く", ei-pi)
+	})
+
+	// 【A-2】最終ステージの StoreEliminatedBatch は stageIndex == stageTotal で届くか。
+	t.Run("A-2_最終バッチのstageIndexはstageTotalと一致", func(t *testing.T) {
+		raws := rec.all(proto.TypeStoreEliminatedBatch)
+		if len(raws) == 0 {
+			t.Fatal("StoreEliminatedBatch が届いていない")
+		}
+		var last proto.StoreEliminatedBatch
+		if err := json.Unmarshal(raws[len(raws)-1], &last); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		// stageTotal は ForcedEliminationWarning から取る（Batch は持たない）
+		wraw, ok := rec.first(proto.TypeForcedEliminationWarning)
+		if !ok {
+			t.Fatal("ForcedEliminationWarning が届いていない")
+		}
+		var w proto.ForcedEliminationWarning
+		if err := json.Unmarshal(wraw, &w); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if last.StageIndex != w.StageTotal {
+			t.Errorf("最終バッチの stageIndex=%d, stageTotal=%d（一致すべき）", last.StageIndex, w.StageTotal)
+		}
+		t.Logf("✅ 最終バッチ stageIndex=%d / stageTotal=%d", last.StageIndex, w.StageTotal)
+	})
+
+	// 【A-3】StoreEliminatedBatch と MatchEnd の間隔。
+	t.Run("A-3_最終バッチとMatchEndの間隔", func(t *testing.T) {
+		bt, okb := rec.lastAtMs(proto.TypeStoreEliminatedBatch)
+		et, oke := rec.lastAtMs(proto.TypeMatchEnd)
+		if !okb || !oke {
+			t.Skip("観測できていない")
+		}
+		t.Logf("✅ 最終 StoreEliminatedBatch → MatchEnd の間隔: %d ms", et-bt)
+	})
+
+	// 【B】最終順位が確定した RankingSnapshot（全量）が試合終了時に必ず1回飛ぶか。
+	//
+	// リザルトは保持した順位表をそのまま出す作りなので、最後に全量が来ないと
+	// 他店の順位がズレたまま固定される、という指摘。
+	t.Run("B_最終RankingSnapshotがMatchEndの直前に飛ぶ", func(t *testing.T) {
+		ei := indexOf(seq, proto.TypeMatchEnd)
+		if ei < 0 {
+			t.Fatal("MatchEnd が届いていない")
+		}
+		ri := lastIndexBefore(seq, proto.TypeRankingSnapshot, ei)
+		if ri < 0 {
+			t.Fatal("MatchEnd より前に RankingSnapshot が無い。リザルトの順位が確定しない")
+		}
+		bi := lastIndexBefore(seq, proto.TypeStoreEliminatedBatch, ei)
+		if bi >= 0 && ri < bi {
+			t.Errorf("最後の RankingSnapshot(%d) が最終バッチ(%d) より前。"+
+				"脱落を反映していない順位でリザルトが固定される", ri, bi)
+		}
+		// 中身：全店ぶんあり、rank が 1..N で重複しないこと
+		raws := rec.all(proto.TypeRankingSnapshot)
+		var s proto.RankingSnapshot
+		if err := json.Unmarshal(raws[len(raws)-1], &s); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		ranks := map[int]bool{}
+		for _, e := range s.Entries {
+			if ranks[e.Rank] {
+				t.Errorf("最終順位で rank=%d が重複している", e.Rank)
+			}
+			ranks[e.Rank] = true
+			if e.Alive {
+				t.Errorf("試合終了後なのに %s が alive=true", e.StoreId)
+			}
+		}
+		t.Logf("✅ 最終 RankingSnapshot: %d 店・全員 alive=false・rank 重複なし", len(s.Entries))
+	})
+
+	// 【C-1/C-2】廃止メッセージと単体 StoreEliminated が飛ばないこと。
+	t.Run("C_廃止メッセージと単体StoreEliminatedが飛ばない", func(t *testing.T) {
+		for _, typ := range []string{"CustomerLeft", "CreditUpdate", "StoreListUpdate", "StoreEliminated"} {
+			if n := rec.count(typ); n > 0 {
+				t.Errorf("🔴 %s が %d 通飛んでいる（飛ばない約束）", typ, n)
+			}
+		}
+		t.Log("✅ CustomerLeft / CreditUpdate / StoreListUpdate / StoreEliminated(単体) はいずれも0通")
+	})
+
+	// 【C-3】MatchEnd のペイロードは空 {} か。
+	t.Run("C-3_MatchEndのペイロードは空", func(t *testing.T) {
+		raw, ok := rec.first(proto.TypeMatchEnd)
+		if !ok {
+			t.Fatal("MatchEnd が届いていない")
+		}
+		got := strings.TrimSpace(string(raw))
+		if got != "{}" {
+			t.Errorf("MatchEnd payload=%s, want {}", got)
+		}
+		t.Logf("✅ MatchEnd payload = %s", got)
+	})
+
+	// 【C-4】12種以外の型を送っていないか。
+	t.Run("C-4_許可12種以外を送っていない", func(t *testing.T) {
+		allowed := map[string]bool{
+			proto.TypeMatchmakingStatus: true, proto.TypeMatchStart: true,
+			proto.TypeCustomerArrived: true, proto.TypeEvaluationUpdate: true,
+			proto.TypeDifficultyUpdate: true, proto.TypePhaseChange: true,
+			proto.TypeRankingSnapshot: true, proto.TypeRankingDelta: true,
+			proto.TypeForcedEliminationWarning: true, proto.TypeStoreEliminatedBatch: true,
+			proto.TypePersonalResult: true, proto.TypeMatchEnd: true,
+		}
+		for _, typ := range rec.types() {
+			if !allowed[typ] {
+				t.Errorf("🔴 許可リストに無い型 %q を送っている", typ)
+			}
+		}
+		t.Logf("✅ 送信した型: %v（すべて許可12種の範囲内）", rec.types())
+	})
+
+	// 【D】MatchStart.stores[] に Bot を含む全店が入っているか。
+	t.Run("D_MatchStartに全店ぶん入っている", func(t *testing.T) {
+		raw, _ := rec.first(proto.TypeMatchStart)
+		var m proto.MatchStart
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		// 最終 RankingSnapshot に出てくる storeId が全部 MatchStart にあること
+		// （＝以降 storeId だけで名前を引ける）
+		known := map[proto.StoreId]bool{}
+		for _, s := range m.Stores {
+			known[s.StoreId] = true
+		}
+		raws := rec.all(proto.TypeRankingSnapshot)
+		var last proto.RankingSnapshot
+		if err := json.Unmarshal(raws[len(raws)-1], &last); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		for _, e := range last.Entries {
+			if !known[e.StoreId] {
+				t.Errorf("🔴 %s がランキングに出るが MatchStart.stores[] に無い（名前を引けない）", e.StoreId)
+			}
+		}
+		t.Logf("✅ MatchStart.stores[] = %d 店（Bot 含む）。ランキングの storeId は全部ここで引ける", len(m.Stores))
+	})
+
+	// 生ログをファイルに書き出す（クライアントへ渡す用）。
+	if path := os.Getenv("WIRE_LOG_OUT"); path != "" {
+		if err := rec.dump(path); err != nil {
+			t.Errorf("生ログ出力に失敗: %v", err)
+		} else {
+			t.Logf("生ログを書き出した: %s", path)
+		}
+	}
+}
+
+// all は type の全ペイロードを返す。
+func (r *recorder) all(typ string) []json.RawMessage {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]json.RawMessage(nil), r.byTyp[typ]...)
+}
+
+// types は受信した type の一覧（ソート済み）。
+func (r *recorder) types() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, 0, len(r.byTyp))
+	for k := range r.byTyp {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// lastAtMs は type の最後の受信時刻（接続からの経過ms）。
+func (r *recorder) lastAtMs(typ string) (int64, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := len(r.log) - 1; i >= 0; i-- {
+		if r.log[i].Type == typ {
+			return r.log[i].AtMs, true
+		}
+	}
+	return 0, false
+}
+
+// dump は全受信を JSON Lines で書き出す。クライアントが受信側の検証に使う。
+func (r *recorder) dump(path string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var b strings.Builder
+	for _, e := range r.log {
+		line, err := json.Marshal(e)
+		if err != nil {
+			return err
+		}
+		b.Write(line)
+		b.WriteByte('\n')
+	}
+	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+// lastIndexBefore は before より前にある最後の typ の位置。
+func lastIndexBefore(seq []string, typ string, before int) int {
+	for i := before - 1; i >= 0; i-- {
+		if seq[i] == typ {
+			return i
+		}
+	}
+	return -1
 }

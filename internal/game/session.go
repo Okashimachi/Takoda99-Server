@@ -640,7 +640,11 @@ func (s *Session) cullWarnings(out []Outbound) []Outbound {
 
 // cullWarnMaxIds は ForcedEliminationWarning.CutStoreIds の上限（右パネルの表示件数ぶん）。
 // 最終ステージでは候補が全店になるため、上限が無いと99件を毎tick全員へ配ることになる。
-const cullWarnMaxIds = 10
+//
+// **24 はクライアント（みかみ）と合意した値**（2026-08-15）。初回の足切り（99→75）で
+// 切られるのがちょうど24店なので、**最も人数が多いステージでも全員を出し切れる**。
+// これより後のステージは切る数が減る（20/20/15/10）ので、常に全員入る。
+const cullWarnMaxIds = 24
 
 // cullCandidates は「生存数を target まで減らすとき切られる店」を**弱い順**に返す。
 //
