@@ -154,17 +154,17 @@ check_params_roundtrip() {
   py "$before" "$mod" <<'PY' || { ng "変更JSONを作れない"; return; }
 import json,sys
 d=json.load(open(sys.argv[1]))
-# 12セクションから1つずつ、Validate を通る範囲で変える
-d["session"]["publishIntervalMs"]=300
+# 各セクションから1つずつ、Validate を通る範囲で変える（本戦スキーマ）
+d["session"]["tickIntervalMs"]=160
+d["publish"]["rankingIntervalMs"]=1200
 d["matching"]["minPlayers"]=7
-d["credit"]["initialLife"]=11
-d["customer"]["total"]=280
-d["eval"]["emaAlpha"]=0.35
+d["score"]["weightMiss"]=28
+d["sanity"]["minMsPerWord"]=210
+d["customer"]["total"]=4800
 d["phase"]["midTimeMs"]=31000
 d["heat"]["phaseMid"]=4
-d["storm"]["warnTicks"]=25
-d["distribution"]["weightFloor"]=0.3
-d["patience"]["alertMs"]=2500
+d["cull"]["stages"][2]["targetAliveCount"]=33
+d["distribution"]["queueRefillThreshold"]=6
 d["presentation"]["finalStageAliveThreshold"]=18
 d["bot"]["accuracyJitter"]=0.15
 json.dump(d,open(sys.argv[2],"w"),ensure_ascii=False)
@@ -183,7 +183,7 @@ PY
   code=$(req "$after" "$BASE/api/params")
   [ "$code" = 200 ] || { ng "再取得が $code"; return; }
 
-  py "$before" "$mod" "$after" <<'PY' && ok "12セクションの変更値が DB 往復後も保持され、リーフキーが1つも欠けない" || ng "往復で値かキーが壊れた"
+  py "$before" "$mod" "$after" <<'PY' && ok "本戦スキーマ全セクションの変更値が DB 往復後も保持され、リーフキーが1つも欠けない" || ng "往復で値かキーが壊れた"
 import json,sys
 b,m,a=[json.load(open(p)) for p in sys.argv[1:4]]
 def leaves(o,pre=""):
@@ -199,11 +199,13 @@ def get(o,path):
     for k in path.split("."): o=o[k]
     return o
 bad=[]
-for p in ["session.publishIntervalMs","matching.minPlayers","credit.initialLife",
-          "customer.total","eval.emaAlpha","phase.midTimeMs","heat.phaseMid",
-          "storm.warnTicks","distribution.weightFloor","patience.alertMs",
+for p in ["session.tickIntervalMs","publish.rankingIntervalMs","matching.minPlayers",
+          "score.weightMiss","sanity.minMsPerWord","customer.total",
+          "phase.midTimeMs","heat.phaseMid","distribution.queueRefillThreshold",
           "presentation.finalStageAliveThreshold","bot.accuracyJitter"]:
     if get(a,p)!=get(m,p): bad.append(f"{p}: {get(a,p)} != {get(m,p)}")
+if a["cull"]["stages"][2]["targetAliveCount"]!=33:
+    bad.append("cull.stages[2].targetAliveCount が保存されていない")
 if bad: print("  保存されていない:", *bad, sep="\n   "); sys.exit(1)
 sys.exit(0)
 PY
@@ -248,12 +250,32 @@ check_params_guards() {
 
   py "$WORK/before.json" "$WORK/broken.json" <<'PY'
 import json,sys
-d=json.load(open(sys.argv[1])); d["credit"]["initialLife"]=0
+d=json.load(open(sys.argv[1])); d["score"]["weightTakoyaki"]=0
 json.dump(d,open(sys.argv[2],"w"))
 PY
   code=$(req "$WORK/e.json" -X POST "$BASE/api/params" -H "X-Admin-Token: $TOKEN" \
     -H 'Content-Type: application/json' --data-binary "@$WORK/broken.json")
-  [ "$code" = 400 ] && ok "Validate に弾かれる値（initialLife=0）は 400" || ng "壊れた値が $code, want 400"
+  [ "$code" = 400 ] && ok "Validate に弾かれる値（weightTakoyaki=0）は 400" || ng "壊れた値が $code, want 400"
+
+  # 🔴 ゼロ埋めの罠（plan-h24 §2.3）。足切りを5段階で送ると Go 側が6段目をゼロ値で埋め、
+  # 「0秒時点で生存0＝開始直後に全店即死」が成立してしまう。Validate が弾くこと。
+  py "$WORK/before.json" "$WORK/short.json" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1])); d["cull"]["stages"]=d["cull"]["stages"][:5]
+json.dump(d,open(sys.argv[2],"w"))
+PY
+  code=$(req "$WORK/e.json" -X POST "$BASE/api/params" -H "X-Admin-Token: $TOKEN" \
+    -H 'Content-Type: application/json' --data-binary "@$WORK/short.json")
+  [ "$code" = 400 ] && ok "足切り5段階（ゼロ埋め）は 400" || ng "ゼロ埋めが $code, want 400（開始直後に全店即死する）"
+
+  py "$WORK/before.json" "$WORK/nonmono.json" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1])); d["cull"]["stages"][2]["targetAliveCount"]=90
+json.dump(d,open(sys.argv[2],"w"))
+PY
+  code=$(req "$WORK/e.json" -X POST "$BASE/api/params" -H "X-Admin-Token: $TOKEN" \
+    -H 'Content-Type: application/json' --data-binary "@$WORK/nonmono.json")
+  [ "$code" = 400 ] && ok "目標生存数が増えるスケジュールは 400" || ng "非単調が $code, want 400"
 }
 
 check_words_crud() {
