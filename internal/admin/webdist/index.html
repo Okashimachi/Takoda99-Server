@@ -21,6 +21,7 @@
 
     <nav class="tabs" role="tablist">
       <button class="tab is-active" data-tab="board" role="tab">🏪 店舗盤面</button>
+      <button class="tab" data-tab="dist" role="tab">📊 スコア分布</button>
       <button class="tab" data-tab="flow" role="tab">🚶 客フロー</button>
     </nav>
 
@@ -28,8 +29,8 @@
       <label class="control" id="sort-control">
         <span>並び順</span>
         <select id="sort-mode">
-          <option value="rank">評価順（強い順）</option>
-          <option value="life">体力が少ない順</option>
+          <option value="rank">スコア順（強い順）</option>
+          <option value="risk">切られる順（弱い順）</option>
           <option value="queue">行列が長い順</option>
           <option value="id">店ID順（固定）</option>
         </select>
@@ -60,6 +61,14 @@
       <span class="metric-label">待機客</span>
       <span class="metric-value metric-value--md" id="m-rest">–</span>
     </div>
+    <div class="metric metric--cull">
+      <span class="metric-label">次の足切り</span>
+      <span class="metric-value metric-value--md"><span id="m-cull-until">–</span><span class="metric-sub">秒</span></span>
+    </div>
+    <div class="metric">
+      <span class="metric-label">段階</span>
+      <span class="metric-value metric-value--md"><span id="m-cull-stage">–</span><span class="metric-sub">/<span id="m-cull-total">6</span></span></span>
+    </div>
     <div class="metric metric--mix">
       <span class="metric-label">客の内訳</span>
       <div class="mix" id="m-mix"></div>
@@ -74,10 +83,15 @@
     </div>
   </section>
 
-  <!-- storm 予告バナー -->
-  <div id="storm" class="storm" hidden>
-    <span class="storm-icon" aria-hidden="true">⚡</span>
-    <span class="storm-text">下位淘汰まで <b id="storm-until">–</b> tick ／ 評価下位 <b id="storm-pct">–</b> が脱落</span>
+  <!-- 足切り予告バナー（常時表示。本戦は時刻スケジュールなので「予告中かどうか」は無い） -->
+  <div id="cull" class="cull" hidden>
+    <span class="cull-icon" aria-hidden="true">✂</span>
+    <span class="cull-text">
+      第 <b id="cull-stage">–</b>/<b id="cull-total">6</b> 段階まで <b id="cull-until">–</b> 秒
+      ／ 生存 <b id="cull-target">–</b> 店まで削る
+      ／ <b id="cull-line">–</b> 位より下が対象
+    </span>
+    <span class="cull-count" id="cull-count">–</span>
   </div>
 
   <main class="content">
@@ -86,7 +100,32 @@
       <div id="grid" class="grid" aria-label="99店のライブ状態"></div>
     </section>
 
-    <!-- タブ2: 客フロー -->
+    <!-- タブ2: スコア分布（h25 の主目的。h26 のバランス調整の計測器） -->
+    <section class="view" id="view-dist" hidden>
+      <div class="dist-legend">
+        <span class="dist-key"><i class="sw sw--human"></i>人間</span>
+        <span class="dist-key"><i class="sw sw--bot"></i>Bot</span>
+        <span class="dist-key"><i class="sw sw--dead"></i>脱落済み</span>
+        <span class="dist-key"><i class="sw sw--cut"></i>次に切られる</span>
+        <span class="dist-stat">上位<b id="d-top-n">10</b>平均 <b id="d-top">–</b></span>
+        <span class="dist-stat">下位<b id="d-bottom-n">10</b>平均 <b id="d-bottom">–</b></span>
+        <span class="dist-stat">分離度 <b id="d-sep" title="上位平均 − 下位平均。小さいほど団子＝足切りがタイブレーク頼みになる">–</b></span>
+        <span class="dist-stat">Bot が上位<b id="d-bot-n">10</b>に <b id="d-botshare">–</b></span>
+      </div>
+      <div class="dist-chart" id="dist-chart" aria-label="スコア分布（順位順）">
+        <div class="cutline" id="cutline" hidden><span class="cutline-tag">カットライン</span></div>
+        <div class="dist-bars" id="dist-bars"></div>
+      </div>
+      <div class="cull-log">
+        <div class="cull-log-head">足切りの履歴</div>
+        <table class="cull-log-table">
+          <thead><tr><th>段階</th><th>時刻</th><th>切られた数</th><th>人間</th><th>Bot</th><th>生存</th></tr></thead>
+          <tbody id="cull-log-body"><tr class="cull-log-empty"><td colspan="6">まだ足切りは起きていません</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- タブ3: 客フロー -->
     <section class="view" id="view-flow" hidden>
       <div class="legend" id="legend"></div>
       <div class="waiting">

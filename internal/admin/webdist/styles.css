@@ -34,7 +34,7 @@
 }
 
 * { box-sizing: border-box; }
-/* hidden 属性は常に最優先で隠す。.storm/.shop-count 等が display:flex を持つと
+/* hidden 属性は常に最優先で隠す。.cull/.shop-count 等が display:flex を持つと
    UA の [hidden]{display:none} を上書きしてしまうため、!important で確実に隠す。 */
 [hidden] { display: none !important; }
 html, body { margin: 0; height: 100%; }
@@ -141,16 +141,19 @@ select:focus, input:focus { border-color: var(--accent); }
 .mix-seg[data-attr="claimer"] { background: var(--attr-claimer); }
 .mix-seg[data-attr="buzz"] { background: var(--attr-buzz); }
 
-/* ── storm バナー ── */
-.storm {
-  display: flex; align-items: center; gap: 10px; justify-content: center;
+/* ── 足切り予告バナー（常時表示） ── */
+.cull {
+  display: flex; align-items: center; gap: 12px; justify-content: center;
   padding: 9px 16px; font-size: 13.5px; font-weight: 600;
-  color: #1a1206; background: var(--warn);
-  animation: storm-pulse 1.1s ease-in-out infinite;
+  color: var(--text); background: var(--bg-elev); border-bottom: 1px solid var(--border);
 }
-.storm b { font-family: var(--mono); font-size: 15px; }
-.storm-icon { font-size: 16px; }
-@keyframes storm-pulse { 0%,100% { filter: brightness(1); } 50% { filter: brightness(1.18); } }
+.cull b { font-family: var(--mono); font-size: 15px; color: var(--text); }
+.cull-icon { font-size: 16px; }
+.cull-count { font-family: var(--mono); font-size: 12px; color: var(--text-dim); }
+/* 5秒前から警告色。時刻スケジュールなので「予告中かどうか」ではなく残り時間で切り替える。 */
+.cull[data-imminent="true"] { color: #1a1206; background: var(--warn); animation: cull-pulse 1.1s ease-in-out infinite; }
+.cull[data-imminent="true"] b, .cull[data-imminent="true"] .cull-count { color: #1a1206; }
+@keyframes cull-pulse { 0%,100% { filter: brightness(1); } 50% { filter: brightness(1.18); } }
 
 /* ── コンテンツ ── */
 .content { position: relative; flex: 1; padding: 18px 22px 40px; }
@@ -168,23 +171,20 @@ select:focus, input:focus { border-color: var(--accent); }
 }
 .cell::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: var(--good); transition: background 0.3s; }
 .cell:hover { background: var(--bg-cell-hover); }
-.cell[data-life="warn"]::before { background: var(--warn); }
-.cell[data-life="crit"]::before { background: var(--bad); }
-.cell[data-life="crit"] { border-color: color-mix(in srgb, var(--bad) 55%, var(--border)); animation: crit-pulse 1.4s ease-in-out infinite; }
-@keyframes crit-pulse { 0%,100% { box-shadow: inset 0 0 0 0 transparent; } 50% { box-shadow: inset 0 0 22px -6px color-mix(in srgb, var(--bad) 60%, transparent); } }
+/* Bot は左帯を破線調にして人間と区別する（P1 の観測）。 */
+.cell[data-bot="true"]::before { background: repeating-linear-gradient(180deg, var(--text-faint) 0 5px, transparent 5px 10px); }
 
 .cell[data-leader="true"] { border-color: color-mix(in srgb, var(--gold) 55%, var(--border)); background: linear-gradient(180deg, color-mix(in srgb, var(--gold) 8%, var(--bg-cell)), var(--bg-cell)); }
 .cell[data-leader="true"]::before { background: var(--gold); }
 
-/* storm 対象圏 */
+/* 次の足切りの対象圏 */
 .cell[data-atrisk="true"] { border-color: var(--bad); box-shadow: 0 0 0 1px color-mix(in srgb, var(--bad) 50%, transparent), 0 0 18px -6px var(--bad); }
 
 .cell[data-alive="false"] { filter: grayscale(0.85) brightness(0.72); opacity: 0.82; animation: none; }
 .cell[data-alive="false"]::before { background: var(--text-faint); }
-.cell[data-alive="false"] .eval-track { opacity: 0.5; }
 
-.cell.flash-damage { animation: flash-dmg 0.6s ease; }
-@keyframes flash-dmg { 0% { background: color-mix(in srgb, var(--bad) 45%, var(--bg-cell)); } 100% { background: var(--bg-cell); } }
+.cell.flash-gain { animation: flash-gain 0.5s ease; }
+@keyframes flash-gain { 0% { background: color-mix(in srgb, var(--good) 32%, var(--bg-cell)); } 100% { background: var(--bg-cell); } }
 .cell.flash-dead { animation: flash-out 0.7s ease; }
 @keyframes flash-out { 0% { background: color-mix(in srgb, var(--bad) 60%, var(--bg-cell)); transform: scale(1.03); } 100% { background: var(--bg-cell); transform: scale(1); } }
 
@@ -192,13 +192,12 @@ select:focus, input:focus { border-color: var(--accent); }
 .rank { font-family: var(--mono); font-size: 12px; font-weight: 700; min-width: 30px; height: 22px; padding: 0 6px; display: inline-flex; align-items: center; justify-content: center; border-radius: 6px; background: var(--bg-elev); color: var(--text-dim); border: 1px solid var(--border); font-variant-numeric: tabular-nums; }
 .cell[data-leader="true"] .rank { background: var(--gold); color: #2a1e00; border-color: var(--gold); }
 .name { font-size: 13.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
+.bot-tag { display: none; font-family: var(--mono); font-size: 9px; font-weight: 700; letter-spacing: 0.06em; padding: 2px 4px; border-radius: 4px; background: var(--bg-elev); color: var(--text-faint); border: 1px solid var(--border); }
+.cell[data-bot="true"] .bot-tag { display: inline-block; }
 
-.life { display: flex; gap: 3px; flex-wrap: wrap; align-items: center; }
-.pip { width: 13px; height: 13px; border-radius: 4px; background: var(--good); transition: background 0.3s; }
-.pip.empty { background: var(--border); }
-.cell[data-life="warn"] .pip:not(.empty) { background: var(--warn); }
-.cell[data-life="crit"] .pip:not(.empty) { background: var(--bad); }
-.life-num { font-family: var(--mono); font-size: 11px; color: var(--text-faint); margin-left: 2px; }
+/* スコアが主表示。負値もそのまま出す（0 でクランプしていない）。 */
+.score { font-family: var(--mono); font-size: 22px; font-weight: 700; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.score[data-sign="neg"] { color: var(--bad); }
 
 /* 行列長・提供数の小メタ */
 .cell-meta { display: flex; gap: 12px; font-size: 11px; color: var(--text-dim); }
@@ -206,12 +205,43 @@ select:focus, input:focus { border-color: var(--accent); }
 .cell-meta b { font-family: var(--mono); color: var(--text); font-weight: 600; }
 .cell-meta .queue-warn b { color: var(--warn); }
 
-.eval { margin-top: auto; }
-.eval-track { height: 7px; border-radius: 4px; background: var(--bg-elev); border: 1px solid var(--border); overflow: hidden; }
-.eval-fill { height: 100%; width: 0%; background: linear-gradient(90deg, var(--eval-lo), var(--eval-hi)); border-radius: 4px; transition: width 0.5s ease; }
-.eval-row { display: flex; justify-content: space-between; align-items: center; margin-top: 4px; }
-.eval-label { font-size: 10px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.05em; }
-.eval-pct { font-family: var(--mono); font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.cell-meta:last-of-type { margin-top: auto; }
+
+/* ── スコア分布（tab2・h25 の主目的） ── */
+.dist-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; margin-bottom: 12px; font-size: 12px; color: var(--text-dim); }
+.dist-key { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+.sw--human { background: var(--good); }
+.sw--bot { background: repeating-linear-gradient(135deg, var(--good) 0 3px, var(--bg-elev) 3px 6px); }
+.sw--dead { background: var(--text-faint); }
+.sw--cut { background: var(--bad); }
+.dist-stat { font-family: var(--mono); font-size: 12px; color: var(--text-dim); }
+.dist-stat b { color: var(--text); font-size: 13px; }
+.dist-stat b[data-warn="true"] { color: var(--bad); }
+
+.dist-chart { position: relative; height: 260px; padding: 8px 0 0; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-cell); overflow: hidden; }
+.dist-bars { display: flex; align-items: flex-end; gap: 1px; height: 100%; padding: 0 6px; }
+.dist-bar {
+  flex: 1 1 0; min-width: 2px; border-radius: 2px 2px 0 0;
+  background: var(--good); transition: height 0.4s ease, background 0.3s;
+}
+.dist-bar[data-bot="true"] { background: repeating-linear-gradient(135deg, var(--good) 0 3px, color-mix(in srgb, var(--good) 40%, var(--bg-elev)) 3px 6px); }
+.dist-bar[data-cut="true"] { background: var(--bad); }
+.dist-bar[data-neg="true"] { background: var(--warn); }
+.dist-bar[data-alive="false"] { background: var(--text-faint); opacity: 0.55; }
+
+/* カットライン。ここより右（＝順位が下）が次の足切りで落ちる。 */
+.cutline { position: absolute; top: 0; bottom: 0; width: 0; border-left: 2px dashed var(--bad); z-index: 2; pointer-events: none; }
+.cutline-tag { position: absolute; top: 4px; left: 4px; font-size: 10px; font-weight: 700; color: #1a1206; background: var(--bad); padding: 1px 5px; border-radius: 4px; white-space: nowrap; }
+
+/* 足切りの履歴（P4） */
+.cull-log { margin-top: 16px; }
+.cull-log-head { font-size: 12px; font-weight: 600; color: var(--text-dim); margin-bottom: 6px; }
+.cull-log-table { width: 100%; border-collapse: collapse; font-size: 12px; font-family: var(--mono); }
+.cull-log-table th, .cull-log-table td { padding: 5px 8px; text-align: right; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; }
+.cull-log-table th { color: var(--text-faint); font-weight: 600; font-size: 11px; }
+.cull-log-table th:first-child, .cull-log-table td:first-child { text-align: left; }
+.cull-log-empty td { text-align: center; color: var(--text-faint); }
 
 .final-badge { position: absolute; top: 8px; right: 8px; display: none; font-family: var(--mono); font-weight: 700; font-size: 12px; padding: 3px 7px; border-radius: 6px; background: color-mix(in srgb, var(--bad) 20%, var(--bg-elev)); color: var(--bad); border: 1px solid color-mix(in srgb, var(--bad) 40%, transparent); }
 .cell[data-alive="false"] .final-badge { display: inline-block; }
