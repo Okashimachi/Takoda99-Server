@@ -30,24 +30,33 @@
 
 「デプロイしたのに変わらない」の大半はこれ。**必ず curl で実値を見る。**
 
-### 1.2 ビルド
+### 1.2 デプロイ（gcloud があれば1コマンド）
 
 ```bash
 cd /Users/ryu/kindai/2026/THEHACK/Takoda99-Server && git checkout main && git pull --ff-only origin main
 ```
 
 ```bash
-GOWORK=off CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/takoda99-server-$(git rev-parse --short HEAD) ./cmd/server
+make deploy
 ```
 
-> ファイル名にコミットハッシュを入れておくこと。**タスク4（バイナリ保管）でそのまま使える。**
+確認プロンプトが出るので、**試合中でないことを確認**してから `y`。
+ビルド → 転送 → 差し替え → 再起動まで一気に走る。
 
-### 1.3 転送と差し替え
+> gcloud のセットアップは [deploy.md](deploy.md) の「gcloud のセットアップ（初回のみ・macOS）」。
+> ⚠ **Homebrew 版は失敗する**（`python@3.14` の libexpat 問題）。公式インストーラを使うこと。
 
-GCPコンソール → VM の **SSH** ボタン → 右上の **⚙ → ファイルをアップロード** で
-`/tmp/takoda99-server-<hash>` を選ぶ（ホームディレクトリに入る）。
+### 1.3 gcloud が無い場合（コンソール経由）
 
-SSH 上で:
+```bash
+make build
+```
+
+`~/takoda99-backup/takoda99-server-<hash>` ができる
+（**Finder から見える場所**。`/tmp` は再起動で消えるうえ Finder に出ないので使わない）。
+
+GCPコンソール → VM の **SSH** ボタン → 右上の **⚙ → ファイルをアップロード** で選ぶ
+（ホームディレクトリに入る）。SSH 上で:
 
 ```bash
 sudo install -o takoda99 -g takoda99 -m 755 ~/takoda99-server-<hash> /opt/takoda99/server && sudo systemctl restart takoda99
@@ -57,6 +66,12 @@ sudo install -o takoda99 -g takoda99 -m 755 ~/takoda99-server-<hash> /opt/takoda
 > ⚠ **試合中に再起動しない**（進行中の試合が消える）。試合の合間に。
 
 ### 1.4 ★実測（ここが本番）
+
+```bash
+make verify
+```
+
+設定の実値と `/healthz` `/admin/` の疎通をまとめて見る（**gcloud 不要**）。中身はこれ:
 
 ```bash
 curl -s https://takoda99.mooo.com/api/params | jq '.score, .cull, .publish, .sanity, .heat.phaseLate'

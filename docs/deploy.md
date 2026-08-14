@@ -5,6 +5,20 @@
 
 takoda99-server を GCP の e2-micro VM に置く手順。永続データは Supabase Postgres。
 
+## GCP の環境情報（毎回調べ直さないように）
+
+| 項目 | 値 |
+|---|---|
+| **プロジェクトID** | **`textro99`** ← プロジェクト名は旧称のまま。VM名だけ takoda99 |
+| VM 名 | `takoda99-server` |
+| ゾーン | `us-west1-b` |
+| マシンタイプ | `e2-micro`（Always Free 枠・**1台まで**） |
+| 外部IP | `34.168.35.44`（→ `takoda99.mooo.com`） |
+| ログインアカウント | GCPコンソールにログインしているのと同じ Google アカウント |
+
+> ⚠ 同じプロジェクトに旧 `textro99-server` が **TERMINATED** で残っている。
+> **無料枠は e2-micro 1台まで**なので、起動しないこと。
+
 ```
 ブラウザ / Unity WebGL
       │ wss://takoda99.mooo.com
@@ -232,15 +246,88 @@ sudo journalctl -u takoda99 -n 5 --no-pager | grep config
 sudo cp deploy/takoda99.service /etc/systemd/system/ && sudo systemctl daemon-reload
 ```
 
-### gcloud CLI がある場合
+### gcloud CLI がある場合 → `make deploy` 一発
+
+セットアップ済みなら、**ビルド・転送・差し替え・再起動が1コマンド**で終わる。
 
 ```bash
-gcloud compute scp /tmp/server takoda99-server:/tmp/server --zone us-west1-b
-gcloud compute ssh takoda99-server --zone us-west1-b --command 'sudo install -o takoda99 -g takoda99 -m 755 /tmp/server /opt/takoda99/server && sudo systemctl restart takoda99'
+make deploy
+```
+
+確認プロンプト（`続行する? [y/N]`）が出る。**進行中の試合が消える**ので、試合中でないことを
+確認してから `y`。終わったら必ず実値を見る:
+
+```bash
+make verify
+```
+
+中身は下記と同じ（Makefile 参照）。
+
+```bash
+gcloud compute scp <バイナリ> takoda99-server:~/ --zone us-west1-b
+gcloud compute ssh takoda99-server --zone us-west1-b --command 'sudo install -o takoda99 -g takoda99 -m 755 ~/<バイナリ> /opt/takoda99/server && sudo systemctl restart takoda99'
 ```
 
 > ⚠ **試合中にデプロイしない**。試合状態は in-memory なので再起動で進行中の試合が消える。
 > 試合の合間（MatchEnd 後・次の MatchStart 前）に行うこと。
+>
+> ⚠ **CD（自動デプロイ）は組んでいない。** 上の理由で、デプロイは「今は試合中でない」と
+> 人が確認してから打つ必要がある。無停止デプロイは複数インスタンス化（plan-26）とセットの話。
+
+### gcloud のセットアップ（初回のみ・macOS）
+
+🔴 **Homebrew 版（`brew install --cask gcloud-cli`）は失敗する。** 2026-08-15 に実際に踏んだ:
+
+```
+ImportError: dlopen(.../pyexpat.cpython-314-darwin.so):
+  Symbol not found: _XML_SetAllocTrackerActivationThreshold
+  Expected in: /usr/lib/libexpat.1.dylib
+ERROR: Virtual env setup failed.
+```
+
+Homebrew の `python@3.14` が新しい expat 向けにビルドされているのに、実行時は macOS 標準の
+古い `libexpat` を掴むため。gcloud 側の問題ではなく **Homebrew Python の問題**なので、
+直そうとすると expat 再インストール → python 再ビルド → 他パッケージへ波及、と深追いになる。
+
+**公式インストーラを使う。** 自前の Python を同梱するので、この問題を回避できる:
+
+```bash
+curl https://sdk.cloud.google.com | bash
+```
+
+- 途中で **sudo パスワード**を聞かれる（同梱 Python のインストール）
+- `Modify profile to update your $PATH` → **Y**
+- rc ファイルは空 Enter（`~/.zshrc`）
+- **終わったらターミナルを開き直す**（`command not found` の大半はこれ）
+
+インストール先は `~/google-cloud-sdk`（Homebrew 版とは別の場所）。
+
+続いてアカウントとプロジェクトを紐づける:
+
+```bash
+gcloud auth login
+```
+
+```bash
+gcloud config set project textro99
+```
+
+```bash
+gcloud compute instances list
+```
+
+**`takoda99-server` / `us-west1-b` / `RUNNING`** が出れば紐づけ完了。
+
+初回の SSH では鍵が自動生成される。**パスフレーズは空で Enter**（設定すると `make deploy` の
+たびに聞かれて自動化の意味が薄れる）:
+
+```bash
+gcloud compute ssh takoda99-server --zone us-west1-b --command 'echo OK'
+```
+
+> gcloud が入らなくても**デプロイはできる**（コンソールSSH の ⚙ でアップロード）。
+> `make build` / `make check` / `make verify` / `make wirelog` は gcloud 無しで動く。
+> 使えなくなるのは `make deploy` と `make logs` だけなので、**深追いしないこと**。
 
 ## 運用コマンド
 
