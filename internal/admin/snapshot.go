@@ -55,19 +55,29 @@ func mixOf(a game.AttrCounts) AdminMix {
 	return AdminMix{Normal: a.Normal, Bonus: a.Bonus, Claimer: a.Claimer, Buzz: a.Buzz}
 }
 
-// AdminStore は1店の観測情報（店舗盤面＋客フロー用）。
+// AdminStore は1店の観測情報（店舗盤面＋スコア分布＋客フロー用）。
 //
-// 本戦（plan-h21）で creditLife / evalNormalized は score に置き換わった。
-// これは「消したフィールドの参照を付け替えてコンパイルを通す」最小対応で、
-// スコア分布ビュー等の本格的な v2 化は h25。**webdist/app.js はまだ旧フィールドを
-// 読んでいるので、体力バー・評価バーの表示は一時的に空になる**（描画は壊れない）。
+// 本戦（h21 で score 化 / h22 で cull 化 / h25 で分布ビュー用の内訳追加）。
+// 信用(creditLife)・相対評価(evalNormalized)は廃止済みで、ここには存在しない。
 type AdminStore struct {
-	StoreId     string   `json:"storeId"`
-	DisplayName string   `json:"displayName"`
-	Alive       bool     `json:"alive"`
-	Rank        int      `json:"rank"`
-	FinalRank   *int     `json:"finalRank,omitempty"` // 脱落済みのみ
-	Score       int      `json:"score"`
+	StoreId     string `json:"storeId"`
+	DisplayName string `json:"displayName"`
+	Alive       bool   `json:"alive"`
+	Rank        int    `json:"rank"`
+	FinalRank   *int   `json:"finalRank,omitempty"` // 脱落済みのみ
+
+	// Score は順位を決める値（負値あり）。TakoyakiCount / MissCount はその内訳。
+	// 「速いがミスも多い店」と「遅いが正確な店」のどちらが勝つかを見る（h26 の P3）。
+	Score         int `json:"score"`
+	TakoyakiCount int `json:"takoyakiCount"`
+	MissCount     int `json:"missCount"`
+
+	// IsBot は Bot（CPU補完）かどうか。**ボットが上位を占めていないか**の観測に要る（h26 の P1）。
+	//
+	// game は Bot と人間を区別しない（AGENTS.md §4.2）ので、合成ルート（app.RunMatch）が
+	// 持つ botIds を room 経由で渡してもらう。store.Result.IsBot と同じ流儀。
+	IsBot bool `json:"isBot"`
+
 	QueueLen    int      `json:"queueLen"`
 	ServedCount int      `json:"servedCount"`
 	AtRisk      bool     `json:"atRisk"`
@@ -78,22 +88,25 @@ type AdminStore struct {
 //
 // room の単一 goroutine（publish 直後）から呼ばれる前提。session を触るのは room だけなので
 // getter 読み出しはデータ競合しない（plan-h02 §1.3）。
-func BuildSnapshot(s *game.Session) AdminSnapshot {
+func BuildSnapshot(s *game.Session, botIds map[game.PlayerId]bool) AdminSnapshot {
 	board := s.StoreBoard()
 	cull := s.CullState()
 
 	stores := make([]AdminStore, 0, len(board))
 	for _, r := range board {
 		as := AdminStore{
-			StoreId:     string(r.Id),
-			DisplayName: r.Name,
-			Alive:       r.Alive,
-			Rank:        r.Rank,
-			Score:       r.Score,
-			QueueLen:    r.QueueLen,
-			ServedCount: r.ServedCount,
-			AtRisk:      r.AtRisk,
-			QueueByAttr: mixOf(r.QueueByAttr),
+			StoreId:       string(r.Id),
+			DisplayName:   r.Name,
+			Alive:         r.Alive,
+			Rank:          r.Rank,
+			Score:         r.Score,
+			TakoyakiCount: r.TakoyakiCount,
+			MissCount:     r.MissCount,
+			IsBot:         botIds[r.Id],
+			QueueLen:      r.QueueLen,
+			ServedCount:   r.ServedCount,
+			AtRisk:        r.AtRisk,
+			QueueByAttr:   mixOf(r.QueueByAttr),
 		}
 		if !r.Alive && r.FinalRank > 0 {
 			fr := r.FinalRank
@@ -124,8 +137,8 @@ func BuildSnapshot(s *game.Session) AdminSnapshot {
 
 // SnapshotEnvelope は AdminSnapshot を /admin/ws のワイヤ形式 proto.Envelope に包む。
 // マーシャル失敗時は ok=false（呼び出し側は Broadcast をスキップ）。
-func SnapshotEnvelope(s *game.Session) (proto.Envelope, bool) {
-	snap := BuildSnapshot(s)
+func SnapshotEnvelope(s *game.Session, botIds map[game.PlayerId]bool) (proto.Envelope, bool) {
+	snap := BuildSnapshot(s, botIds)
 	payload, err := json.Marshal(snap)
 	if err != nil {
 		return proto.Envelope{}, false

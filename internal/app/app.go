@@ -75,6 +75,7 @@ func RunMatch(ctx context.Context, d Deps, players []matchmaking.Player) {
 	pub := transport.NewRankingPublisher(d.Params.Publish)
 	rm := room.New(sess, conns, d.Params.Session.TickIntervalMs, d.Clock, pub)
 	rm.SetAdminHub(d.Hub) // nil 安全（plan-h00 §3.2）
+	rm.SetBotIds(botIds)  // 観測で Bot/人間を出し分けるため（plan-h25 §1.2）
 	rm.Run(ctx)
 
 	saveResults(ctx, d, sess, matchId, botIds)

@@ -49,6 +49,9 @@ type Room struct {
 	clock     Clock
 	publisher transport.StatePublisher
 	hub       *admin.Hub // 観測ファンアウト（nil 安全・sim/既存テストでは未注入）
+	// botIds は観測で Bot と人間を出し分けるためだけに持つ（nil 安全）。
+	// game は Bot を区別しないので（AGENTS.md §4.2）、合成ルートから渡してもらう。
+	botIds map[game.PlayerId]bool
 	inbox     chan inbound
 	done      chan struct{}
 	elapsedMs int64
@@ -65,6 +68,10 @@ type Room struct {
 // hub を app.RunMatch から渡す（配線の正典は plan-h00 §3）。未注入(nil)なら publish() は
 // 観測配信をしない＝sim/既存テストに非破壊。
 func (r *Room) SetAdminHub(h *admin.Hub) { r.hub = h }
+
+// SetBotIds は観測用に Bot の集合を注入する（nil 安全）。
+// 試合の進行には一切影響しない（AdminSnapshot の isBot にしか使わない）。
+func (r *Room) SetBotIds(ids map[game.PlayerId]bool) { r.botIds = ids }
 
 // New は Room を作る。conns は playerId→接続。tickMs は tick 周期(ms)。
 func New(session *game.Session, conns map[game.PlayerId]transport.Connection, tickMs int, clock Clock, publisher transport.StatePublisher) *Room {
@@ -117,7 +124,7 @@ func (r *Room) publish() {
 	// に差し替え（plan-h00 §4 / plan-h02 §1.3）。session の純粋 getter を読むだけで、session を
 	// 触るのはこの room goroutine だけなのでデータ競合しない。
 	if r.hub != nil {
-		if env, ok := admin.SnapshotEnvelope(r.session); ok {
+		if env, ok := admin.SnapshotEnvelope(r.session, r.botIds); ok {
 			r.hub.Broadcast(env)
 		}
 	}

@@ -30,7 +30,7 @@ func TestBuildSnapshot_Basic(t *testing.T) {
 	s := newSession(3)
 	s.Start(0)
 
-	snap := BuildSnapshot(s)
+	snap := BuildSnapshot(s, nil)
 	if snap.MatchId != "m-test" {
 		t.Fatalf("MatchId=%q, want m-test", snap.MatchId)
 	}
@@ -59,7 +59,7 @@ func TestSnapshotEnvelope_TypeAndPayload(t *testing.T) {
 	s := newSession(2)
 	s.Start(0)
 
-	env, ok := SnapshotEnvelope(s)
+	env, ok := SnapshotEnvelope(s, nil)
 	if !ok {
 		t.Fatal("SnapshotEnvelope ok=false")
 	}
@@ -95,7 +95,7 @@ func TestBuildSnapshot_CarriesScore(t *testing.T) {
 		t.Fatalf("StoreBoard len=%d, want 3", len(board))
 	}
 
-	snap := BuildSnapshot(s)
+	snap := BuildSnapshot(s, nil)
 	if len(snap.Stores) != 3 {
 		t.Fatalf("stores=%d, want 3", len(snap.Stores))
 	}
@@ -117,5 +117,94 @@ func TestBuildSnapshot_CarriesScore(t *testing.T) {
 		if strings.Contains(string(raw), dead) {
 			t.Fatalf("廃止キー %q が残っている: %s", dead, raw)
 		}
+	}
+}
+
+// AdminSnapshot が h26 の観測に要る内訳（takoyakiCount / missCount / isBot）を運ぶ。
+func TestBuildSnapshot_CarriesBreakdownAndIsBot(t *testing.T) {
+	s := newSession(3)
+	s.Start(0)
+
+	botIds := map[game.PlayerId]bool{"b": true}
+	snap := BuildSnapshot(s, botIds)
+
+	byId := map[string]AdminStore{}
+	for _, st := range snap.Stores {
+		byId[st.StoreId] = st
+	}
+	if len(byId) != 3 {
+		t.Fatalf("stores=%d, want 3", len(byId))
+	}
+	if !byId["b"].IsBot {
+		t.Fatal("Bot が人間として出ている（P1 の観測が効かない）")
+	}
+	for _, id := range []string{"a", "c"} {
+		if byId[id].IsBot {
+			t.Fatalf("%s が Bot 扱いになっている", id)
+		}
+	}
+
+	// botIds 未注入（sim/既存テスト）でも壊れない。
+	if BuildSnapshot(s, nil).Stores[0].IsBot {
+		t.Fatal("botIds=nil で IsBot が true になっている")
+	}
+}
+
+// AdminSnapshot の JSON に廃止キーが無く、本戦の観測キーが揃っている。
+//
+// front はキー名で読むので、ここがズレると「表示が空」になって原因が分かりにくい。
+func TestAdminSnapshot_WireKeys(t *testing.T) {
+	s := newSession(2)
+	s.Start(0)
+
+	raw, err := json.Marshal(BuildSnapshot(s, nil))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	body := string(raw)
+
+	for _, want := range []string{
+		`"cull"`, `"stageIndex"`, `"stageTotal"`, `"untilMs"`, `"targetAliveCount"`, `"cutLineRank"`,
+		`"score"`, `"takoyakiCount"`, `"missCount"`, `"isBot"`, `"atRisk"`, `"rank"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("観測キー %s が無い: %s", want, body)
+		}
+	}
+	for _, dead := range []string{"creditLife", "evalNormalized", "storm", "thresholdPct", "untilTick"} {
+		if strings.Contains(body, dead) {
+			t.Fatalf("廃止キー %q が残っている: %s", dead, body)
+		}
+	}
+}
+
+// AtRisk が h22 の予告対象（cullTargetIds）と同じ集合であること。
+//
+// 🔴 **観測を演出に寄せない。** 最終ステージの予告は表示層で1位を「対象外」に見せるが、
+// 観測側は処理層の真実（1位も落ちる）を出す。ここを演出に合わせると、
+// ダッシュボードで挙動を検証できなくなる。
+func TestBuildSnapshot_AtRiskShowsProcessingTruth(t *testing.T) {
+	s := newSession(3)
+	s.Start(0)
+
+	// 最終ステージへ進める（全店が処理層では脱落対象になる）。
+	stages := s.Params().Cull.Stages
+	s.Tick(stages[len(stages)-2].AtMs)
+
+	snap := BuildSnapshot(s, nil)
+	atRisk := 0
+	for _, st := range snap.Stores {
+		if st.AtRisk {
+			atRisk++
+		}
+	}
+	if snap.Cull.StageIndex != len(stages) {
+		t.Fatalf("StageIndex=%d, want %d（最終ステージへ向かっている）", snap.Cull.StageIndex, len(stages))
+	}
+	if snap.Cull.CutLineRank != 2 {
+		t.Fatalf("CutLineRank=%d, want 2（表示層）", snap.Cull.CutLineRank)
+	}
+	if atRisk != snap.AliveCount {
+		t.Fatalf("AtRisk=%d, want %d（最終ステージは全店が処理層の対象）", atRisk, snap.AliveCount)
 	}
 }

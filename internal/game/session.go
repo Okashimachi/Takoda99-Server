@@ -1080,15 +1080,21 @@ type CullView struct {
 // 本戦（plan-h21）で CreditLife / EvalNormalized は Score に置き換わった。
 // スコア分布ビュー等の本格的な観測 v2 化は h25。
 type StoreBoardRow struct {
-	Id          PlayerId
-	Name        string
-	Alive       bool
-	Rank        int
-	FinalRank   int // 0 = 生存中（脱落済みのみ正）
-	Score       int
+	Id        PlayerId
+	Name      string
+	Alive     bool
+	Rank      int
+	FinalRank int // 0 = 生存中（脱落済みのみ正）
+
+	// Score は順位を決める値（負値あり）。TakoyakiCount / MissCount はその内訳で、
+	// 「速いがミスも多い店」と「遅いが正確な店」のどちらが勝つかを見るために配る（h26 の P3）。
+	Score         int
+	TakoyakiCount int
+	MissCount     int
+
 	QueueLen    int
 	ServedCount int
-	AtRisk      bool       // 今 storm が起きたら淘汰される圏内か
+	AtRisk      bool       // 次の足切りで切られる圏内か
 	QueueByAttr AttrCounts // 行列中の客の属性内訳（客フロー可視化用）
 }
 
@@ -1151,14 +1157,16 @@ func (s *Session) StoreBoard() []StoreBoardRow {
 	for _, sid := range s.order {
 		st := s.stores[sid]
 		row := StoreBoardRow{
-			Id:          st.id,
-			Name:        st.name,
-			Alive:       st.alive,
-			Rank:        st.rank,
-			Score:       st.score,
-			QueueLen:    len(s.storeQueues[sid]),
-			ServedCount: st.served.count,
-			AtRisk:      st.alive && atRisk[sid],
+			Id:            st.id,
+			Name:          st.name,
+			Alive:         st.alive,
+			Rank:          st.rank,
+			Score:         st.score,
+			TakoyakiCount: st.served.takoyaki,
+			MissCount:     st.served.misses,
+			QueueLen:      len(s.storeQueues[sid]),
+			ServedCount:   st.served.count,
+			AtRisk:        st.alive && atRisk[sid],
 		}
 		if !st.alive && st.finalRank > 0 {
 			row.FinalRank = st.finalRank
