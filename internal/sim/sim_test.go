@@ -268,3 +268,100 @@ func simulateForRanks(t *testing.T, stores int, p Profile, seed int64) []game.St
 	}
 	return r.Results
 }
+
+// ── バランスの回帰固定（plan-h26 §2）─────────────────────────
+//
+// 数値そのものは h26 で調整し続けるので、ここで固定するのは
+// **「壊れていないこと」の下限**だけ。狭く固定すると調整のたびに落ちて邪魔になる。
+
+// 負のスコアがほぼ発生しないこと（h21 §1.1 でクランプを外した副作用の確認）。
+//
+// 0 でクランプしない判断は「下位が 0 に密集して足切りが恣意的になる」のを避けるためで、
+// 実際に負が多発するなら重みが厳しすぎる。
+func TestBalance_NegativeScoresAreRare(t *testing.T) {
+	total, negative := 0, 0
+	for _, p := range AllProfiles() {
+		for seed := int64(1); seed <= 3; seed++ {
+			r := Simulate(newConfig(99, p, seed))
+			b := Analyze(r)
+			total += len(r.Results)
+			negative += b.NegativeScores
+		}
+	}
+	if total == 0 {
+		t.Fatal("試合が回っていない")
+	}
+	// 1% を超えたら重みが厳しすぎる。
+	if rate := float64(negative) / float64(total); rate > 0.01 {
+		t.Fatalf("負スコアの発生率 %.1f%%（%d/%d）。score.weightMiss が厳しすぎる", rate*100, negative, total)
+	}
+}
+
+// スコア分布が上位と下位に分離していること（P3）。
+//
+// 団子だと足切りが「誰を切るか」をタイブレーク頼みで決めることになり、
+// 「速く正確に打った人が上に行く」という本戦の原則が成立しない。
+func TestBalance_ScoreDistributionSeparates(t *testing.T) {
+	for _, p := range []Profile{ProfileNormal, ProfileWide, ProfileBipolar} {
+		t.Run(string(p), func(t *testing.T) {
+			b := Analyze(Simulate(newConfig(99, p, 3)))
+			if b.Separation <= 0 {
+				t.Fatalf("上位1/4と下位1/4が分離していない: 上位 %.0f / 下位 %.0f", b.TopAvg, b.BottomAvg)
+			}
+			// 上位が下位の2倍未満なら団子とみなす。
+			if b.TopAvg < b.BottomAvg*2 {
+				t.Fatalf("スコアが団子になっている: 上位 %.0f / 下位 %.0f（分離度 %.0f）",
+					b.TopAvg, b.BottomAvg, b.Separation)
+			}
+		})
+	}
+}
+
+// 実力と最終順位が強く相関すること（＝運ゲーになっていない）。
+func TestBalance_StrongPlayersRankHigher(t *testing.T) {
+	for _, p := range []Profile{ProfileNormal, ProfileWide} {
+		t.Run(string(p), func(t *testing.T) {
+			var sum float64
+			const runs = 3
+			for seed := int64(1); seed <= runs; seed++ {
+				sum += Analyze(Simulate(newConfig(99, p, seed))).RankAbilityCorr
+			}
+			if corr := sum / runs; corr < 0.6 {
+				t.Fatalf("実力と順位の相関 %.2f が低すぎる（運ゲーになっている）", corr)
+			}
+		})
+	}
+}
+
+// 実力上位が最初の2ステージで切られる事故が稀であること（P1 / P4）。
+//
+// 「どれだけ弱くても20秒は遊べる」の裏返しで、**強いのに20秒で落ちる**のは納得感を壊す。
+func TestBalance_StrongPlayersSurviveEarlyStages(t *testing.T) {
+	strong, accidents := 0, 0
+	const runs = 5
+	for seed := int64(1); seed <= runs; seed++ {
+		r := Simulate(newConfig(99, ProfileNormal, seed))
+		strong += len(r.Results) / 4
+		accidents += Analyze(r).EarlyCutStrong
+	}
+	// 実力上位1/4のうち 5% を超えて早期に落ちるなら、足切りが実力を見ていない。
+	if rate := float64(accidents) / float64(strong); rate > 0.05 {
+		t.Fatalf("早期切り事故率 %.1f%%（%d/%d）が高すぎる", rate*100, accidents, strong)
+	}
+}
+
+// 火力が辞書の上端に到達すること（plan-h26 §1.2）。
+//
+// 本戦は生存10店で終わるので、heat.phaseLate が低いと最上位レベルの語彙が一度も使われず、
+// heat.maxLevel が「絶対に効かないツマミ」になる。
+func TestBalance_HeatReachesDictionaryTop(t *testing.T) {
+	r := Simulate(newConfig(99, ProfileNormal, 1))
+	if r.WordMaxLevel <= 0 {
+		t.Fatal("お題辞書の最大段階が取れていない")
+	}
+	if r.MaxHeatLevel < r.WordMaxLevel {
+		t.Fatalf("火力が辞書上端に届いていない: 最大 heatLevel=%d / 辞書上端=%d。"+
+			"heat.phaseLate を上げるか heat.maxLevel を下げること（plan-h26 §1.2）",
+			r.MaxHeatLevel, r.WordMaxLevel)
+	}
+}

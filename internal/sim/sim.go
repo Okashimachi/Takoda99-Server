@@ -21,6 +21,7 @@ package sim
 
 import (
 	"math/rand"
+	"sort"
 
 	"takoda99/internal/game"
 	"takoda99/internal/odai"
@@ -46,6 +47,18 @@ type PhaseChangeAt struct {
 	ElapsedMs int64
 	Phase     proto.Phase
 	Alive     int
+}
+
+// Ability はダミー店に与えた実力。sim だけが知っている「真の強さ」で、
+// 順位（サーバーが決めた結果）と突き合わせて事故率や相関を測るのに使う。
+type Ability struct {
+	Id       game.PlayerId
+	MsPerKey int
+	MissRate float64
+	Class    string // ProfileDuel のときのみ "fast" / "precise"
+	// EffectiveMsPerKey は打ち直しを含む1打鍵あたりの実効時間。小さいほど強い。
+	// 速さとミス率を1本にまとめた「真の実力」の指標。
+	EffectiveMsPerKey float64
 }
 
 // CullStageResult は足切りステージ1段ぶんの結果。
@@ -101,6 +114,10 @@ type Result struct {
 	// Results は全店の最終結果（順位・スコア）。finalRank の重複検査と
 	// 決定性の検証に使う。h26 のスコア分布の観測もここから取れる。
 	Results []game.StoreResult
+
+	// Abilities は各店に与えた実力（順位と突き合わせるため）。
+	// 「実力上位が早期に切られていないか」（P1/P4）はこれが無いと測れない。
+	Abilities []Ability
 
 	// Rejected は session に弾かれた OrderServed の数。
 	// 正常なら 0。0 でないならダミー店の行列が session の storeQueues とズレており、
@@ -231,11 +248,23 @@ func Simulate(cfg Config) Result {
 // finalize は試合結果から集計値を埋める。
 func finalize(r Result, sess *game.Session, byId map[game.PlayerId]*dummyStore,
 	ticks int, stalled bool) Result {
+	dummies := make([]*dummyStore, 0, len(byId))
+	for _, d := range byId {
+		dummies = append(dummies, d)
+	}
+	sort.Slice(dummies, func(i, j int) bool { return dummies[i].id < dummies[j].id })
 
 	r.Ticks = ticks
 	r.ElapsedMs = sess.ElapsedMs()
 	r.Stalled = stalled
 	r.AliveAtEnd = sess.AliveCount()
+
+	for _, d := range dummies {
+		r.Abilities = append(r.Abilities, Ability{
+			Id: d.id, MsPerKey: d.msPerKey, MissRate: d.missRate, Class: d.class,
+			EffectiveMsPerKey: float64(d.msPerKey) * (1 + d.missRate),
+		})
+	}
 
 	r.Results = sess.Results()
 	for _, res := range r.Results {

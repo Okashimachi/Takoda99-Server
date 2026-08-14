@@ -1,5 +1,8 @@
 # デプロイ（GCP Compute Engine / e2-micro）
 
+> 🔴 **本戦当日に慌てて読むなら [runbook.md](runbook.md)。** 戻し手順（退避弁）と
+> 当日触ってよい調整値だけを、上から順に読める形でまとめてある。この文書は背景と初回構築。
+
 takoda99-server を GCP の e2-micro VM に置く手順。永続データは Supabase Postgres。
 
 ```
