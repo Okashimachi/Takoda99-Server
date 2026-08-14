@@ -11,6 +11,8 @@ import (
 	"io"
 	"math/rand"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"takoda99/internal/game"
@@ -19,19 +21,54 @@ import (
 
 func main() {
 	stores := flag.Int("stores", 99, "店舗数")
-	prof := flag.String("profile", "normal", "実力分布 uniform|normal|bipolar|wide")
+	prof := flag.String("profile", "normal", "実力分布 uniform|normal|bipolar|wide|duel")
 	runs := flag.Int("runs", 1, "試行回数。複数なら統計サマリを出す")
 	seed := flag.Int64("seed", time.Now().UnixNano(), "乱数シード（再現性）")
 	maxTicks := flag.Int("max-ticks", 20000, "膠着とみなす上限tick")
 	quiet := flag.Bool("quiet", false, "1試合ごとの詳細を出さない")
 	targetMinSec := flag.Float64("target-min-sec", 120, "決着時間の目安（下限・秒）")
 	targetMaxSec := flag.Float64("target-max-sec", 180, "決着時間の目安（上限・秒）")
+	sweepMiss := flag.String("sweep-miss", "", "score.weightMiss をカンマ区切りで振る（例 0,10,20,30,40,60）。profile=duel で走る")
 	flag.Parse()
+
+	if *sweepMiss != "" {
+		weights, err := parseInts(*sweepMiss)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "matchsim:", err)
+			os.Exit(1)
+		}
+		if err := runSweep(os.Stdout, weights, *stores, *runs, *seed, *maxTicks); err != nil {
+			fmt.Fprintln(os.Stderr, "matchsim:", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	if err := run(os.Stdout, *stores, *prof, *runs, *seed, *maxTicks, *quiet, *targetMinSec, *targetMaxSec); err != nil {
 		fmt.Fprintln(os.Stderr, "matchsim:", err)
 		os.Exit(1)
 	}
+}
+
+// parseInts は "0,10,20" を []int にする。
+func parseInts(csv string) ([]int, error) {
+	parts := strings.Split(csv, ",")
+	out := make([]int, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		v, err := strconv.Atoi(p)
+		if err != nil {
+			return nil, fmt.Errorf("--sweep-miss の %q が数値でない", p)
+		}
+		out = append(out, v)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("--sweep-miss が空")
+	}
+	return out, nil
 }
 
 // runResult はレポート用に Result へシード（再現に要る）を添えたもの。

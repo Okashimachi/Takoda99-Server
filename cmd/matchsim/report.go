@@ -153,6 +153,19 @@ func reportSummary(w io.Writer, results []runResult, targetMinSec, targetMaxSec 
 	p.f("脱落         : 足切り 平均 %.1f 店\n", float64(cullSum)/float64(n))
 	p.f("客の捌き     : 提供 平均 %.0f\n", float64(servedSum)/float64(n))
 	p.f("膠着(max-ticks到達): %d / %d\n", stalled, n)
+
+	// ── バランス観測（plan-h26 §2）──
+	// 数値を決めるために見る指標。判定はしない（合否は人間が決める）。
+	bs := make([]sim.Balance, 0, len(results))
+	for _, r := range results {
+		bs = append(bs, sim.Analyze(r.Result))
+	}
+	m := sim.MeanBalance(bs)
+	p.f("スコア分布   : 上位1/4 平均 %.0f / 下位1/4 平均 %.0f / 分離度 %.0f\n",
+		m.TopAvg, m.BottomAvg, m.Separation)
+	p.f("負スコア     : 合計 %d 店（%d試合ぶん。ほぼ0が目標）\n", m.NegativeScores, n)
+	p.f("早期切り事故 : 合計 %d 店（実力上位1/4なのに最初の2段階で脱落）\n", m.EarlyCutStrong)
+	p.f("実力相関     : %.2f（+1に近いほど「強い店ほど上位」。低いと運ゲー）\n", m.RankAbilityCorr)
 	if rejectSum > 0 {
 		p.f("⚠ 弾かれた提供報告 合計: %d\n", rejectSum)
 	}

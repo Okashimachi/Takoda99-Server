@@ -360,11 +360,27 @@ func DefaultParameters() GameParameters {
 			Claimer: AttributeSpec{Attribute: proto.AttrClaimer, Weight: 10, OrderCount: 1},
 			Buzz:    AttributeSpec{Attribute: proto.AttrBuzz, Weight: 5, OrderCount: 4},
 		},
-		// 仮値。W_TAKOYAKI=100 / W_MISS=30 なら1語あたり3.3ミス超で初めて減点が勝つ。
-		// この比率の詰めは h26（バランス検証）で行う。
+		// **100 : 25 = 4対1**（ミス1回 = たこ焼き 1/4 個ぶんの損）。
+		//
+		// h26 の実測で決めた値。`matchsim --sweep-miss` で「速さ型 vs 正確型」を
+		// 振ったところ、平均順位が拮抗するのは weightMiss ≈ 25〜26 だった:
+		//
+		//	W_MISS   速さ型 平均順位  正確型 平均順位  上位10の速%
+		//	    10        26.5        74.0        100%   ← 速さ型の常勝
+		//	    18        34.4        66.0         51%
+		//	    25        48.7        51.3          1%   ← 平均順位が拮抗
+		//	    30        58.8        41.0          0%   ← 正確型に傾く（旧既定）
+		//
+		// 🔴 **平均順位と「上位10の構成」は一致しない**（2つの型で分散が違う。
+		// ミス減点が速さ型の分散を抑えるため、正確型のほうが上振れしやすい）。
+		// 25 は「中位の体験が拮抗し、決勝では正確さが効く」点。
+		// 決勝も混ぜたいなら 18 だが、その場合は中位が速さ型一色になる。
+		//
+		// ⚠ この数字は sim のダミー実力分布に依存する。**実プレイでの確認が最終判断**
+		// （plan-h26 §3）。当日は config から調整でき、ビルドは要らない。
 		Score: ScoreParams{
 			WeightTakoyaki: 100,
-			WeightMiss:     30,
+			WeightMiss:     25,
 		},
 		Sanity: SanityParams{
 			MinMsPerWord: 200,
@@ -380,7 +396,12 @@ func DefaultParameters() GameParameters {
 			PerAliveDrop: 0.1,
 			PhaseEarly:   0,
 			PhaseMid:     3,
-			PhaseLate:    8,
+			// 本戦は生存10店で終わるので Late は 9。8 のままだと
+			//   0 + int(0.1×(99−10)) + 8 = 16
+			// で辞書上端(17)に一度も届かず、用意した最上位の語彙が死ぬ。
+			// あわせて heat.maxLevel=17 が「絶対に効かないツマミ」になっていた（plan-h26 §1.2）。
+			// Late だけを上げるので Early/Mid のカーブは無傷。
+			PhaseLate: 9,
 			// odai.MaxWordLevel（辞書の上端）と一致させる。
 			MaxLevel: 17,
 		},
