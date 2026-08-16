@@ -219,6 +219,16 @@ func chooseProvider(ctx context.Context, configURL string) (game.ConfigProvider,
 		if err := ws.Migrate(ctx); err != nil {
 			log.Printf("odai: words テーブルマイグレーション失敗: %v", err)
 		}
+		// 🔴 当日の逃げ道（plan-h30 §3.3）。h30 で外した長い旧語を DB へ戻す。
+		// ビルドを作り直さずに「お題が短くなった」を巻き戻せるようにしてある。
+		// 手順は docs/runbook.md「お題を h30 以前へ戻す」。
+		if os.Getenv("TAKODA99_RESTORE_RETIRED_WORDS") == "1" {
+			if err := ws.RestoreRetired(ctx); err != nil {
+				log.Printf("odai: 旧お題の復元に失敗: %v", err)
+			} else {
+				log.Printf("odai: 旧お題（h30 で外した %d 語）を復元した", len(db.RetiredEntries()))
+			}
+		}
 		rs := db.NewResultStore(pool)
 		if err := rs.Migrate(ctx); err != nil {
 			log.Printf("result: マイグレーション失敗: %v", err)

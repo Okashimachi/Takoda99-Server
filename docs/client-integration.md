@@ -273,8 +273,8 @@ UTF-16 単位で数えるので**完全一致はしない**。**サーバーの�
 ### 3.3 `CustomerArrived`（= `CustomerView`）
 
 ```json
-{ "customerId": "c-42", "attribute": "Normal", "orderCount": 2,
-  "words": ["たこやき", "おおきに"],
+{ "customerId": "c-42", "attribute": "Normal", "orderCount": 3,
+  "words": ["たこやき", "おおきに", "そーすたっぷりやで"],
   "patienceMaxMs": 0, "patienceStartedAtServerMs": 0 }
 ```
 
@@ -283,6 +283,11 @@ UTF-16 単位で数えるので**完全一致はしない**。**サーバーの�
 | `attribute` | `Normal` / `Bonus` / `Claimer` / `Buzz`。**試合中不変**。初回のみ配られる |
 | `orderCount` | = `words` の長さ = **たこ焼きの個数**（スコアの加点対象） |
 | `words` | サーバー発行のお題。**ひらがな**（現在の辞書） |
+
+**★`orderCount` は属性ごとに違い、当日も config で変わる。固定値を前提にしないこと。**
+現在の既定は Normal 3 / Bonus 3 / Claimer 2 / Buzz 6（h30 以前は 2/2/1/4）。
+**1語は最長でも約48打鍵**に収まる（h30 以前は最大85打鍵の語があった）。難度は
+「1語の長さ」ではなく「何語打つか」で上がる設計なので、**お題表示は複数語の連続を前提に組む**。
 | ~~`patienceMaxMs`~~ / ~~`patienceStartedAtServerMs`~~ | **常に 0**。我慢ゲージは廃止（読まない） |
 
 **★属性はゲームに一切影響しない**（h21）。予選は属性ごとに評価が増減したが、

@@ -82,6 +82,94 @@ func TestPlaceholderWords_DifficultyIsMonotonic(t *testing.T) {
 	}
 }
 
+// MaxKeystrokesPerWord は1語の打鍵数の上限（plan-h30）。
+//
+// 50打鍵 ≒ 11秒。決勝ステージが20秒なので、これを超えると「1語で決勝が終わる」領域に入る。
+// h30 以前は level 17 が 85打鍵（約20秒）あり、打ち切るまでスコアが1点も入らないので
+// 終盤ほど手応えが無かった。**難度は1語の長さではなく orderCount（何語打つか）で上げる。**
+const MaxKeystrokesPerWord = 50
+
+// 1語が長くなりすぎていないこと（plan-h30 §5）。
+//
+// バグ注入で確認済み: rawWords のどれか1語を51打鍵以上にすると、このテストが落ちる。
+func TestPlaceholderWords_WordIsNotTooLong(t *testing.T) {
+	for lvl, ws := range placeholderWords() {
+		for _, w := range ws {
+			if w.KeystrokeCount > MaxKeystrokesPerWord {
+				t.Errorf("段階 %d の %q は %d 打鍵。上限は %d 打鍵（1語を長くして難度を上げない。"+
+					"難度は orderCount で上げる・plan-h30）", lvl, w.Text, w.KeystrokeCount, MaxKeystrokesPerWord)
+			}
+		}
+	}
+}
+
+// 各レベル内の打鍵数に幅があること（plan-h30 §5）。
+//
+// h30 以前は level 9 以上がテンプレの機械生成で、同一レベルの語が**全部同じ打鍵数**だった
+// （level 17 は 20語すべて 85打鍵）。同じ難度の語しか出ないと、そのレベルに落ちた瞬間から
+// 体感が固定される。ここは「機械生成に戻っていないか」の検出器でもある。
+func TestPlaceholderWords_HasSpreadWithinLevel(t *testing.T) {
+	const minSpread = 5 // 最短と最長の差（打鍵）
+	words := placeholderWords()
+	for lvl := 0; lvl <= MaxWordLevel; lvl++ {
+		lo, hi := 1<<30, 0
+		for _, w := range words[lvl] {
+			if w.KeystrokeCount < lo {
+				lo = w.KeystrokeCount
+			}
+			if w.KeystrokeCount > hi {
+				hi = w.KeystrokeCount
+			}
+		}
+		// level 0〜2 は語自体が短いので幅も小さい。幅の下限は「レベルの平均の 1/4」を上限に緩める。
+		want := minSpread
+		if lvl <= 2 {
+			want = 2
+		}
+		if hi-lo < want {
+			t.Errorf("段階 %d の打鍵数の幅が %d（%d-%d）しかない。"+
+				"同一レベルの語を同じ長さで揃えないこと（plan-h30 §5）", lvl, hi-lo, lo, hi)
+		}
+	}
+}
+
+// h30 で外した旧語が、現行辞書に混ざっていないこと（消し忘れ検出・plan-h30 §5）。
+//
+// retired.go は「戻せるように」旧語を保持しているだけで、出題されてはいけない。
+// DB seed(v3) はこのリストを DELETE 対象にするので、現行辞書と重なっていると
+// 「入れた直後に消す」ことになる。
+func TestPlaceholderWords_ExcludesRetiredWords(t *testing.T) {
+	current := make(map[string]int)
+	for lvl, ws := range placeholderWords() {
+		for _, w := range ws {
+			current[w.Text] = lvl
+		}
+	}
+	if len(retiredWords) == 0 {
+		t.Fatal("retiredWords が空。**戻すための削除対象リストを消さないこと**（plan-h30 §3.2）")
+	}
+	for lvl, ws := range retiredWords {
+		for _, text := range ws {
+			if got, ok := current[text]; ok {
+				t.Errorf("旧語 %q（retired level %d）が現行辞書 level %d に残っている", text, lvl, got)
+			}
+		}
+	}
+}
+
+// 旧語のリストが「戻せる」形で残っていること（plan-h30 §3.2）。
+func TestRetiredEntries_IsRestorable(t *testing.T) {
+	entries := RetiredEntries()
+	if len(entries) != 260 {
+		t.Fatalf("旧語は 260 語のはず: got %d", len(entries))
+	}
+	for _, e := range entries {
+		if e.Text == "" || e.Reading != e.Text || e.KeystrokeCount <= 0 || e.Level < 5 || e.Level > MaxWordLevel {
+			t.Fatalf("再 upsert できない形の旧語: %+v", e)
+		}
+	}
+}
+
 // StaticPool.MaxLevel が辞書の上端と一致すること。
 // ここがズレると internal/sim の「難度の頭打ち」検出が誤った段階を見る。
 func TestStaticPool_MaxLevelMatchesDictionary(t *testing.T) {
