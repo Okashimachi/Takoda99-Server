@@ -101,6 +101,87 @@ func TestWords_MigrateIsIdempotentAndKeepsOperatorWords(t *testing.T) {
 	}
 }
 
+// seed v3 が「旧 seed が入れた語」を消すこと（plan-h30 §3.2）。
+//
+// 🔴 seed は upsert で DELETE しないので、**新語を入れただけでは旧語が DB に残って混ざる**。
+// level 17 の 85打鍵の語が生き残ると、辞書を書き直した意味が無くなる。
+// 運営が config-front で足した語まで巻き添えにしないことも同時に見る。
+func TestWords_MigrateV3RemovesRetiredWords(t *testing.T) {
+	s, ctx := newWordStoreForTest(t)
+
+	// v2 までの状態を再現する（旧語が DB に入っていて、適用済みバージョンは 2）。
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatalf("テーブル作成のための Migrate: %v", err)
+	}
+	retired := RetiredEntries()
+	if err := s.SaveAll(ctx, retired, "upsert"); err != nil {
+		t.Fatalf("旧語の投入: %v", err)
+	}
+	for _, q := range []string{
+		`DELETE FROM word_seed_version`,
+		`INSERT INTO word_seed_version (version) VALUES (2)`,
+	} {
+		if _, err := s.pool.Exec(ctx, q); err != nil {
+			t.Fatalf("バージョン巻き戻し: %v", err)
+		}
+	}
+	operator := odai.WordEntry{Text: "うちのみせのあじ", Reading: "うちのみせのあじ", Level: 9, Category: "operator"}
+	if err := s.SaveAll(ctx, []odai.WordEntry{operator}, "upsert"); err != nil {
+		t.Fatalf("運営語の投入: %v", err)
+	}
+
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	all, err := s.LoadAll(ctx)
+	if err != nil {
+		t.Fatalf("LoadAll: %v", err)
+	}
+	have := map[string]bool{}
+	for _, e := range all {
+		have[e.Text] = true
+	}
+	for _, e := range retired {
+		if have[e.Text] {
+			t.Fatalf("旧語が残っている: %q (level %d)。新旧が混ざって出題される", e.Text, e.Level)
+		}
+	}
+	if !have[operator.Text] {
+		t.Fatal("運営が足した語まで消えた（DELETE の対象が広すぎる）")
+	}
+	if len(all) != len(FallbackEntries())+1 {
+		t.Fatalf("語数 %d, want %d（新辞書 + 運営語1）", len(all), len(FallbackEntries())+1)
+	}
+}
+
+// 戻せること（plan-h30 §3.3）。RestoreRetired で旧語が DB へ戻る。
+func TestWords_RestoreRetired(t *testing.T) {
+	s, ctx := newWordStoreForTest(t)
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	if err := s.RestoreRetired(ctx); err != nil {
+		t.Fatalf("RestoreRetired: %v", err)
+	}
+	all, err := s.LoadAll(ctx)
+	if err != nil {
+		t.Fatalf("LoadAll: %v", err)
+	}
+	have := map[string]bool{}
+	for _, e := range all {
+		have[e.Text] = true
+	}
+	for _, e := range RetiredEntries() {
+		if !have[e.Text] {
+			t.Fatalf("旧語が戻っていない: %q (level %d)", e.Text, e.Level)
+		}
+	}
+	if want := len(FallbackEntries()) + len(RetiredEntries()); len(all) != want {
+		t.Fatalf("語数 %d, want %d（新辞書 + 旧語）", len(all), want)
+	}
+}
+
 func TestWords_UpdatePartial(t *testing.T) {
 	s, ctx := newWordStoreForTest(t)
 	if err := s.Migrate(ctx); err != nil {

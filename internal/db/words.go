@@ -34,7 +34,9 @@ func NewWordStore(pool *pgxpool.Pool) *WordStore { return &WordStore{pool: pool}
 //
 //	1: 初版（level 0〜4 の100語）
 //	2: level 5〜17 を追加（#75 / 計360語）
-const CurrentSeedVersion = 2
+//	3: level 5〜17 を書き直し（plan-h30 / 1語を48打鍵以下に抑える）。
+//	   ★ **旧語(odai.RetiredEntries)を DELETE する**版。upsert だけでは旧語が残って混ざる。
+const CurrentSeedVersion = 3
 
 // Migrate は words テーブルを作成し、コード側の辞書（data.go）を DB へ取り込む（冪等）。
 //
@@ -81,6 +83,13 @@ func (s *WordStore) Migrate(ctx context.Context) error {
 	if err := s.saveAll(ctx, FallbackEntries(), "upsert"); err != nil {
 		return fmt.Errorf("db: words upsert fallback: %w", err)
 	}
+	// 🔴 upsert は DELETE しないので、**旧 seed が入れた語がそのまま残って新語と混ざる**。
+	// h30 で辞書から外した 260 語（level 5〜17 の機械生成長文・1語 85打鍵）を明示的に消す。
+	// 消すのは odai.RetiredEntries() に列挙された (text, level) だけなので、
+	// 運営が config-front で足した語は巻き添えにならない。
+	if err := s.deleteRetired(ctx); err != nil {
+		return err
+	}
 	if _, err := s.pool.Exec(ctx,
 		`INSERT INTO word_seed_version (version) VALUES ($1) ON CONFLICT (version) DO NOTHING`,
 		CurrentSeedVersion); err != nil {
@@ -92,6 +101,67 @@ func (s *WordStore) Migrate(ctx context.Context) error {
 // FallbackEntries は data.go の語彙を WordEntry として返す（seed 用）。
 func FallbackEntries() []odai.WordEntry {
 	return odai.BuildFallbackEntries()
+}
+
+// RetiredEntries は h30 で辞書から外した語（seed v3 の DELETE 対象）を返す。
+// **戻すときはこれを再 upsert する**（RestoreRetired）。
+func RetiredEntries() []odai.WordEntry {
+	return odai.RetiredEntries()
+}
+
+// deleteRetired は h30 で外した旧語を (text, level) 一致で消す。
+//
+// 現行辞書に同じ (text, level) がある語は消さない。将来だれかが retired の語を
+// 現行辞書へ復活させた時に、seed が自分で入れた語を直後に消す事故を防ぐ。
+func (s *WordStore) deleteRetired(ctx context.Context) error {
+	current := make(map[[2]any]bool)
+	for _, e := range FallbackEntries() {
+		current[[2]any{e.Text, e.Level}] = true
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("db: words retire tx begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	batch := &pgx.Batch{}
+	queued := 0
+	for _, e := range RetiredEntries() {
+		if current[[2]any{e.Text, e.Level}] {
+			continue
+		}
+		batch.Queue(`DELETE FROM words WHERE text = $1 AND level = $2`, e.Text, e.Level)
+		queued++
+	}
+	if queued == 0 {
+		return tx.Commit(ctx)
+	}
+
+	br := tx.SendBatch(ctx, batch)
+	for i := 0; i < queued; i++ {
+		if _, err := br.Exec(); err != nil {
+			_ = br.Close()
+			return fmt.Errorf("db: words retire delete (index %d): %w", i, err)
+		}
+	}
+	if err := br.Close(); err != nil {
+		return fmt.Errorf("db: words retire batch close: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
+// RestoreRetired は h30 で外した旧語を DB へ戻す（再 upsert）。
+//
+// 本戦当日に「お題が短くなったのを元に戻したい」となった時の逃げ道。
+// **ビルドは要らない**（環境変数 TAKODA99_RESTORE_RETIRED_WORDS=1 で起動する。
+// 手順は docs/runbook.md）。新しい語は残るので新旧が混ざった辞書になるが、
+// 長い語が戻るぶん体感は h30 以前へ寄る。完全に戻したいならバイナリを巻き戻すこと。
+func (s *WordStore) RestoreRetired(ctx context.Context) error {
+	if err := s.saveAll(ctx, RetiredEntries(), "upsert"); err != nil {
+		return fmt.Errorf("db: words restore retired: %w", err)
+	}
+	return nil
 }
 
 // LoadAll は全単語を返す。

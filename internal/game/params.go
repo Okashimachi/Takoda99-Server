@@ -353,12 +353,21 @@ func DefaultParameters() GameParameters {
 			RosterWaitMs:     3000,
 			ReadyCountdownMs: 5000,
 		},
+		// OrderCount は plan-h30 で 2/2/1/4 → 3/3/2/6 へ引き上げた。
+		//
+		// お題の1語を短くした（level 17 で 85打鍵 → 43打鍵前後）ぶん、**難度と報酬は
+		// 「何語打つか」で持たせる**という方針転換による（plan-h30 §1）。1語が長いと
+		// 打ち切るまでスコアが1点も入らないが、短い語を複数打つ形なら1語ごとに加点が入り、
+		// ミスしても「次で取り返す」が成立する。
+		//
+		// ⚠ **DB の値がここに勝つ**。本番で戻すときはコードではなく config-front の
+		// customer.*.orderCount を 2/2/1/4 に戻す（ビルド不要・docs/runbook.md）。
 		Customer: CustomerParams{
 			Total:   5000,
-			Normal:  AttributeSpec{Attribute: proto.AttrNormal, Weight: 70, OrderCount: 2},
-			Bonus:   AttributeSpec{Attribute: proto.AttrBonus, Weight: 15, OrderCount: 2},
-			Claimer: AttributeSpec{Attribute: proto.AttrClaimer, Weight: 10, OrderCount: 1},
-			Buzz:    AttributeSpec{Attribute: proto.AttrBuzz, Weight: 5, OrderCount: 4},
+			Normal:  AttributeSpec{Attribute: proto.AttrNormal, Weight: 70, OrderCount: 3},
+			Bonus:   AttributeSpec{Attribute: proto.AttrBonus, Weight: 15, OrderCount: 3},
+			Claimer: AttributeSpec{Attribute: proto.AttrClaimer, Weight: 10, OrderCount: 2},
+			Buzz:    AttributeSpec{Attribute: proto.AttrBuzz, Weight: 5, OrderCount: 6},
 		},
 		// **100 : 25 = 4対1**（ミス1回 = たこ焼き 1/4 個ぶんの損）。
 		//

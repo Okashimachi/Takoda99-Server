@@ -87,6 +87,40 @@ sudo journalctl -u takoda99 -n 5 --no-pager | grep config
 > ⚠ **本戦ルールの廃止処理（信用・我慢ゲージ・storm）はコードから削除済み**で、
 > フラグで戻す道は無い（plan-h20 §3）。**戻す＝1つ前のバイナリに置き換える**、が唯一の手段。
 
+### ②' お題を h30 以前へ戻す（「お題が短すぎる／注文が多すぎる」とき）
+
+plan-h30 で **1語を短くし（level 17 で 85打鍵 → 43打鍵前後）、注文数(`orderCount`)を上げた**
+（Normal/Bonus/Claimer/Buzz = 3/3/2/6）。当日これが合わないと感じたら、**上から順に**試す。
+
+1. **`orderCount` を戻す（ビルド不要・数秒・これが一番効く）**
+
+   運営UI（takoda99-config）で `customer.*.orderCount` を **2 / 2 / 1 / 4** へ戻す。
+   1語が短いままでも、1客あたりの打鍵量と加点は h30 以前へ戻る。**まずこれで足りるか見る。**
+
+2. **長いお題を戻す（ビルド不要・再起動が要る）**
+
+   h30 で辞書から外した 260 語（level 5〜17 の長文）は `internal/odai/retired.go` に**残してある**。
+   環境変数を付けて再起動すると DB へ再 upsert される。
+
+   ```bash
+   sudo systemctl edit takoda99     # [Service] に下記を足す
+   #   Environment="TAKODA99_RESTORE_RETIRED_WORDS=1"
+   sudo systemctl restart takoda99
+   sudo journalctl -u takoda99 -n 20 --no-pager | grep 旧お題
+   ```
+
+   > ⚠ **新しい語は消えない**ので、新旧が混ざった辞書になる（長い語が戻るぶん体感は h30 以前へ寄る）。
+   > 戻した後は環境変数を消して再起動しておくこと（付けたままでも再 upsert されるだけで害は無い）。
+   > **完全に h30 以前へ戻したいなら ②（バイナリの巻き戻し）**。
+
+3. **個別に直す（ビルド不要）**
+
+   運営UI の語彙編集で、長すぎる／短すぎる語を1語ずつ足す・消す・直す。時間があるときだけ。
+
+> 🔴 **辞書 seed を伴う起動は約36秒 `healthz` が無応答**（既知・#93）。壊れたと誤認しないこと。
+> 逆に、**`CurrentSeedVersion` を下げても再 seed はされない**（`applied >= Current` で判定）。
+> 「版数を下げて戻す」は効かないので、上の1〜3かバイナリ巻き戻しを使う。
+
 ### ③ 再起動だけ試す（最後）
 
 ```bash
@@ -107,6 +141,7 @@ sudo systemctl restart takoda99
 | Bot が強すぎて人間が20秒で全滅 | `bot.baseElapsedMs` | 上げる（遅くする） |
 | Bot が弱すぎて人間が上位を独占 | `bot.baseElapsedMs` | 下げる（速くする） |
 | ミスの罰が重すぎる / 軽すぎる | `score.weightMiss` | 既定 25（`weightTakoyaki` 100 に対し 4:1） |
+| お題が短すぎる / 注文が多すぎる | `customer.*.orderCount` | 3/3/2/6 → **2/2/1/4** で h30 以前へ（§2 ②'） |
 | 序盤で人が減りすぎ / 減らなすぎ | `cull.stages[1..3].targetAliveCount` | 中間ステージのみ |
 
 ### 🔴 触ってはいけない値
