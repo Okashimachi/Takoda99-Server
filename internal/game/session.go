@@ -514,11 +514,19 @@ func (s *Session) aliveStores() []*storeState {
 	}
 	return alive
 }
+
+// stepHeat は火力（お題難度）を更新する。
+//
+// 難度の主軸は**経過時間**（連続に上がる）。生存項は int() 切り捨てで階段になり、
+// フェーズ項は離散イベントなので、そこへ大きな数を寄せると必ず段差になる。
+// 旧カーブは Late 突入で +8 跳ねていた（plan-h32 §0.3）。
 func (s *Session) stepHeat(out []Outbound) []Outbound {
 	hp := s.params.Heat
 	maxStores := len(s.order)
 
-	newHeat := hp.Base + int(hp.PerAliveDrop*float64(maxStores-s.aliveCount))
+	newHeat := hp.Base +
+		int(hp.PerAliveDrop*float64(maxStores-s.aliveCount)) +
+		int(hp.PerElapsedSec*float64(s.elapsedMs)/1000.0)
 	switch s.phase {
 	case proto.PhaseEarly:
 		newHeat += hp.PhaseEarly

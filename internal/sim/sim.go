@@ -75,6 +75,24 @@ type AlivePoint struct {
 	Alive     int
 }
 
+// HeatPoint は火力（お題難度）が変化した時点。
+//
+// 難度カーブが**連続に**上がっているかを測るために、変化のたびに記録する
+// （plan-h32）。「上端に届くか」「段差が大きすぎないか」の2つは
+// これが無いとテストで守れない。
+type HeatPoint struct {
+	Tick      int
+	ElapsedMs int64
+	// Alive / Phase は**その tick を処理し終えた時点**の値。足切りが起きた tick では
+	// 「その足切りの後の生存数」になる（heat 自体は足切り前の生存数で計算されている。
+	// tick 順が stepHeat → stepCull のため）。
+	Alive     int
+	Phase     proto.Phase
+	HeatLevel int
+	// Step は直前の heatLevel からの差分（初回は 0 からの差）。
+	Step int
+}
+
 // Result は1試合ぶんの計測結果。
 type Result struct {
 	Profile Profile
@@ -96,6 +114,15 @@ type Result struct {
 	// TicksAtMaxHeat は難度が頭打ち（HeatLevel >= WordMaxLevel）だった tick 数。
 	// ここが長いまま決着しないなら、火力では試合を畳めていない。
 	TicksAtMaxHeat int
+
+	// HeatMaxLevel は設定側の上限（heat.maxLevel）。MaxHeatLevel（実測）と
+	// 突き合わせて「上端まで使い切ったか」を見る。
+	HeatMaxLevel int
+	// HeatCurve は火力が変化した時点の列（plan-h32）。
+	HeatCurve []HeatPoint
+	// MaxHeatStep は1回の変化で上がった最大幅。ここが大きいと
+	// 「じわじわ難しくなる」ではなく「突然殴られる」体験になる。
+	MaxHeatStep int
 
 	Winner         game.PlayerId
 	WinnerMsPerKey int
@@ -158,6 +185,7 @@ func Simulate(cfg Config) Result {
 		TickMs:       tickMs,
 		FinalPhase:   proto.PhaseEarly,
 		WordMaxLevel: words.MaxLevel(),
+		HeatMaxLevel: cfg.Params.Heat.MaxLevel,
 	}
 	tick := 0
 
@@ -174,6 +202,14 @@ func Simulate(cfg Config) Result {
 					Tick: tick, ElapsedMs: sess.ElapsedMs(), Phase: m.Phase, Alive: sess.AliveCount(),
 				})
 			case proto.DifficultyUpdate:
+				step := m.HeatLevel - r.HeatLevel
+				r.HeatCurve = append(r.HeatCurve, HeatPoint{
+					Tick: tick, ElapsedMs: sess.ElapsedMs(), Alive: sess.AliveCount(),
+					Phase: sess.Phase(), HeatLevel: m.HeatLevel, Step: step,
+				})
+				if step > r.MaxHeatStep {
+					r.MaxHeatStep = step
+				}
 				r.HeatLevel = m.HeatLevel
 				if m.HeatLevel > r.MaxHeatLevel {
 					r.MaxHeatLevel = m.HeatLevel

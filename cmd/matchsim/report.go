@@ -29,6 +29,10 @@ func reportRun(w io.Writer, r runResult, index int) {
 	}
 	p.f("最終フェーズ : %s\n", r.FinalPhase)
 	p.f("最終heatLevel: %d\n", r.HeatLevel)
+	// 難度カーブ（plan-h32）。上端に届かないと最上位の語彙が使われず、
+	// 段差が大きいと難度が「突然」上がる。
+	p.f("難度カーブ   : 到達 heat %d / 上端 %d / 最大段差 +%d\n",
+		r.MaxHeatLevel, r.HeatMaxLevel, r.MaxHeatStep)
 	if r.Winner != "" {
 		p.f("優勝       : %s (msPerKey=%d missRate=%.3f)\n", r.Winner, r.WinnerMsPerKey, r.WinnerMissRate)
 	}
@@ -94,6 +98,8 @@ func reportSummary(w io.Writer, results []runResult, targetMinSec, targetMaxSec 
 		inTarget  int
 		heatSum   int
 		heatMax   int
+		heatPeak  int
+		heatStep  int
 		cullSum   int
 		servedSum int
 		rejectSum int
@@ -109,6 +115,12 @@ func reportSummary(w io.Writer, results []runResult, targetMinSec, targetMaxSec 
 		heatSum += r.HeatLevel
 		if r.HeatLevel > heatMax {
 			heatMax = r.HeatLevel
+		}
+		if r.MaxHeatLevel > heatPeak {
+			heatPeak = r.MaxHeatLevel
+		}
+		if r.MaxHeatStep > heatStep {
+			heatStep = r.MaxHeatStep
 		}
 		cullSum += r.Culls
 		servedSum += r.Served
@@ -150,6 +162,10 @@ func reportSummary(w io.Writer, results []runResult, targetMinSec, targetMaxSec 
 		p.f("決着時間     : （決着した試行なし）\n")
 	}
 	p.f("最終heatLevel: 平均 %.1f / 最大 %d\n", float64(heatSum)/float64(n), heatMax)
+	// 難度カーブの健全性（plan-h32）。上端(heat.maxLevel)に届かないと最上位の語彙が
+	// 死に、段差が大きいと「突然殴られる」体験になる。
+	p.f("難度カーブ   : 到達 heat %d / 上端 %d / 最大段差 +%d\n",
+		heatPeak, results[0].HeatMaxLevel, heatStep)
 	p.f("脱落         : 足切り 平均 %.1f 店\n", float64(cullSum)/float64(n))
 	p.f("客の捌き     : 提供 平均 %.0f\n", float64(servedSum)/float64(n))
 	p.f("膠着(max-ticks到達): %d / %d\n", stalled, n)

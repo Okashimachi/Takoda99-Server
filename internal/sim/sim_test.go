@@ -1,10 +1,13 @@
 package sim
 
 import (
+	"fmt"
 	"math/rand"
+	"strings"
 	"testing"
 
 	"takoda99/internal/game"
+	"takoda99/internal/proto"
 )
 
 // maxTicks は膠着とみなす上限。150ms × 20000 = 50分ぶん。
@@ -364,6 +367,159 @@ func TestBalance_HeatReachesDictionaryTop(t *testing.T) {
 			"heat.phaseLate を上げるか heat.maxLevel を下げること（plan-h26 §1.2）",
 			r.MaxHeatLevel, r.WordMaxLevel)
 	}
+}
+
+// ── 難度カーブ（plan-h32）────────────────────────────────────
+//
+// 🔴 **これは3度目の再発を止めるためのテスト群**。「heat が上端に届かない」は
+// #75 → plan-h26 §1.2 → plan-h32 と3回起きている。過去2回はどちらも
+// 「値を直して終わり」にしたので、別の値（perAliveDrop / phaseMid）が動いた瞬間に再発した。
+// **値ではなく『上端に届くこと』自体をテストにする**のが h32 の一番の成果物。
+//
+// 落ちたときに触るのは heat.perElapsedSec / perAliveDrop / phaseLate / maxLevel。
+// ただし🔴**本番は DB の値で走る**ので、直したら config-front も更新すること（h32 §4）。
+
+// heatCurveConfig は難度カーブ観測用の設定。99店・本番同等のスケジュールで回す。
+func heatCurveConfig(params game.GameParameters, seed int64) Config {
+	c := newConfig(99, ProfileNormal, seed)
+	c.Params = params
+	return c
+}
+
+// 既定パラメータで試合を最後まで回すと heatLevel が heat.maxLevel に到達すること。
+//
+// 届かないと、用意した最上位レベルの語彙が一度も出ず、heat.maxLevel が
+// 「絶対に効かないツマミ」になる（AGENTS.md の「効かないツマミを残さない」）。
+func TestHeat_ReachesMaxLevelWithDefaults(t *testing.T) {
+	params := game.DefaultParameters()
+	for seed := int64(1); seed <= 3; seed++ {
+		r := Simulate(heatCurveConfig(params, seed))
+		if r.Stalled {
+			t.Fatalf("seed=%d 決着せず", seed)
+		}
+		if r.MaxHeatLevel != params.Heat.MaxLevel {
+			t.Fatalf("seed=%d: 最大 heatLevel=%d が heat.maxLevel=%d に到達していない。"+
+				"heat.perElapsedSec を上げるか maxLevel を下げること（plan-h32 §2.2）。"+
+				"カーブ: %s", seed, r.MaxHeatLevel, params.Heat.MaxLevel, formatHeatCurve(r))
+		}
+	}
+}
+
+// 上端に届かない値へ変異させると TestHeat_ReachesMaxLevelWithDefaults が落ちること。
+//
+// 上端到達テストは「たまたま届いている」だけでは意味がなく、**届かない設定を検出できる**
+// ことまで確かめて初めて再発防止になる。時間項を殺す変異（perElapsedSec=0＝h32 以前の形）と
+// フェーズ項を削る変異の2つで、検出器が生きていることを固定する。
+func TestHeat_MutationBreaksTopReach(t *testing.T) {
+	base := game.DefaultParameters()
+
+	mutations := []struct {
+		name  string
+		apply func(*game.GameParameters)
+	}{
+		{"perElapsedSec=0（h32 以前の形に戻す）", func(p *game.GameParameters) { p.Heat.PerElapsedSec = 0 }},
+		{"perElapsedSec を 0.11→0.08 に下げる", func(p *game.GameParameters) { p.Heat.PerElapsedSec = 0.08 }},
+		{"phaseLate=0（終盤の補正を消す）", func(p *game.GameParameters) { p.Heat.PhaseLate = 0 }},
+		{"perAliveDrop=0（生存項を消す）", func(p *game.GameParameters) { p.Heat.PerAliveDrop = 0 }},
+	}
+	for _, m := range mutations {
+		t.Run(m.name, func(t *testing.T) {
+			params := base
+			m.apply(&params)
+			r := Simulate(heatCurveConfig(params, 1))
+			if r.MaxHeatLevel >= params.Heat.MaxLevel {
+				t.Fatalf("変異させても上端(%d)に届いてしまった（最大 %d）。"+
+					"上端到達テストが変異を検出できていない＝再発を防げない",
+					params.Heat.MaxLevel, r.MaxHeatLevel)
+			}
+		})
+	}
+}
+
+// 上端への到達が**早すぎない**こと。
+//
+// 序盤から上端に張り付くと、難度が上がる余地が無くなって終盤の緊張が消える。
+// 上端は cull 最終ステージ（120秒）の直前で使い切るのが狙い（h32 §2.2）。
+func TestHeat_DoesNotReachTopTooEarly(t *testing.T) {
+	params := game.DefaultParameters()
+	const notBeforeMs = 60000
+
+	r := Simulate(heatCurveConfig(params, 1))
+	for _, p := range r.HeatCurve {
+		if p.HeatLevel >= params.Heat.MaxLevel && p.ElapsedMs < notBeforeMs {
+			t.Fatalf("%.1fs で早くも上端 %d に到達している（%dms より前に到達しないこと）。カーブ: %s",
+				float64(p.ElapsedMs)/1000, params.Heat.MaxLevel, notBeforeMs, formatHeatCurve(r))
+		}
+	}
+}
+
+// 難度が一度に跳ねないこと（連続なカーブ）。
+//
+// 旧カーブは Late 突入で **+8**（4→12）跳ねており、プレイヤーには
+// 「別のゲームに切り替わった」ように感じられた（h32 §0.3 ①）。
+func TestHeat_MaxStepIsSmall(t *testing.T) {
+	const maxStep = 3
+	params := game.DefaultParameters()
+	for seed := int64(1); seed <= 3; seed++ {
+		r := Simulate(heatCurveConfig(params, seed))
+		if r.MaxHeatStep > maxStep {
+			t.Fatalf("seed=%d: heat の最大段差 +%d が大きすぎる（+%d 以下であること）。"+
+				"フェーズ加算を下げて時間項(perElapsedSec)へ寄せること。カーブ: %s",
+				seed, r.MaxHeatStep, maxStep, formatHeatCurve(r))
+		}
+	}
+}
+
+// 難度が単調増加であること（下がらない）。
+//
+// 生存項と時間項は増える一方だが、フェーズ加算は Mid > Late のような値を入れると
+// フェーズ遷移で**下がる**。難度が下がるのは仕様として意図していない。
+func TestHeat_IsMonotonic(t *testing.T) {
+	r := Simulate(heatCurveConfig(game.DefaultParameters(), 1))
+	for _, p := range r.HeatCurve {
+		if p.Step < 0 {
+			t.Fatalf("%.1fs で heat が下がった（%d へ %d）。カーブ: %s",
+				float64(p.ElapsedMs)/1000, p.HeatLevel, p.Step, formatHeatCurve(r))
+		}
+	}
+}
+
+// 難度カーブの実測表（レポート専用・失敗させない）。
+//
+//	go test -v ./internal/sim/ -run ReportHeatCurve
+func TestHeat_ReportHeatCurve(t *testing.T) {
+	params := game.DefaultParameters()
+	r := Simulate(heatCurveConfig(params, 1))
+	hp := params.Heat
+	t.Logf("base=%d perElapsedSec=%.3f perAliveDrop=%.3f phase(E/M/L)=%d/%d/%d maxLevel=%d",
+		hp.Base, hp.PerElapsedSec, hp.PerAliveDrop, hp.PhaseEarly, hp.PhaseMid, hp.PhaseLate, hp.MaxLevel)
+	t.Logf("%7s | %5s | %-5s | %5s | %5s | %5s | %4s | %4s", "時刻", "生存", "phase", "時間項", "生存項", "phase項", "heat", "段差")
+	for _, p := range r.HeatCurve {
+		timeTerm := int(hp.PerElapsedSec * float64(p.ElapsedMs) / 1000.0)
+		aliveTerm := int(hp.PerAliveDrop * float64(99-p.Alive))
+		phaseTerm := hp.PhaseEarly
+		switch p.Phase {
+		case proto.PhaseMid:
+			phaseTerm = hp.PhaseMid
+		case proto.PhaseLate:
+			phaseTerm = hp.PhaseLate
+		}
+		t.Logf("%6.1fs | %5d | %-5s | %5d | %5d | %5d | %4d | %+4d",
+			float64(p.ElapsedMs)/1000, p.Alive, p.Phase, timeTerm, aliveTerm, phaseTerm, p.HeatLevel, p.Step)
+	}
+	t.Logf("最大 heat=%d / 上端=%d / 最大段差=+%d", r.MaxHeatLevel, hp.MaxLevel, r.MaxHeatStep)
+}
+
+// formatHeatCurve は失敗メッセージに載せるための1行表現。
+func formatHeatCurve(r Result) string {
+	var b strings.Builder
+	for i, p := range r.HeatCurve {
+		if i > 0 {
+			b.WriteString(" ")
+		}
+		fmt.Fprintf(&b, "%.0fs:%d", float64(p.ElapsedMs)/1000, p.HeatLevel)
+	}
+	return b.String()
 }
 
 // 試合を通すと attempts の件数が提供回数と一致する（plan-h03）。

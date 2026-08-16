@@ -26,7 +26,12 @@
 
 **コードの既定値は本番に効かない。** `GameParameters` は DB から読むので、
 `DefaultParameters()` を変えても本番の値は変わらない。h26 で決めた
-`score.weightMiss = 25` / `heat.phaseLate = 9` も、**DB に入って初めて効く**。
+`score.weightMiss = 25` も、h32 で決めた `heat.*`（下表）も、**DB に入って初めて効く**。
+
+> 🔴 **新しく足したキーも自動では入らない。** `backfillDefaults` の補完は**グループ単位**で、
+> グループ全体がゼロのときだけ既定値を入れる。`heat` グループは既に DB にあるので、
+> h32 で足した **`heat.perElapsedSec` は 0 のまま**になる（＝難度カーブが h32 以前の階段に戻る）。
+> **config-front から手で入れること。**
 
 「デプロイしたのに変わらない」の大半はこれ。**必ず curl で実値を見る。**
 
@@ -74,7 +79,7 @@ make verify
 設定の実値と `/healthz` `/admin/` の疎通をまとめて見る（**gcloud 不要**）。中身はこれ:
 
 ```bash
-curl -s https://takoda99.mooo.com/api/params | jq '.score, .cull, .publish, .sanity, .heat.phaseLate'
+curl -s https://takoda99.mooo.com/api/params | jq '.score, .cull, .publish, .sanity, .heat'
 ```
 
 **期待する値**:
@@ -85,7 +90,10 @@ curl -s https://takoda99.mooo.com/api/params | jq '.score, .cull, .publish, .san
 | `cull.stages` | 6段階・`atMs` が 20000〜120000・最終の `targetAliveCount` が **0** |
 | `publish.*` | 5キーが存在（`rankingDeltaEnabled` は `false`） |
 | `sanity.minMsPerWord` | `200`（旧 `eval.minMsPerWord` から改名） |
-| `heat.phaseLate` | `9` |
+| `heat.perElapsedSec` | **`0.11`**（h32 で新設。**DB に無いので手で入れる**。0 だと難度が階段状に戻る） |
+| `heat.perAliveDrop` | **`0.03`**（h32。旧値 0.05） |
+| `heat.phaseMid` / `heat.phaseLate` | **`1` / `2`**（h32。旧値 9 だと終盤突入で +8 跳ねる） |
+| `heat.maxLevel` | `17`（お題辞書の上端と一致させる） |
 
 **もし古い値が返ってきたら**（例: `weightMiss: 30`、`score` が無い）:
 

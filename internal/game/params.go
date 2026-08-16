@@ -146,18 +146,37 @@ type PhaseParams struct {
 }
 
 // HeatParams: 火力（お題難易度の全体上昇）。
+//
+// heat = base + int(perAliveDrop×脱落数) + int(perElapsedSec×経過秒) + フェーズ加算
+//
+// 🔴 **難度の主軸は経過時間（perElapsedSec）**。フェーズは Early/Mid/Late の
+// **離散イベント**なので、そこに大きな数を載せると必ず段差になる（plan-h32 §1.1）。
+// 実際 phaseLate=9 のときは Late 突入で heat が一気に +8 跳ねていた。
+// フェーズ加算は「区切りの補正」に留め、連続性は時間項が作る。
 type HeatParams struct {
 	Base         int     `json:"base"`
 	PerAliveDrop float64 `json:"perAliveDrop"`
-	PhaseEarly   int     `json:"phaseEarly"`
-	PhaseMid     int     `json:"phaseMid"`
-	PhaseLate    int     `json:"phaseLate"`
+	// PerElapsedSec は経過1秒あたりの heat 上昇（plan-h32）。難度の主軸で、
+	// カーブの連続性はこの項が作る。0 にすると段差だらけの旧カーブに戻る。
+	//
+	// 🔴 **既存DBには入っていないキー**。backfillDefaults の補完は**グループ単位**
+	// （heat グループ全体がゼロのときだけ既定値を入れる）なので、heat グループが
+	// 既に保存されている本番では **0 のまま**になる。config-front から手で入れること
+	// （plan-h32 §4）。`make verify` の heat 行で実値を確認できる。
+	PerElapsedSec float64 `json:"perElapsedSec"`
+	PhaseEarly    int     `json:"phaseEarly"`
+	PhaseMid      int     `json:"phaseMid"`
+	PhaseLate     int     `json:"phaseLate"`
 	// MaxLevel は heatLevel の上限（stepHeat で clamp する）。
 	//
 	// **お題辞書に語彙がある最大段階と揃える**こと。超えて設定しても WordSource が
 	// 下の段階へ降りるだけで難度は変わらず、クライアントへ配る heatLevel だけが
 	// 実態と食い違う（#75）。game は odai を import できない（層の依存が逆流するため）ので、
 	// 辞書側の `odai.MaxWordLevel` と数値で揃える運用にしている。
+	//
+	// 🔴 **ここに到達しない既定値は3度目の再発**（#75 → h26 §1.2 → h32）。
+	// 「既定値で試合を回すと MaxLevel に届く」は `internal/sim` の
+	// TestHeat_ReachesMaxLevelWithDefaults がテストで守っている。値を触ったら sim を回すこと。
 	MaxLevel int `json:"maxLevel"`
 }
 
@@ -418,17 +437,46 @@ func DefaultParameters() GameParameters {
 			MidTimeMs:          30000,
 			LateTimeMs:         90000,
 		},
+		// **難度カーブは経過時間が主役**（plan-h32）。
+		//
+		// 旧既定（perAliveDrop 0.1 / phaseMid 3 / phaseLate 9）は、
+		//   ・生存項が int() 切り捨てなので**足切りの瞬間だけ段差**ができ、間は動かない
+		//   ・Late 突入で **+8 跳ぶ**（別のゲームに切り替わる体感）
+		//   ・本番DBの実値（perAliveDrop 0.05 / phaseMid 1）では**上端17に一度も届かない**
+		// という3つの問題を抱えていた（h32 §0）。
+		//
+		// 時間項 0.11/秒 を主軸に置き、フェーズ加算を小さく（Late 9→2）することで
+		//   ・120秒（＝cull 最終ステージ）でちょうど上端 17 に到達
+		//   ・最大段差 +3 以下
+		//   ・単調増加
+		// になる。実測カーブは `go test -v ./internal/sim/ -run ReportHeatCurve`。
+		//
+		// 🔴 **この既定値はコードの中だけの話で、本番は DB の値で走る。**
+		// 値を変えたら config-front 側も更新すること（h32 §4）。
 		Heat: HeatParams{
-			Base:         0,
-			PerAliveDrop: 0.1,
-			PhaseEarly:   0,
-			PhaseMid:     3,
-			// 本戦は生存10店で終わるので Late は 9。8 のままだと
-			//   0 + int(0.1×(99−10)) + 8 = 16
-			// で辞書上端(17)に一度も届かず、用意した最上位の語彙が死ぬ。
-			// あわせて heat.maxLevel=17 が「絶対に効かないツマミ」になっていた（plan-h26 §1.2）。
-			// Late だけを上げるので Early/Mid のカーブは無傷。
-			PhaseLate: 9,
+			Base: 0,
+			// 89店が落ちても +2 にしかならない（89×0.03=2.67）。
+			// 生存項は「終盤の重み付け」であって主役ではない。
+			PerAliveDrop: 0.03,
+			// 120秒 × 0.12 = 14.4 → 時間だけで 14 上がる。カーブの連続性はここが作る。
+			//
+			// plan-h32 は 0.11 と書いていたが **0.12 に改めた**。0.11 だと上端(17)への
+			// 到達が 119秒で、**上端に居るのが約1秒**しかない。h30 後の level 17 は
+			// 約43打鍵（≒10秒）なので、上端の語は配られても打ち切れず
+			// 「用意した最上位の語彙が死ぬ」（#75）が形を変えて残ってしまう。
+			//
+			//	perElapsedSec   上端到達   上端に居る時間
+			//	     0.11        119秒         1秒   ← 実質使われない
+			//	     0.12        109秒        11秒   ← 決勝の途中で上端へ
+			//	     0.13        100秒        20秒   ← 決勝が丸ごと上端（緩急が無い）
+			//
+			// 0.12 なら決勝（100秒〜・生存10店）が 15〜16 で始まり 17 で終わる。
+			PerElapsedSec: 0.12,
+			PhaseEarly:    0,
+			PhaseMid:      1,
+			// ★ 9 → 2。ここを下げずに時間項を足すと、全体が持ち上がって上限で
+			// 頭打ちになるだけで**跳ねは消えない**（h32 §2.2）。
+			PhaseLate: 2,
 			// odai.MaxWordLevel（辞書の上端）と一致させる。
 			MaxLevel: 17,
 		},

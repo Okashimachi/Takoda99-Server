@@ -322,6 +322,10 @@ func TestStepPhase_TimeThreshold(t *testing.T) {
 	}
 }
 
+// stepHeat の3項（生存項・時間項・フェーズ加算）がすべて効いていること。
+//
+// 時間項（plan-h32）は難度の主軸。ここが抜けるとカーブが階段に戻る。
+// 3項を**すべて異なる値**にして、どれか1つを落とす変異で失敗するようにしてある。
 func TestStepHeat_Calculation(t *testing.T) {
 	s := newTestSession(99)
 	s.Start(0)
@@ -331,15 +335,30 @@ func TestStepHeat_Calculation(t *testing.T) {
 	s.Tick(150)
 	wantEarly := hp.Base + hp.PhaseEarly
 	if s.heatLevel != wantEarly {
-		t.Fatalf("Early全員生存の fire=%d のはず: %d", wantEarly, s.heatLevel)
+		t.Fatalf("Early全員生存・経過0秒の fire=%d のはず: %d", wantEarly, s.heatLevel)
 	}
 
 	s.aliveCount = 49
 	s.phase = proto.PhaseMid
 	s.Tick(150)
-	wantMid := hp.Base + int(hp.PerAliveDrop*float64(99-49)) + hp.PhaseMid
+	elapsed := s.elapsedMs
+	wantMid := hp.Base + int(hp.PerAliveDrop*float64(99-49)) +
+		int(hp.PerElapsedSec*float64(elapsed)/1000.0) + hp.PhaseMid
 	if s.heatLevel != wantMid {
 		t.Fatalf("Mid, alive=49 の fire=%d のはず: %d", wantMid, s.heatLevel)
+	}
+
+	// 生存数もフェーズも動かさず、時間だけ進めても heat が上がること
+	// （＝時間項が実際に効いていること）。
+	before := s.heatLevel
+	s.Tick(30000)
+	want := hp.Base + int(hp.PerAliveDrop*float64(99-49)) +
+		int(hp.PerElapsedSec*float64(s.elapsedMs)/1000.0) + hp.PhaseMid
+	if s.heatLevel != want {
+		t.Fatalf("30秒経過後の fire=%d のはず: %d", want, s.heatLevel)
+	}
+	if s.heatLevel <= before {
+		t.Fatalf("時間が進んでも heat が上がらない（時間項が効いていない）: %d → %d", before, s.heatLevel)
 	}
 }
 
