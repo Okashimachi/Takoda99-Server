@@ -33,6 +33,7 @@ type GameParameters struct {
 	Sanity       SanityParams       `json:"sanity"`
 	Phase        PhaseParams        `json:"phase"`
 	Heat         HeatParams         `json:"heat"`
+	Odai         OdaiParams         `json:"odai"`
 	Cull         CullParams         `json:"cull"`
 	Distribution DistributionParams `json:"distribution"`
 	Presentation PresentationParams `json:"presentation"`
@@ -180,6 +181,37 @@ type HeatParams struct {
 	MaxLevel int `json:"maxLevel"`
 }
 
+// OdaiParams: お題（出題語）の難度を heat から独立して微調整するツマミ（plan-h35 §2.1）。
+//
+// 🔴 **既定値は両方 0 で、現行と完全に同じ挙動**（wordLevel() == heatLevel）。
+// デプロイした瞬間に難度が変わってはいけない。動くのは運営が意図して値を入れた時だけ。
+//
+//	wordLevel = clamp0(heatLevel + LevelOffset ± rand(LevelSpread))
+//
+// game は odai（辞書）を import できない（層の依存が逆流する）ので、ここはあくまで
+// 「WordSource に要求する level」を動かすだけ。上振れして辞書の上端を超えても
+// WordSource が下の段階へ降りるので、追加のガードは要らない（plan-h35 §2.1）。
+type OdaiParams struct {
+	// LevelSpread は1語ごとの level のばらつき幅（±）。
+	// 0 なら現行どおり heatLevel と完全一致。2 なら heatLevel-2 〜 heatLevel+2 から一様に選ぶ。
+	//
+	// 同じ heat でも語の長さに幅が出るので、「難度が上がる＝全部が一律に難しくなる」
+	// という単調さが減る。
+	//
+	// ⚠ **0 より大きくすると wordLevel() が s.rng を1回余分に消費する。**
+	// シードを固定した再現性は保たれる（同じ順序で回る）が、既存テストの期待値とは
+	// ズレる。既定を 0 にしてあるのはそのため。
+	LevelSpread int `json:"levelSpread"`
+
+	// LevelOffset は heatLevel に対する下駄。お題だけをやさしく/難しくしたい時に使う。
+	//
+	// heat.* を触るとカーブ全体の形が変わるうえ DifficultyUpdate でクライアントの表示も動くが、
+	// こちらは**カーブの形と表示を保ったまま平行移動**できるので、当日の調整として安全。
+	// 負値も意味がある（-1 で1段やさしく）ので Validate では弾かない。
+	// 下限は wordLevel() が 0 でクランプする。
+	LevelOffset int `json:"levelOffset"`
+}
+
 // CullStage: 段階的足切りの1ステージ（本戦・plan-h22）。
 //
 // AtMs に到達した時点で、生存数が TargetAliveCount になるまでスコア下位から脱落させる。
@@ -204,6 +236,34 @@ type CullStage struct {
 // 「0秒時点で生存0＝開始直後に全店即死」が黙って成立してしまう（§2.2 のゼロ埋めの罠）。
 type CullParams struct {
 	Stages [CullStageCount]CullStage `json:"stages"`
+
+	// WarnMaxIds は ForcedEliminationWarning.CutStoreIds の件数上限（plan-h35 §2.2）。
+	//
+	// 🔴 **24 はクライアント（みかみ）と合意済みの値**（2026-08-15）。初回の足切り（99→75）で
+	// 切られるのがちょうど24店なので、最も人数が多いステージでも全員を出し切れる。
+	// **当日に勝手に変えない。** 変えるなら必ずクライアントへ共有する。
+	// 下げれば送信量が減る（帯域が問題になった時の逃げ道）、上げればデバッグ時に全件見える。
+	//
+	// 🔴 **0 は「上限なし」でも「1件も送らない」でもなく「未設定」を意味する**
+	// （EffectiveWarnMaxIds で既定 24 に読み替える）。理由は §7.3 の補完の穴:
+	// backfillDefaults の補完は**グループ単位**なので、本番DBに既に `cull` グループがある以上
+	// この新フィールドは補完されず 0 のまま読まれる。ここで 0 を Validate で弾くと
+	// **Load 全体が失敗して config が丸ごと内蔵デフォルト起動になる**（#124 と同じ事故）。
+	// db 側でも読み込み時に 24 へ補正しているが、sim/テスト/DB無し起動でも安全になるよう
+	// game 側でも 0 を既定として扱う（二重の防御）。
+	WarnMaxIds int `json:"warnMaxIds"`
+}
+
+// DefaultCullWarnMaxIds は WarnMaxIds の既定値（＝旧ハードコード値）。
+const DefaultCullWarnMaxIds = 24
+
+// EffectiveWarnMaxIds は実際に使う予告件数の上限を返す。
+// 0 以下（＝DBに無い／未設定）は既定の 24 として扱う。理由は WarnMaxIds のコメント。
+func (cp CullParams) EffectiveWarnMaxIds() int {
+	if cp.WarnMaxIds <= 0 {
+		return DefaultCullWarnMaxIds
+	}
+	return cp.WarnMaxIds
 }
 
 // CullStageCount は足切りの段階数。20秒等間隔×6段階で企画確定（plan-h22 §1）。
@@ -274,6 +334,21 @@ func (gp GameParameters) Validate() error {
 	}
 	if err := gp.Cull.validate(); err != nil {
 		return err
+	}
+	// お題の下駄とばらつき（plan-h35 §2.1）。
+	//
+	// LevelSpread が負だと rng.Intn に 0 以下が渡って **panic する**。ここで弾く。
+	// LevelOffset は負値に意味があるので弾かない（wordLevel() が 0 でクランプする）。
+	if gp.Odai.LevelSpread < 0 {
+		return fmt.Errorf("odai.levelSpread は非負である必要 (got %d)", gp.Odai.LevelSpread)
+	}
+	// 🔴 **0 は弾かない。** 0 は「未設定」で、EffectiveWarnMaxIds が既定 24 に読み替える。
+	// ここで 0 を弾くと、本番DB（cull グループが既にあり warnMaxIds だけ無い）が
+	// Validate に落ちて config 丸ごと内蔵デフォルト起動になる（params.go の WarnMaxIds 参照）。
+	// 負値だけは明確な誤りなので弾く。
+	if gp.Cull.WarnMaxIds < 0 {
+		return fmt.Errorf("cull.warnMaxIds は非負である必要 (got %d)。"+
+			"0 は「未設定」として既定 %d に読み替えられる", gp.Cull.WarnMaxIds, DefaultCullWarnMaxIds)
 	}
 	if gp.Phase.MidAliveThreshold < 0 {
 		return fmt.Errorf("phase.midAliveThreshold は非負である必要 (got %d)", gp.Phase.MidAliveThreshold)
@@ -480,6 +555,13 @@ func DefaultParameters() GameParameters {
 			// odai.MaxWordLevel（辞書の上端）と一致させる。
 			MaxLevel: 17,
 		},
+		// 🔴 **両方 0 ＝ 現行と完全に同じ挙動**（wordLevel() == heatLevel）。
+		// 当日「難しすぎる／簡単すぎる」となったら levelOffset を ±1 する。
+		// heat.* と違ってカーブの形もクライアント表示も動かない（plan-h35 §2.1）。
+		Odai: OdaiParams{
+			LevelSpread: 0,
+			LevelOffset: 0,
+		},
 		// 20秒等間隔×6段階（plan-h22 §1・企画確定）。
 		//
 		// 動かしてよい: 中間ステージ #2〜#4 の targetAliveCount
@@ -494,6 +576,7 @@ func DefaultParameters() GameParameters {
 				{AtMs: 100000, TargetAliveCount: 10},
 				{AtMs: 120000, TargetAliveCount: 0},
 			},
+			WarnMaxIds: DefaultCullWarnMaxIds,
 		},
 		Distribution: DistributionParams{
 			QueueRefillThreshold: 5,

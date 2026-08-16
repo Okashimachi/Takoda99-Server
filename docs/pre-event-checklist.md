@@ -269,7 +269,7 @@ Unity 側で「リザルト画面に何も出ない」が起きていたなら�
 
 | 項目 | 現状 | 誰が決める |
 |---|---|---|
-| `cutStoreIds` の件数上限 | 暫定 **10** | クライアントと合意 |
+| ~~`cutStoreIds` の件数上限~~ | **合意済み: 24**（2026-08-15）。plan-h35 で `cull.warnMaxIds` として設定値になった（既定 24） | ~~クライアントと合意~~ |
 | `PersonalResult` の項目 | `finalRank` / `score` / `takoyakiCount` / `survivedMs` / `stats` | 企画・クライアントと合意 |
 
 ---

@@ -93,6 +93,7 @@ func (s *ConfigStore) Load(ctx context.Context) (game.GameParameters, error) {
 		return def, fmt.Errorf("db: config デコード: %w", err)
 	}
 	backfillDefaults(&gp, def)
+	backfillNewFields(&gp, def)
 	if err := gp.Validate(); err != nil {
 		s.mu.RLock()
 		if s.lastGood.Session.TickIntervalMs != 0 {
@@ -169,6 +170,30 @@ func backfillDefaults(gp *game.GameParameters, def game.GameParameters) {
 		if f.IsZero() {
 			f.Set(src.Field(i))
 		}
+	}
+}
+
+// backfillNewFields は「**既存グループに後から足した**フィールド」を個別に補完する
+// （plan-h35 §7.3）。
+//
+// 🔴 **backfillDefaults（グループ単位）では拾えない穴を埋めるためにある。**
+// あちらは「グループ全体がゼロのときだけ既定値を入れる」ので、本番DBに既にある
+// グループへ新しいキーを足すと、そのキーは**ゼロのまま**読まれる。
+// 実際 2026-08-16 に heat.perElapsedSec で事故っている（新設キーがDBに無く、
+// 管理画面側の古い既定値で補完されて保存された）。
+//
+// ⚠ **ゼロが意味を持つ値をここに書かないこと。** ここに書いた瞬間、
+// 運営が意図して 0 にした設定を既定へ巻き戻すことになる。
+// 対象は「ゼロだと機能が壊れる／ゼロに意味がないフィールド」だけ。
+//
+//	cull.warnMaxIds … 0 だと足切り予告のIDが1件も送られず、右パネルが空になる。
+//	                  0=未設定として既定 24 に戻す（game 側の EffectiveWarnMaxIds と同じ扱い）。
+//
+// ⚠ heat.perElapsedSec は**あえて入れていない**。0 は「時間で難度を上げない」という
+// 妥当な（riskWarnings で警告済みの）設定であり、運営の意図を潰す側の害が大きい。
+func backfillNewFields(gp *game.GameParameters, def game.GameParameters) {
+	if gp.Cull.WarnMaxIds <= 0 {
+		gp.Cull.WarnMaxIds = def.Cull.WarnMaxIds
 	}
 }
 
