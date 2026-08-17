@@ -52,6 +52,8 @@ type Room struct {
 	// botIds は観測で Bot と人間を出し分けるためだけに持つ（nil 安全）。
 	// game は Bot を区別しないので（AGENTS.md §4.2）、合成ルートから渡してもらう。
 	botIds map[game.PlayerId]bool
+	// botTiers は観測で Bot の強さ階層を出すためだけに持つ（nil 安全・plan-h31 §6）。
+	botTiers  map[game.PlayerId]string
 	inbox     chan inbound
 	done      chan struct{}
 	elapsedMs int64
@@ -72,6 +74,10 @@ func (r *Room) SetAdminHub(h *admin.Hub) { r.hub = h }
 // SetBotIds は観測用に Bot の集合を注入する（nil 安全）。
 // 試合の進行には一切影響しない（AdminSnapshot の isBot にしか使わない）。
 func (r *Room) SetBotIds(ids map[game.PlayerId]bool) { r.botIds = ids }
+
+// SetBotTiers は観測用に Bot の強さ階層（storeId→"strong"/"normal"/"weak"）を注入する（nil 安全）。
+// 試合の進行には一切影響しない（AdminSnapshot の tier にしか使わない・plan-h31 §6）。
+func (r *Room) SetBotTiers(tiers map[game.PlayerId]string) { r.botTiers = tiers }
 
 // New は Room を作る。conns は playerId→接続。tickMs は tick 周期(ms)。
 func New(session *game.Session, conns map[game.PlayerId]transport.Connection, tickMs int, clock Clock, publisher transport.StatePublisher) *Room {
@@ -124,7 +130,7 @@ func (r *Room) publish() {
 	// に差し替え（plan-h00 §4 / plan-h02 §1.3）。session の純粋 getter を読むだけで、session を
 	// 触るのはこの room goroutine だけなのでデータ競合しない。
 	if r.hub != nil {
-		if env, ok := admin.SnapshotEnvelope(r.session, r.botIds); ok {
+		if env, ok := admin.SnapshotEnvelope(r.session, r.botIds, r.botTiers); ok {
 			r.hub.Broadcast(env)
 		}
 	}

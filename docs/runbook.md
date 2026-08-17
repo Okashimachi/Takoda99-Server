@@ -138,8 +138,9 @@ sudo systemctl restart takoda99
 | 症状 | 触る値 | 方向 |
 |---|---|---|
 | 人が集まらず試合が始まらない | `matching.minPlayers` | 下げる（**数秒で反映・再起動不要**） |
-| Bot が強すぎて人間が20秒で全滅 | `bot.baseElapsedMs` | 上げる（遅くする） |
-| Bot が弱すぎて人間が上位を独占 | `bot.baseElapsedMs` | 下げる（速くする） |
+| Bot が強すぎて人間が20秒で全滅 | `bot.tiers[*].msPerKey` | **3つとも**上げる（遅くする）。h31 で `baseElapsedMs` は廃止 |
+| Bot が弱すぎて人間が上位を独占 | `bot.tiers[*].msPerKey` | **3つとも**下げる（速くする） |
+| Bot の強さが揃いすぎ / 散らばりすぎ | `bot.individualSpread` | 上げると個体差が広がる（既定 0.20＝±20%） |
 | ミスの罰が重すぎる / 軽すぎる | `score.weightMiss` | 既定 30（`weightTakoyaki` 100 に対し 10:3。h30 で 25→30） |
 | お題が短すぎる / 注文が多すぎる | `customer.*.orderCount` | 3/3/2/6 → **2/2/1/4** で h30 以前へ（§2 ②'） |
 | 序盤で人が減りすぎ / 減らなすぎ | `cull.stages[1..3].targetAliveCount` | 中間ステージのみ |
@@ -176,7 +177,8 @@ https://takoda99.mooo.com/admin/?token=<CONFIG_ADMIN_TOKEN>
 | 客フロー | **行列が空の店が無いか**（＝お題が途切れていないか） |
 
 - 「試合が走っていません（待機中）」→ そもそも試合が始まっていない（`minPlayers` を確認）
-- スコア分布で **Bot が上位10を占めている** → Bot が強すぎる（`bot.baseElapsedMs` を上げる）
+- スコア分布で **Bot が上位10を占めている** → Bot が強すぎる（`bot.tiers[*].msPerKey` を3つとも上げる）
+  - 上位を **strong tier だけ**が占めているなら、`bot.tiers[0].weight`（強の出現比）を下げるほうが効く
 
 ---
 

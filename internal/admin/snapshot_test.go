@@ -30,7 +30,7 @@ func TestBuildSnapshot_Basic(t *testing.T) {
 	s := newSession(3)
 	s.Start(0)
 
-	snap := BuildSnapshot(s, nil)
+	snap := BuildSnapshot(s, nil, nil)
 	if snap.MatchId != "m-test" {
 		t.Fatalf("MatchId=%q, want m-test", snap.MatchId)
 	}
@@ -59,7 +59,7 @@ func TestSnapshotEnvelope_TypeAndPayload(t *testing.T) {
 	s := newSession(2)
 	s.Start(0)
 
-	env, ok := SnapshotEnvelope(s, nil)
+	env, ok := SnapshotEnvelope(s, nil, nil)
 	if !ok {
 		t.Fatal("SnapshotEnvelope ok=false")
 	}
@@ -95,7 +95,7 @@ func TestBuildSnapshot_CarriesScore(t *testing.T) {
 		t.Fatalf("StoreBoard len=%d, want 3", len(board))
 	}
 
-	snap := BuildSnapshot(s, nil)
+	snap := BuildSnapshot(s, nil, nil)
 	if len(snap.Stores) != 3 {
 		t.Fatalf("stores=%d, want 3", len(snap.Stores))
 	}
@@ -120,13 +120,15 @@ func TestBuildSnapshot_CarriesScore(t *testing.T) {
 	}
 }
 
-// AdminSnapshot が h26 の観測に要る内訳（takoyakiCount / missCount / isBot）を運ぶ。
+// AdminSnapshot が h26 の観測に要る内訳（takoyakiCount / missCount / isBot）と
+// h31 の tier を運ぶ。
 func TestBuildSnapshot_CarriesBreakdownAndIsBot(t *testing.T) {
 	s := newSession(3)
 	s.Start(0)
 
 	botIds := map[game.PlayerId]bool{"b": true}
-	snap := BuildSnapshot(s, botIds)
+	botTiers := map[game.PlayerId]string{"b": "weak"}
+	snap := BuildSnapshot(s, botIds, botTiers)
 
 	byId := map[string]AdminStore{}
 	for _, st := range snap.Stores {
@@ -144,9 +146,22 @@ func TestBuildSnapshot_CarriesBreakdownAndIsBot(t *testing.T) {
 		}
 	}
 
-	// botIds 未注入（sim/既存テスト）でも壊れない。
-	if BuildSnapshot(s, nil).Stores[0].IsBot {
+	// tier（plan-h31 §6）。Bot だけに付き、人間は空のまま（h34 の表示がこれを読む）。
+	if got := byId["b"].Tier; got != "weak" {
+		t.Fatalf("Bot の tier=%q, want weak", got)
+	}
+	for _, id := range []string{"a", "c"} {
+		if got := byId[id].Tier; got != "" {
+			t.Fatalf("人間 %s に tier=%q が付いた", id, got)
+		}
+	}
+
+	// botIds/botTiers 未注入（sim/既存テスト）でも壊れない。
+	if BuildSnapshot(s, nil, nil).Stores[0].IsBot {
 		t.Fatal("botIds=nil で IsBot が true になっている")
+	}
+	if BuildSnapshot(s, nil, nil).Stores[0].Tier != "" {
+		t.Fatal("botTiers=nil で tier が入っている")
 	}
 }
 
@@ -157,7 +172,7 @@ func TestAdminSnapshot_WireKeys(t *testing.T) {
 	s := newSession(2)
 	s.Start(0)
 
-	raw, err := json.Marshal(BuildSnapshot(s, nil))
+	raw, err := json.Marshal(BuildSnapshot(s, nil, nil))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -191,7 +206,7 @@ func TestBuildSnapshot_AtRiskShowsProcessingTruth(t *testing.T) {
 	stages := s.Params().Cull.Stages
 	s.Tick(stages[len(stages)-2].AtMs)
 
-	snap := BuildSnapshot(s, nil)
+	snap := BuildSnapshot(s, nil, nil)
 	atRisk := 0
 	for _, st := range snap.Stores {
 		if st.AtRisk {

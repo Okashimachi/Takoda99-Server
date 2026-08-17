@@ -208,3 +208,98 @@ func TestBackfillDefaults_FillsOnlyMissingGroup(t *testing.T) {
 		t.Fatalf("Validate を通らない: %v", err)
 	}
 }
+
+// TestBackfillNewFields_BotTiers は「本番DB相当（bot グループが**旧スキーマ**で入っている）JSON を
+// 読んでも壊れない」ことを固定する（plan-h31 §4.1）。
+//
+// 🔴 **これが h31 で最も危険だった箇所。** 経路は #124 とまったく同じ:
+//
+//	本番DBの bot = {baseAccuracy, baseElapsedMs, accuracyJitter, elapsedJitterMs}
+//	  → グループは非ゼロなので backfillDefaults は触らない
+//	  → 新設の tiers は [{0,0,0,0} ×3] のまま
+//	  → ここで Validate が弾くと Load 失敗 → **score/cull/heat を含む全設定が内蔵デフォルトへ転落**
+//
+// 対処は「Validate で弾かず、ゼロを既定へ読み替える」。読み替えは game.BotParams.EffectiveTiers に
+// 一本化し、db 側（この関数）でも同じものを当てて二重化している。
+func TestBackfillNewFields_BotTiersFromLegacySchema(t *testing.T) {
+	def := game.DefaultParameters()
+
+	// 本番DB（2026-08-17 時点）を模した JSON。bot は旧スキーマのまま、
+	// 他のグループは本番の実値（heat.perElapsedSec=0.12 等）が入っている。
+	raw, err := json.Marshal(def)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	m["bot"] = map[string]any{
+		"baseAccuracy":    0.85,
+		"baseElapsedMs":   6000, // 本番の実値。新スキーマには対応するキーが無い
+		"accuracyJitter":  0.1,
+		"elapsedJitterMs": 500,
+	}
+	legacy, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var gp game.GameParameters
+	if err := json.Unmarshal(legacy, &gp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// 前提1: 旧キーは無視され、新フィールドはゼロのまま読まれる。
+	if gp.Bot.Tiers != ([game.BotTierCount]game.BotTier{}) {
+		t.Fatalf("前提が変わった: tiers がゼロでない %+v", gp.Bot.Tiers)
+	}
+	// 前提2: グループ単位の補完では埋まらない（elapsedJitterMs があるのでグループは非ゼロ）。
+	backfillDefaults(&gp, def)
+	if gp.Bot.Tiers != ([game.BotTierCount]game.BotTier{}) {
+		t.Fatalf("前提が変わった: グループ単位の補完で tiers が埋まっている %+v。"+
+			"backfillDefaults がフィールド単位になったならこの関数は不要になる", gp.Bot.Tiers)
+	}
+
+	// 🔴 ここが本題。**Validate は落ちてはいけない**（落ちると全設定が既定へ巻き戻る）。
+	if err := gp.Validate(); err != nil {
+		t.Fatalf("旧スキーマの bot で Validate が落ちた（#124 と同じ事故になる）: %v", err)
+	}
+
+	backfillNewFields(&gp, def)
+
+	if gp.Bot.Tiers != game.DefaultBotTiers() {
+		t.Fatalf("tiers が既定へ補完されていない: %+v", gp.Bot.Tiers)
+	}
+	if gp.Bot.IndividualSpread != game.DefaultBotIndividualSpread {
+		t.Fatalf("individualSpread が補完されていない: %v", gp.Bot.IndividualSpread)
+	}
+	// DB にある値（旧スキーマから引き継げるもの）は保持する。
+	if gp.Bot.ElapsedJitterMs != 500 {
+		t.Fatalf("DB の elapsedJitterMs が失われた: %d", gp.Bot.ElapsedJitterMs)
+	}
+	// 🔴 他のグループが巻き戻っていないこと（#124 で実際に起きた被害はこちら）。
+	if gp.Score != def.Score || gp.Cull != def.Cull || gp.Heat != def.Heat {
+		t.Fatal("bot 以外のグループが変化した")
+	}
+	if err := gp.Validate(); err != nil {
+		t.Fatalf("補完後に Validate を通らない: %v", err)
+	}
+}
+
+// tiers を運営が config-front から保存した後は、その値を既定へ巻き戻さないこと。
+func TestBackfillNewFields_KeepsOperatorBotTiers(t *testing.T) {
+	def := game.DefaultParameters()
+	gp := game.DefaultParameters()
+	gp.Bot.Tiers[game.BotTierStrong].MsPerKey = 120 // 当日「Bot を強くした」つもりの値
+	gp.Bot.IndividualSpread = 0.35
+
+	backfillNewFields(&gp, def)
+
+	if gp.Bot.Tiers[game.BotTierStrong].MsPerKey != 120 {
+		t.Fatalf("運営の tier 値が既定で上書きされた: %d", gp.Bot.Tiers[game.BotTierStrong].MsPerKey)
+	}
+	if gp.Bot.IndividualSpread != 0.35 {
+		t.Fatalf("運営の individualSpread が上書きされた: %v", gp.Bot.IndividualSpread)
+	}
+}

@@ -26,6 +26,11 @@ type Player struct {
 	Conn  transport.Connection
 	Name  string
 	IsBot bool
+	// Tier は Bot の強さ階層（"strong" / "normal" / "weak"）。人間は空（plan-h31）。
+	//
+	// **試合の進行には一切影響しない**（観測ダッシュボードで「強 Bot が上位を独占していないか」
+	// 「人間はどの層に混ざっているか」を見るためだけの値）。抽選は app.DrawBotSpec が行う。
+	Tier string
 }
 
 // MaxDisplayNameLen は表示名の最大文字数。

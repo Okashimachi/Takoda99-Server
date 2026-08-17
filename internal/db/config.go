@@ -188,6 +188,8 @@ func backfillDefaults(gp *game.GameParameters, def game.GameParameters) {
 //
 //	cull.warnMaxIds … 0 だと足切り予告のIDが1件も送られず、右パネルが空になる。
 //	                  0=未設定として既定 24 に戻す（game 側の EffectiveWarnMaxIds と同じ扱い）。
+//	bot.tiers       … 0 だと「1打鍵0ms・重み0」の tier ができて Bot が壊れる（plan-h31 §4.1）。
+//	bot.individualSpread … 0 だと個体差が消え、99体が同じ強さに戻る（h31 の目的そのもの）。
 //
 // ⚠ heat.perElapsedSec は**あえて入れていない**。0 は「時間で難度を上げない」という
 // 妥当な（riskWarnings で警告済みの）設定であり、運営の意図を潰す側の害が大きい。
@@ -195,6 +197,12 @@ func backfillNewFields(gp *game.GameParameters, def game.GameParameters) {
 	if gp.Cull.WarnMaxIds <= 0 {
 		gp.Cull.WarnMaxIds = def.Cull.WarnMaxIds
 	}
+	// 🔴 Bot の tier は本番DBの `bot` グループ（旧スキーマ）に存在しない＝ゼロのまま読まれる。
+	// 補正のロジックは game 側（EffectiveTiers）に1本化してあるので、ここはそれを当てるだけ。
+	// **game 側にも同じ防御がある**のは意図的な二重化で、DB を経由しない sim・テスト・
+	// DB無し起動でも安全にするため（cull.warnMaxIds と同じ形）。
+	gp.Bot.Tiers = gp.Bot.EffectiveTiers()
+	gp.Bot.IndividualSpread = gp.Bot.EffectiveIndividualSpread()
 }
 
 // コンパイル時に game.ConfigProvider 充足を保証する。
