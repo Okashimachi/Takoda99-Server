@@ -185,6 +185,63 @@ func TestGameParameters_Validate(t *testing.T) {
 			t.Fatal("customer.buzz.orderCount=0 はエラーになるべき")
 		}
 	})
+
+	// ── お題のツマミ（plan-h35 §2）──
+
+	t.Run("odai.levelSpread が負を弾く", func(t *testing.T) {
+		// 負値は rng.Intn(2*sp+1) に 0 以下を渡して **panic する**。
+		gp := DefaultParameters()
+		gp.Odai.LevelSpread = -1
+		if err := gp.Validate(); err == nil {
+			t.Fatal("odai.levelSpread=-1 はエラーになるべき（rng.Intn が panic する）")
+		}
+	})
+
+	t.Run("odai.levelOffset は負値を許す", func(t *testing.T) {
+		// 「お題だけをやさしくする」が levelOffset の存在理由なので、負値は正常な使い方。
+		gp := DefaultParameters()
+		gp.Odai.LevelOffset = -3
+		if err := gp.Validate(); err != nil {
+			t.Fatalf("odai.levelOffset=-3 は許容されるべき（お題だけやさしくする用途）: %v", err)
+		}
+	})
+
+	t.Run("cull.warnMaxIds は 0 を許し負値を弾く", func(t *testing.T) {
+		// 🔴 **0 を弾いてはいけない。** 本番DBには cull グループが既にあるので、
+		// 新設の warnMaxIds は補完されず 0 のまま読まれる（補完はグループ単位）。
+		// ここで 0 を弾くと Load 全体が失敗し、**config が丸ごと内蔵デフォルト起動**になる
+		// （#124・2026-08-14 と同じ事故）。0 は EffectiveWarnMaxIds が既定 24 に読み替える。
+		gp := DefaultParameters()
+		gp.Cull.WarnMaxIds = 0
+		if err := gp.Validate(); err != nil {
+			t.Fatalf("cull.warnMaxIds=0 は許容されるべき（未設定＝既定24として扱う）: %v", err)
+		}
+		gp.Cull.WarnMaxIds = -1
+		if err := gp.Validate(); err == nil {
+			t.Fatal("cull.warnMaxIds=-1 はエラーになるべき")
+		}
+	})
+}
+
+// TestGameParameters_IsComparable は GameParameters が `==` 比較可能なままであることを固定する
+// （AGENTS.md §1.3）。map / slice のフィールドを足すと**コンパイルエラー**になる。
+//
+// 比較可能性は設定の差分検出と backfillDefaults（IsZero 判定）の前提。
+func TestGameParameters_IsComparable(t *testing.T) {
+	a := DefaultParameters()
+	b := DefaultParameters()
+	if a != b {
+		t.Fatal("同じ DefaultParameters が等しくない")
+	}
+	b.Odai.LevelOffset++
+	if a == b {
+		t.Fatal("odai を変えたのに等しいと判定された")
+	}
+	b = a
+	b.Cull.WarnMaxIds++
+	if a == b {
+		t.Fatal("cull.warnMaxIds を変えたのに等しいと判定された")
+	}
 }
 
 func TestConfigHash(t *testing.T) {

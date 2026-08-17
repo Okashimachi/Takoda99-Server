@@ -37,6 +37,11 @@ type Config struct {
 	// Rng はダミー店の打鍵モデル用。session 側の乱数はここから別 stream に分岐させる。
 	Rng *rand.Rand
 
+	// Words はお題供給の差し替え（nil なら odai.NewStaticPool()）。
+	// 「どの level の語が何回要求されたか」を観測したいときにラッパを挿す
+	// （plan-h35 §2.1 の levelSpread / levelOffset の実測）。
+	Words game.WordSource
+
 	// MaxTicks を超えたら膠着(Stalled)とみなして打ち切る。
 	MaxTicks int
 }
@@ -171,12 +176,18 @@ func Simulate(cfg Config) Result {
 		byId[d.id] = d
 	}
 
+	// 辞書は常に本物（StaticPool）。cfg.Words はその**手前に挿すラッパ**の想定で、
+	// WordMaxLevel の観測は差し替えても本物の辞書から取る。
 	words := odai.NewStaticPool()
+	var source game.WordSource = words
+	if cfg.Words != nil {
+		source = cfg.Words
+	}
 	// シミュレーションなので即座に開始させる
 	params := cfg.Params
 	params.Matching.ReadyCountdownMs = 0
 
-	sess := game.NewSession("sim", params, words, sessRng, inits)
+	sess := game.NewSession("sim", params, source, sessRng, inits)
 	tickMs := cfg.Params.Session.TickIntervalMs
 
 	r := Result{

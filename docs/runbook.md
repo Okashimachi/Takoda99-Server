@@ -140,9 +140,12 @@ sudo systemctl restart takoda99
 | 人が集まらず試合が始まらない | `matching.minPlayers` | 下げる（**数秒で反映・再起動不要**） |
 | Bot が強すぎて人間が20秒で全滅 | `bot.baseElapsedMs` | 上げる（遅くする） |
 | Bot が弱すぎて人間が上位を独占 | `bot.baseElapsedMs` | 下げる（速くする） |
-| ミスの罰が重すぎる / 軽すぎる | `score.weightMiss` | 既定 25（`weightTakoyaki` 100 に対し 4:1） |
+| ミスの罰が重すぎる / 軽すぎる | `score.weightMiss` | 既定 30（`weightTakoyaki` 100 に対し 10:3。h30 で 25→30） |
 | お題が短すぎる / 注文が多すぎる | `customer.*.orderCount` | 3/3/2/6 → **2/2/1/4** で h30 以前へ（§2 ②'） |
 | 序盤で人が減りすぎ / 減らなすぎ | `cull.stages[1..3].targetAliveCount` | 中間ステージのみ |
+| **お題が難しすぎる / やさしすぎる** | `odai.levelOffset` | **±1 する**（既定 0）。`heat.*` と違いカーブの形もクライアント表示も変わらない（h35） |
+| お題が単調（全員同じ難度の語） | `odai.levelSpread` | 上げる（既定 0＝ばらつき無し）。2 なら heat±2 から選ぶ |
+| 足切り予告の送信量を減らしたい | `cull.warnMaxIds` | 下げる。🔴 **既定 24 はクライアントと合意済み。変えたら必ず共有する** |
 
 ### 🔴 触ってはいけない値
 

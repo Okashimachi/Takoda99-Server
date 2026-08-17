@@ -622,9 +622,14 @@ func (s *Session) cullWarnings(out []Outbound) []Outbound {
 	}
 
 	// 表示件数の上限。候補は弱い順に並んでいるので、先頭から＝最も危ない店から詰める。
-	cutIds := make([]proto.StoreId, 0, cullWarnMaxIds)
+	//
+	// 🔴 **必ず EffectiveWarnMaxIds() を通すこと。** cull.warnMaxIds を直接読むと、
+	// 本番DB（cull グループはあるが warnMaxIds が無い）で 0 になり、
+	// **予告が1件も届かない**（右パネルが空になる）。plan-h35 §7.3。
+	maxIds := s.params.Cull.EffectiveWarnMaxIds()
+	cutIds := make([]proto.StoreId, 0, maxIds)
 	for _, st := range candidates {
-		if len(cutIds) >= cullWarnMaxIds {
+		if len(cutIds) >= maxIds {
 			break
 		}
 		cutIds = append(cutIds, st.id)
@@ -646,13 +651,9 @@ func (s *Session) cullWarnings(out []Outbound) []Outbound {
 	return out
 }
 
-// cullWarnMaxIds は ForcedEliminationWarning.CutStoreIds の上限（右パネルの表示件数ぶん）。
+// ForcedEliminationWarning.CutStoreIds の上限は cull.warnMaxIds（params.go）へ移した（plan-h35 §2.2）。
 // 最終ステージでは候補が全店になるため、上限が無いと99件を毎tick全員へ配ることになる。
-//
-// **24 はクライアント（みかみ）と合意した値**（2026-08-15）。初回の足切り（99→75）で
-// 切られるのがちょうど24店なので、**最も人数が多いステージでも全員を出し切れる**。
-// これより後のステージは切る数が減る（20/20/15/10）ので、常に全員入る。
-const cullWarnMaxIds = 24
+// 既定は旧ハードコードと同じ 24（＝クライアントと合意済みの値）。
 
 // cullCandidates は「生存数を target まで減らすとき切られる店」を**弱い順**に返す。
 //
@@ -943,7 +944,23 @@ func (s *Session) admitCustomer(cid proto.CustomerId, store PlayerId) (Outbound,
 	}), true
 }
 
-func (s *Session) wordLevel() int { return s.heatLevel }
+// wordLevel は次に配る1語へ要求する難易度段階を返す（plan-h35 §2.1）。
+//
+// 既定（levelOffset=0 / levelSpread=0）では heatLevel と完全に一致し、**rng も消費しない**。
+// つまりデプロイしただけでは挙動もシード再現性も変わらない。
+//
+// 上振れして辞書の上端を超えても WordSource が下の段階へ降りるので、上限のガードは要らない。
+// 下限だけは要る（level が負だと WordSource の下降ループが空回りして fallback 語になる）。
+func (s *Session) wordLevel() int {
+	l := s.heatLevel + s.params.Odai.LevelOffset
+	if sp := s.params.Odai.LevelSpread; sp > 0 {
+		l += s.rng.Intn(2*sp+1) - sp
+	}
+	if l < 0 {
+		l = 0
+	}
+	return l
+}
 
 func (s *Session) assignCustomer(cid proto.CustomerId, store PlayerId) {
 	c := s.customers[cid]
