@@ -29,7 +29,6 @@ import (
 	"github.com/coder/websocket"
 
 	"takoda99/internal/app"
-	"takoda99/internal/bot"
 	"takoda99/internal/game"
 	"takoda99/internal/matchmaking"
 	"takoda99/internal/proto"
@@ -406,7 +405,7 @@ func startMatchAndConnect(ctx context.Context, t *testing.T, rec *recorder) (*ht
 
 	players = append(players, matchmaking.Player{Id: selfId, Conn: serverSide, Name: "自分"})
 	for i := 0; i < botCount; i++ {
-		players = append(players, app.NewBotPlayer(ctx, proto.StoreId(fmt.Sprintf("b-%d", i+1)), bot.DefaultConfig()))
+		players = append(players, app.NewBotPlayer(ctx, proto.StoreId(fmt.Sprintf("b-%d", i+1)), deps.Params.Bot))
 	}
 
 	go app.RunMatch(ctx, deps, players)

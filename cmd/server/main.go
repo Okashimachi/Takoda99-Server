@@ -20,7 +20,6 @@ import (
 
 	"takoda99/internal/admin"
 	"takoda99/internal/app"
-	"takoda99/internal/bot"
 	"takoda99/internal/config"
 	"takoda99/internal/configapi"
 	"takoda99/internal/db"
@@ -82,14 +81,12 @@ func main() {
 		return d
 	}
 
-	botConfig := func() bot.Config {
+	// Bot の強さは tier（強／中／弱）＋個体差で1体ずつ抽選する（plan-h31）。
+	// **1つの Config を全 Bot で共有しない**のがこの plan の中核なので、
+	// ここでは params を渡すだけにして、抽選は app.NewBotPlayer が1体ごとに行う。
+	botParams := func() game.BotParams {
 		p, _ := provider.Load(ctx)
-		return bot.Config{
-			BaseAccuracy:    p.Bot.BaseAccuracy,
-			BaseElapsedMs:   p.Bot.BaseElapsedMs,
-			AccuracyJitter:  p.Bot.AccuracyJitter,
-			ElapsedJitterMs: p.Bot.ElapsedJitterMs,
-		}
+		return p.Bot
 	}
 
 	var ids atomic.Int64
@@ -123,7 +120,7 @@ func main() {
 			name := awaitJoinName(conn, joinTimeout)
 			players := []matchmaking.Player{{Id: id, Conn: conn, Name: name}}
 			for i := 0; i < *bots; i++ {
-				players = append(players, app.NewBotPlayer(ctx, nextID(), botConfig()))
+				players = append(players, app.NewBotPlayer(ctx, nextID(), botParams()))
 			}
 			log.Printf("solo: 試合開始 human=%s bots=%d", id, *bots)
 			go app.RunMatch(ctx, loadDeps(), players)
@@ -146,7 +143,7 @@ func main() {
 				log.Printf("match: 試合開始 players=%d", len(players))
 				go app.RunMatch(ctx, loadDeps(), players)
 			},
-			NewBot: func() matchmaking.Player { return app.NewBotPlayer(ctx, nextID(), botConfig()) },
+			NewBot: func() matchmaking.Player { return app.NewBotPlayer(ctx, nextID(), botParams()) },
 		})
 		go mm.Run(ctx)
 		http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {

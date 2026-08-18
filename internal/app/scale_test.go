@@ -12,6 +12,7 @@ import (
 	"takoda99/internal/odai"
 	"takoda99/internal/room"
 	"takoda99/internal/transport"
+	"takoda99/internal/typist"
 )
 
 // 99体の Bot 対戦を実ランタイム（Bot goroutine + room + InMemory + publisher）で
@@ -33,11 +34,13 @@ func TestScale_99Bots_RunsToCompletion(t *testing.T) {
 
 	inits := make([]game.PlayerInit, 0, n)
 	conns := make(map[game.PlayerId]transport.Connection, n)
-	botCfg := bot.Config{BaseAccuracy: 0.9, BaseElapsedMs: 15, AccuracyJitter: 0, ElapsedJitterMs: 0}
+	// 1注文 15ms 前後で回す（打鍵数 × MsPerKey）。強さの検証ではなく
+	// 「99体を実ランタイムで捌けるか」の試験なので、実力は最速寄りに固定する。
+	botAbility := typist.Ability{MsPerKey: 1, MissRate: 0.1}
 	for i := 0; i < n; i++ {
 		id := game.PlayerId(fmt.Sprintf("bot%02d", i))
 		srv, cli := transport.Pipe()
-		b := bot.New(cli, botCfg, rand.New(rand.NewSource(int64(i)+1)))
+		b := bot.New(cli, botAbility, rand.New(rand.NewSource(int64(i)+1)))
 		go b.Run(ctx)
 		inits = append(inits, game.PlayerInit{Id: id, DisplayName: string(id)})
 		conns[id] = srv

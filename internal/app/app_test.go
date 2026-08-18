@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"takoda99/internal/app"
-	"takoda99/internal/bot"
+	"takoda99/internal/game"
 	"takoda99/internal/matchmaking"
 	"takoda99/internal/proto"
 	"takoda99/internal/transport"
@@ -22,7 +22,7 @@ func TestRunMatch_AssemblesAndDeliversMatchStart(t *testing.T) {
 
 	// 観測用プレイヤー（client 端をテストが読む）＋ Bot 1体。
 	obsSrv, obsCli := transport.Pipe()
-	botP := app.NewBotPlayer(ctx, "bot1", bot.DefaultConfig())
+	botP := app.NewBotPlayer(ctx, "bot1", game.DefaultParameters().Bot)
 	players := []matchmaking.Player{{Id: "obs", Conn: obsSrv}, botP}
 
 	go app.RunMatch(ctx, d, players)

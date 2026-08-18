@@ -28,19 +28,45 @@ func TestGameParameters_Validate(t *testing.T) {
 		}
 	})
 
-	t.Run("bot.baseElapsedMs<=0 を弾く", func(t *testing.T) {
+	// 🔴 **ゼロは弾かない**（plan-h31 §4.1・#124 の再来防止）。
+	// 本番DBには `bot` グループが既にあるので新設の tiers はゼロのまま読まれる。
+	// ここで弾くと Load が失敗し、score/cull/heat を含む**全設定が内蔵デフォルトへ巻き戻る**。
+	t.Run("bot.tiers のゼロ埋めは弾かない（弾くと本番が既定値起動になる）", func(t *testing.T) {
 		gp := DefaultParameters()
-		gp.Bot.BaseElapsedMs = 0
-		if err := gp.Validate(); err == nil {
-			t.Fatal("bot.baseElapsedMs=0 はエラーになるべき")
+		gp.Bot = BotParams{} // 本番DBの bot グループが旧スキーマ＝新フィールドが全部ゼロ
+		if err := gp.Validate(); err != nil {
+			t.Fatalf("ゼロの bot を弾いてはいけない（#124 と同じ事故になる）: %v", err)
+		}
+		// 弾かない代わりに、実際に使う値は既定へ読み替えられていること。
+		if got := gp.Bot.EffectiveTiers(); got != DefaultBotTiers() {
+			t.Fatalf("EffectiveTiers がゼロを既定へ読み替えていない: %+v", got)
+		}
+		if got := gp.Bot.EffectiveIndividualSpread(); got != DefaultBotIndividualSpread {
+			t.Fatalf("EffectiveIndividualSpread=%v, want %v", got, DefaultBotIndividualSpread)
 		}
 	})
 
-	t.Run("bot.baseAccuracy が範囲外を弾く", func(t *testing.T) {
+	t.Run("bot.tiers の負値は弾く", func(t *testing.T) {
 		gp := DefaultParameters()
-		gp.Bot.BaseAccuracy = 1.5
+		gp.Bot.Tiers[BotTierWeak].MsPerKey = -1
 		if err := gp.Validate(); err == nil {
-			t.Fatal("bot.baseAccuracy=1.5 はエラーになるべき")
+			t.Fatal("msPerKey=-1 はエラーになるべき")
+		}
+	})
+
+	t.Run("bot.tiers の missRate>1 を弾く", func(t *testing.T) {
+		gp := DefaultParameters()
+		gp.Bot.Tiers[BotTierNormal].MissRate = 1.5
+		if err := gp.Validate(); err == nil {
+			t.Fatal("missRate=1.5 はエラーになるべき（確率として成立しない）")
+		}
+	})
+
+	t.Run("bot.individualSpread>=1 を弾く", func(t *testing.T) {
+		gp := DefaultParameters()
+		gp.Bot.IndividualSpread = 1
+		if err := gp.Validate(); err == nil {
+			t.Fatal("individualSpread=1 はエラーになるべき（個体係数が 0 以下になりうる）")
 		}
 	})
 
@@ -288,5 +314,77 @@ func TestDefaultCullSchedule_MatchesSpec(t *testing.T) {
 	}
 	if got := DefaultParameters().Cull.Stages; got != want {
 		t.Fatalf("既定の cullSchedule が企画確定値と違う\n got=%+v\nwant=%+v", got, want)
+	}
+}
+
+// ── Bot の tier（plan-h31）─────────────────────────────────────────
+
+// 既定の tier が「強いほど速く・正確で・難度に強い」という順序になっていること。
+//
+// 順序が崩れると「弱 tier のほうが上位を占める」ことになり、tier という概念自体が無意味になる。
+// 数値は h26/h33 で動かしてよいが、**単調性は仕様**。
+func TestDefaultBotTiers_MonotonicByStrength(t *testing.T) {
+	tiers := DefaultBotTiers()
+	for i := 1; i < BotTierCount; i++ {
+		prev, cur := tiers[i-1], tiers[i]
+		if cur.MsPerKey <= prev.MsPerKey {
+			t.Errorf("tier[%d].msPerKey=%d は tier[%d]=%d より大きい（遅い）必要", i, cur.MsPerKey, i-1, prev.MsPerKey)
+		}
+		if cur.MissRate <= prev.MissRate {
+			t.Errorf("tier[%d].missRate=%v は tier[%d]=%v より大きい必要", i, cur.MissRate, i-1, prev.MissRate)
+		}
+		if cur.HeatPenalty <= prev.HeatPenalty {
+			t.Errorf("tier[%d].heatPenalty=%v は tier[%d]=%v より大きい必要（難度に弱い）", i, cur.HeatPenalty, i-1, prev.HeatPenalty)
+		}
+	}
+	if got := BotTierLabel(BotTierStrong); got != "strong" {
+		t.Errorf("BotTierLabel(strong)=%q", got)
+	}
+	if got := BotTierLabel(BotTierCount); got != "" {
+		t.Errorf("未知の tier は空文字であるべき: %q", got)
+	}
+}
+
+// 🔴 配列のゼロ埋め（config-front から2要素だけ保存された等）を**要素単位**で吸収すること。
+//
+// これが効かないと「重み0・1打鍵0ms」の tier ができ、当たった Bot が無限に速くなる。
+// Validate で弾く方式にすると本番の config が丸ごと巻き戻るので、こちらで吸収する（§4.1）。
+func TestEffectiveTiers_FillsZeroFilledElement(t *testing.T) {
+	def := DefaultBotTiers()
+
+	bp := BotParams{Tiers: def}
+	bp.Tiers[BotTierWeak] = BotTier{} // JSON の要素数不足によるゼロ埋め
+	got := bp.EffectiveTiers()
+	if got != def {
+		t.Fatalf("ゼロ埋めされた1要素だけが既定へ戻るべき\n got=%+v\nwant=%+v", got, def)
+	}
+
+	// 一部だけ入っている（重みはあるが msPerKey が無い）ケースも 0ms にしない。
+	bp = BotParams{Tiers: def}
+	bp.Tiers[BotTierNormal].MsPerKey = 0
+	if got := bp.EffectiveTiers()[BotTierNormal].MsPerKey; got != def[BotTierNormal].MsPerKey {
+		t.Fatalf("msPerKey=0 が既定へ戻っていない: %d", got)
+	}
+
+	// 全 tier の重みが 0 だと抽選できないので、まとめて既定へ戻す。
+	bp = BotParams{Tiers: def}
+	for i := range bp.Tiers {
+		bp.Tiers[i].Weight = 0
+	}
+	if got := bp.EffectiveTiers(); got != def {
+		t.Fatalf("重み合計0が既定へ戻っていない: %+v", got)
+	}
+}
+
+// 運営が入れた値は既定へ巻き戻さない（読み替えは「ゼロ＝未設定」に限る）。
+func TestEffectiveTiers_KeepsOperatorValues(t *testing.T) {
+	bp := BotParams{Tiers: DefaultBotTiers(), IndividualSpread: 0.05}
+	bp.Tiers[BotTierStrong].MsPerKey = 120
+	got := bp.EffectiveTiers()
+	if got[BotTierStrong].MsPerKey != 120 {
+		t.Fatalf("運営の値が既定で上書きされた: %d", got[BotTierStrong].MsPerKey)
+	}
+	if s := bp.EffectiveIndividualSpread(); s != 0.05 {
+		t.Fatalf("individualSpread が上書きされた: %v", s)
 	}
 }

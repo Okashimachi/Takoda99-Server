@@ -7,6 +7,7 @@ import (
 	"takoda99/internal/game"
 	"takoda99/internal/odai"
 	"takoda99/internal/proto"
+	"takoda99/internal/typist"
 )
 
 // dummy.go はシミュレータ内の仮想プレイヤー（ダミー店）。
@@ -139,26 +140,31 @@ func (d *dummyStore) step(dtMs int, rng *rand.Rand) (proto.OrderServed, bool) {
 }
 
 // begin は行列先頭の客に取り掛かり、ミス回数と所要時間を先に確定させる。
+//
+// 🔴 **判定式は実 Bot と共有する**（typist.Serve・plan-h31 §5）。別々に書くと必ずズレる
+// ——実際 h31 の前は「sim は打鍵ごとにミス判定、実 Bot は miss∈{0,1}」とズレており、
+// sim で詰めた weightMiss が実試合で成立しない状態だった。
+//
+// ⚠ heatLevel に 0 を渡しているのは**現時点で意図どおり**。sim のダミー店に難度追従と
+// 速度/ミス率の相関を入れるのは h33 の範囲で、h31 では sim の挙動を1ビットも変えない
+// （変えると h26 で詰めた weightMiss=30 の根拠が同時に動いて切り分けられなくなる）。
 func (d *dummyStore) begin(q queuedOrder, rng *rand.Rand) *pendingOrder {
 	keys := q.keystrokes
 	if keys <= 0 {
 		keys = 1
 	}
-	miss := 0
-	for i := 0; i < keys; i++ {
-		if rng.Float64() < d.missRate {
-			miss++
-		}
-	}
 	// ミス1回につき1打鍵ぶん打ち直す。報告する elapsedMs は打ち直しを含む実測時間にする
 	// （実クライアントが送るのは「実際に掛かった時間」なので、そこを合わせる）。
-	total := (keys + miss) * d.msPerKey
+	out := typist.Serve(typist.Ability{
+		MsPerKey: float64(d.msPerKey),
+		MissRate: d.missRate,
+	}, keys, 0, rng)
 	return &pendingOrder{
 		customerId:  q.customerId,
 		keystrokes:  keys,
-		missCount:   miss,
-		totalMs:     total,
-		remainingMs: total,
+		missCount:   out.MissCount,
+		totalMs:     out.ElapsedMs,
+		remainingMs: out.ElapsedMs,
 	}
 }
 

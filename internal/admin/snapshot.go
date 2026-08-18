@@ -78,6 +78,14 @@ type AdminStore struct {
 	// 持つ botIds を room 経由で渡してもらう。store.Result.IsBot と同じ流儀。
 	IsBot bool `json:"isBot"`
 
+	// Tier は Bot の強さ階層（"strong" / "normal" / "weak"）。人間は空で omit される（plan-h31 §6）。
+	//
+	// **tier を入れても見えなければ調整できない**ので、ここまではサーバーの責務にした。
+	// 「強 Bot が上位を独占していないか」「人間はどの層に混ざっているか」を見る。
+	// 表示（色分け・凡例）は h34。IsBot と同じ経路（app.RunMatch → room.SetBotTiers → snapshot）
+	// で渡すので、game は tier を知らないまま（AGENTS.md §4.2）。
+	Tier string `json:"tier,omitempty"`
+
 	QueueLen    int      `json:"queueLen"`
 	ServedCount int      `json:"servedCount"`
 	AtRisk      bool     `json:"atRisk"`
@@ -88,7 +96,7 @@ type AdminStore struct {
 //
 // room の単一 goroutine（publish 直後）から呼ばれる前提。session を触るのは room だけなので
 // getter 読み出しはデータ競合しない（plan-h02 §1.3）。
-func BuildSnapshot(s *game.Session, botIds map[game.PlayerId]bool) AdminSnapshot {
+func BuildSnapshot(s *game.Session, botIds map[game.PlayerId]bool, botTiers map[game.PlayerId]string) AdminSnapshot {
 	board := s.StoreBoard()
 	cull := s.CullState()
 
@@ -103,6 +111,7 @@ func BuildSnapshot(s *game.Session, botIds map[game.PlayerId]bool) AdminSnapshot
 			TakoyakiCount: r.TakoyakiCount,
 			MissCount:     r.MissCount,
 			IsBot:         botIds[r.Id],
+			Tier:          botTiers[r.Id],
 			QueueLen:      r.QueueLen,
 			ServedCount:   r.ServedCount,
 			AtRisk:        r.AtRisk,
@@ -137,8 +146,8 @@ func BuildSnapshot(s *game.Session, botIds map[game.PlayerId]bool) AdminSnapshot
 
 // SnapshotEnvelope は AdminSnapshot を /admin/ws のワイヤ形式 proto.Envelope に包む。
 // マーシャル失敗時は ok=false（呼び出し側は Broadcast をスキップ）。
-func SnapshotEnvelope(s *game.Session, botIds map[game.PlayerId]bool) (proto.Envelope, bool) {
-	snap := BuildSnapshot(s, botIds)
+func SnapshotEnvelope(s *game.Session, botIds map[game.PlayerId]bool, botTiers map[game.PlayerId]string) (proto.Envelope, bool) {
+	snap := BuildSnapshot(s, botIds, botTiers)
 	payload, err := json.Marshal(snap)
 	if err != nil {
 		return proto.Envelope{}, false

@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"takoda99/internal/admin"
-	"takoda99/internal/bot"
 	"takoda99/internal/game"
 	"takoda99/internal/matchmaking"
 	"takoda99/internal/odai"
@@ -69,6 +68,8 @@ func RunMatch(ctx context.Context, d Deps, players []matchmaking.Player) {
 	inits := make([]game.PlayerInit, 0, len(players))
 	conns := make(map[game.PlayerId]transport.Connection, len(players))
 	botIds := make(map[game.PlayerId]bool)
+	// botTiers は観測用（AdminSnapshot の tier）。game は tier を知らないまま（plan-h31 §6）。
+	botTiers := make(map[game.PlayerId]string)
 	for i, p := range players {
 		name := p.Name
 		if name == "" {
@@ -78,14 +79,18 @@ func RunMatch(ctx context.Context, d Deps, players []matchmaking.Player) {
 		conns[p.Id] = p.Conn
 		if p.IsBot {
 			botIds[p.Id] = true
+			if p.Tier != "" {
+				botTiers[p.Id] = p.Tier
+			}
 		}
 	}
 	matchId := nextMatchID()
 	sess := game.NewSession(matchId, d.Params, d.Words, newRng(), inits)
 	pub := transport.NewRankingPublisher(d.Params.Publish)
 	rm := room.New(sess, conns, d.Params.Session.TickIntervalMs, d.Clock, pub)
-	rm.SetAdminHub(d.Hub) // nil 安全（plan-h00 §3.2）
-	rm.SetBotIds(botIds)  // 観測で Bot/人間を出し分けるため（plan-h25 §1.2）
+	rm.SetAdminHub(d.Hub)    // nil 安全（plan-h00 §3.2）
+	rm.SetBotIds(botIds)     // 観測で Bot/人間を出し分けるため（plan-h25 §1.2）
+	rm.SetBotTiers(botTiers) // 観測で Bot の強さ階層を出すため（plan-h31 §6）
 	rm.Run(ctx)
 
 	saveResults(ctx, d, sess, matchId, botIds)
@@ -176,12 +181,4 @@ func saveResults(ctx context.Context, d Deps, sess *game.Session, matchId string
 	}
 }
 
-// NewBotPlayer は Bot 枠を1つ作る。
-func NewBotPlayer(ctx context.Context, id game.PlayerId, cfg bot.Config) matchmaking.Player {
-	srv, cli := transport.Pipe()
-	b := bot.New(cli, cfg, newRng())
-	go b.Run(ctx)
-	// Name は空にして RunMatch の fallbackName に任せる。
-	// ここで採番すると接続IDベースになり、試合数が増えるほど桁が伸びて6文字を超える。
-	return matchmaking.Player{Id: id, Conn: srv, IsBot: true}
-}
+// Bot 枠の生成と tier 抽選は bot.go を参照。

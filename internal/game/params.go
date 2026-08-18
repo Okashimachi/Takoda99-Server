@@ -293,12 +293,169 @@ type PresentationParams struct {
 	FinalRushAliveThreshold int `json:"finalRushAliveThreshold"`
 }
 
-// BotParams: CPU（Bot）の強さ。
+// BotTierCount は Bot の強さ階層の数（強／中／弱）。
+const BotTierCount = 3
+
+// tier の添字。**強い順**に並べる（配列の順序そのものが意味を持つ）。
+const (
+	BotTierStrong = 0
+	BotTierNormal = 1
+	BotTierWeak   = 2
+)
+
+// BotTierLabel は tier の表示名を返す（観測用・AdminSnapshot の tier フィールド）。
+// 未知の添字は空文字（＝人間と同じ扱い）。
+func BotTierLabel(i int) string {
+	switch i {
+	case BotTierStrong:
+		return "strong"
+	case BotTierNormal:
+		return "normal"
+	case BotTierWeak:
+		return "weak"
+	}
+	return ""
+}
+
+// BotTier は Bot 1階層ぶんの強さ（plan-h31 §1.2）。
+//
+// ⚠ **Tiers は slice ではなく固定長配列**。Go では配列は要素が comparable なら `==` 可能なので、
+// AGENTS.md §1.3 の「map / slice をフィールドに入れない」を満たす（cull.stages と同じ流儀）。
+type BotTier struct {
+	// Weight は配分の重み。99体をこの比で3階層へ振り分ける（0 ならその tier は出ない）。
+	Weight int `json:"weight"`
+
+	// MsPerKey は1打鍵あたりのms。小さいほど速い＝強い。
+	//
+	// 🔴 **「1注文あたりの所要」ではない**。plan-h31 §1.1 は `ElapsedMs`（注文あたり）で
+	// 書かれていたが、実装時に**打鍵あたりへ改めた**（plan 冒頭の訂正を参照）。理由は実測:
+	//
+	//	level  1注文(通常客・3語)の打鍵数   旧 bot(6000ms固定) の実効
+	//	    0            約 13 打鍵            476 ms/打鍵 ← 遅すぎ
+	//	   17            約130 打鍵             46 ms/打鍵 ← 人間離れ
+	//
+	// 注文あたりの固定時間だと、heat で語が長くなるほど**Bot だけが相対的に速くなる**
+	// （plan-h31 が挙げた問題③そのもの）。打鍵あたりで持てば人間と同じ土俵に乗り、
+	// sim のダミー店（msPerKey 200 前後）とも直接比較できる。
+	MsPerKey int `json:"msPerKey"`
+
+	// MissRate は打鍵1回あたりのミス率。個体差では MsPerKey と**同じ係数**で動く。
+	MissRate float64 `json:"missRate"`
+
+	// HeatPenalty は難度追従の強さ。実効時間が (1 + HeatPenalty×heatLevel) 倍になる。
+	// 強い tier ほど小さく（難しい語でも速度が落ちない）、弱い tier ほど大きくすると、
+	// **終盤に弱い Bot から落ちる自然な淘汰**が生まれる（plan-h31 §2.3）。
+	HeatPenalty float64 `json:"heatPenalty"`
+}
+
+// BotParams: CPU（Bot）の強さ（plan-h31）。
+//
+// 🔴 **旧スキーマ（baseAccuracy / baseElapsedMs / accuracyJitter）は廃止した。**
+// 全 Bot が同じ1つの Config から作られており、jitter は「毎回の揺らぎ」であって
+// 個体差ではなかったため、99体が同じ平均へ回帰して順位表がランダムウォークしていた。
+// 本番DBに残る旧キーは JSON の未知キーとして無視される（害は無いが config-front からは消すこと）。
 type BotParams struct {
-	BaseAccuracy    float64 `json:"baseAccuracy"`
-	BaseElapsedMs   int     `json:"baseElapsedMs"`
-	AccuracyJitter  float64 `json:"accuracyJitter"`
-	ElapsedJitterMs int     `json:"elapsedJitterMs"`
+	// Tiers は強／中／弱の3階層。Bot 生成時に Weight で抽選する（抽選は app 層・§3）。
+	//
+	// 🔴 **ゼロ埋めを Validate で弾いてはいけない**。理由は EffectiveTiers を参照。
+	Tiers [BotTierCount]BotTier `json:"tiers"`
+
+	// IndividualSpread は個体差の幅（±の割合）。0.20 なら tier 値の 0.80〜1.20 倍で個体が散る。
+	// 生成時に1回だけ引いて**その Bot の一生ぶん固定**する（plan-h31 §2.1）。
+	//
+	// 🔴 **0 は「個体差なし」ではなく「未設定」**（EffectiveIndividualSpread が既定へ読み替える）。
+	// 理由は Tiers と同じで、既存グループへ後から足したキーは本番DBで 0 のまま読まれるため。
+	// 個体差を実質的に切りたいなら 0.001 のような極小値を入れること。
+	IndividualSpread float64 `json:"individualSpread"`
+
+	// ElapsedJitterMs は1注文ごとの所要時間の揺らぎ幅（±ms）。**個体差ではない**。
+	ElapsedJitterMs int `json:"elapsedJitterMs"`
+}
+
+// DefaultBotTiers は tier の内蔵既定値（plan-h31 §4・実測で調整）。
+//
+// MsPerKey は sim のダミー店（ProfileNormal: 200±50 ms/打鍵）と同じ土俵に置いてある。
+// h26 が weightMiss=30 を決めたのはその分布に対してなので、Bot をここに合わせると
+// 「人間が真ん中あたりに来る」が sim の結論とつながる。
+func DefaultBotTiers() [BotTierCount]BotTier {
+	return [BotTierCount]BotTier{
+		// 強: 25% ／ 速く正確で、難度が上がっても崩れない
+		{Weight: 25, MsPerKey: 150, MissRate: 0.02, HeatPenalty: 0.01},
+		// 中: 50% ／ sim の ProfileNormal の中心と同じ
+		{Weight: 50, MsPerKey: 200, MissRate: 0.05, HeatPenalty: 0.02},
+		// 弱: 25% ／ 遅くてミスも多く、難度に弱い＝終盤で落ちる
+		//
+		// 🔴 **280 ではなく 400。** 280 だと Bot の幅（実効 153〜308ms/打鍵）が
+		// 人間の幅より狭く、**初心者（400ms/打鍵）が必ず 100位/100 になる**。
+		// 「人間が真ん中に来る」を狙った plan で、遅い人だけ自動的に最下位という
+		// 体験になってしまう。弱の中心を初心者の基準速度に合わせ、幅を覆わせる。
+		//
+		//	弱tier   初心者の順位   速い人間   標準の人間
+		//	  280      100/100        19位       54位
+		//	  380       95/100        19位       54位
+		//	  400       91/100        19位       54位   ← これ
+		//	  440       87/100        19位       54位
+		//
+		// **強・中を動かさないので上位争い（誰が優勝するか）には一切影響しない。**
+		// 変わるのは下位の厚みだけで、弱 Bot は早期に足切りされるので決勝の質も保たれる。
+		{Weight: 25, MsPerKey: 400, MissRate: 0.10, HeatPenalty: 0.04},
+	}
+}
+
+// DefaultBotIndividualSpread は個体差の既定幅（±20%）。
+const DefaultBotIndividualSpread = 0.20
+
+// EffectiveTiers は実際に使う tier を返す。**ゼロを既定値へ読み替える二重防御の1枚目**。
+//
+// 🔴 **ここが本 plan で最も危険な箇所**（plan-h31 §4.1・#124 の再来防止）。
+//
+//	backfillDefaults の補完は**グループ単位**（グループ全体がゼロのときだけ既定を入れる）。
+//	本番DBには `bot` グループが既にある（旧スキーマの baseElapsedMs=6000 等）ので、
+//	新設した tiers は補完されず**ゼロのまま読まれる**。
+//	そのゼロを Validate で弾くと Load が失敗し、**score / cull / heat を含む全設定が
+//	内蔵デフォルトへ巻き戻る**（config-front から何を変えても効かない状態＝#124）。
+//
+// なので **Validate では弾かず、ここで読み替える**。db 側の backfillNewFields でも同じ補正を
+// 掛けているが、**sim・テスト・DB無し起動でも安全**にするために game 側にも置く
+// （cull.EffectiveWarnMaxIds と同じ二重防御）。
+//
+// 補完は**要素単位**。config-front から2要素だけ保存されて3つ目が {0,0,0,0} になる
+// 「配列のゼロ埋め」（h22 §2.2 の罠）も、その1要素だけ既定へ戻して吸収する。
+func (bp BotParams) EffectiveTiers() [BotTierCount]BotTier {
+	def := DefaultBotTiers()
+	out := bp.Tiers
+	total := 0
+	for i := range out {
+		if out[i] == (BotTier{}) {
+			out[i] = def[i] // 丸ごと未設定（＝DBに無い／ゼロ埋め）
+		}
+		if out[i].MsPerKey <= 0 {
+			out[i].MsPerKey = def[i].MsPerKey // 0ms/打鍵は「無限に速い」になる
+		}
+		if out[i].Weight < 0 {
+			out[i].Weight = 0
+		}
+		if out[i].MissRate < 0 {
+			out[i].MissRate = 0
+		}
+		if out[i].HeatPenalty < 0 {
+			out[i].HeatPenalty = 0
+		}
+		total += out[i].Weight
+	}
+	if total <= 0 {
+		return def // 全 tier の重みが 0 だと抽選できない
+	}
+	return out
+}
+
+// EffectiveIndividualSpread は実際に使う個体差の幅を返す。0 以下は「未設定」として既定 0.20。
+// 理由は BotParams.IndividualSpread のコメント（ゼロのまま読まれる本番DBへの防御）。
+func (bp BotParams) EffectiveIndividualSpread() float64 {
+	if bp.IndividualSpread <= 0 {
+		return DefaultBotIndividualSpread
+	}
+	return bp.IndividualSpread
 }
 
 // Validate は破綻値を弾く最小限の検証。
@@ -323,11 +480,8 @@ func (gp GameParameters) Validate() error {
 			return fmt.Errorf("%s は正である必要 (got %d)。0 だと毎tick配信になり帯域が破綻する", iv.key, iv.v)
 		}
 	}
-	if gp.Bot.BaseElapsedMs <= 0 {
-		return fmt.Errorf("bot.baseElapsedMs は正である必要 (got %d)", gp.Bot.BaseElapsedMs)
-	}
-	if gp.Bot.BaseAccuracy < 0 || gp.Bot.BaseAccuracy > 1 {
-		return fmt.Errorf("bot.baseAccuracy は 0..1 である必要 (got %v)", gp.Bot.BaseAccuracy)
+	if err := gp.Bot.validate(); err != nil {
+		return err
 	}
 	if gp.Heat.MaxLevel <= 0 {
 		return fmt.Errorf("heat.maxLevel は正である必要 (got %d)", gp.Heat.MaxLevel)
@@ -376,6 +530,43 @@ func (gp GameParameters) Validate() error {
 		if spec.OrderCount <= 0 {
 			return fmt.Errorf("customer.%s.orderCount は正である必要 (got %d)", spec.Attribute, spec.OrderCount)
 		}
+	}
+	return nil
+}
+
+// validate は Bot の破綻値を弾く（plan-h31）。
+//
+// 🔴 **ゼロは絶対に弾かない。** plan-h31 §1.3 は「配列のゼロ埋めを Validate で弾く」と
+// 書いているが、**そのまま実装すると本番が壊れる**。本番DBには `bot` グループが既にあり、
+// 新設した tiers はグループ単位の backfill をすり抜けてゼロのまま読まれるので、
+// ここで弾くと Load 全体が失敗し、**全パラメータが内蔵デフォルトへ巻き戻る**（#124 と同じ経路）。
+// ゼロ埋めの吸収は EffectiveTiers（＋db.backfillNewFields）の役目。
+//
+// ここで弾くのは「運営が意図して入れないと現れない、明確に誤った値」だけ:
+// 負値と、確率として成立しない MissRate>1、個体係数が 0 以下になる IndividualSpread>=1。
+func (bp BotParams) validate() error {
+	for i, t := range bp.Tiers {
+		if t.Weight < 0 {
+			return fmt.Errorf("bot.tiers[%d].weight は非負である必要 (got %d)", i, t.Weight)
+		}
+		if t.MsPerKey < 0 {
+			return fmt.Errorf("bot.tiers[%d].msPerKey は非負である必要 (got %d)。"+
+				"0 は「未設定」として既定へ読み替えられる", i, t.MsPerKey)
+		}
+		if t.MissRate < 0 || t.MissRate > 1 {
+			return fmt.Errorf("bot.tiers[%d].missRate は 0..1 である必要 (got %v)", i, t.MissRate)
+		}
+		if t.HeatPenalty < 0 {
+			return fmt.Errorf("bot.tiers[%d].heatPenalty は非負である必要 (got %v)", i, t.HeatPenalty)
+		}
+	}
+	// 1 以上だと個体係数 f = 1 + uniform(-s,+s) が 0 以下になり、所要時間が破綻する。
+	if bp.IndividualSpread < 0 || bp.IndividualSpread >= 1 {
+		return fmt.Errorf("bot.individualSpread は 0 以上 1 未満である必要 (got %v)。"+
+			"0 は「未設定」として既定 %v に読み替えられる", bp.IndividualSpread, DefaultBotIndividualSpread)
+	}
+	if bp.ElapsedJitterMs < 0 {
+		return fmt.Errorf("bot.elapsedJitterMs は非負である必要 (got %d)", bp.ElapsedJitterMs)
 	}
 	return nil
 }
@@ -585,10 +776,17 @@ func DefaultParameters() GameParameters {
 			FinalStageAliveThreshold: 20,
 			FinalRushAliveThreshold:  10,
 		},
+		// Bot は tier（強／中／弱）＋個体差で散らす（plan-h31）。
+		//
+		// 🔴 **本番DBには旧スキーマの bot グループが入っている**（baseElapsedMs=6000 等）。
+		// グループ単位の backfill はそこへ触らないので tiers はゼロのまま読まれ、
+		// EffectiveTiers がこの既定値へ読み替える。config-front から一度保存すれば
+		// DB にも実値が入る（そのため config-front 側の既定値と必ず揃えること）。
 		Bot: BotParams{
-			BaseAccuracy:    0.85,
-			BaseElapsedMs:   4500,
-			AccuracyJitter:  0.1,
+			Tiers:            DefaultBotTiers(),
+			IndividualSpread: DefaultBotIndividualSpread,
+			// 1注文の所要は heat 次第で 3秒〜30秒に及ぶので、±500ms は「気持ち揺れる」程度。
+			// 個体差（IndividualSpread）と役割が違う点に注意（こちらは毎回振り直す）。
 			ElapsedJitterMs: 500,
 		},
 	}

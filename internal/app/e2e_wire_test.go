@@ -19,11 +19,11 @@ import (
 	"github.com/coder/websocket"
 
 	"takoda99/internal/app"
-	"takoda99/internal/bot"
 	"takoda99/internal/game"
 	"takoda99/internal/matchmaking"
 	"takoda99/internal/proto"
 	"takoda99/internal/transport"
+	"takoda99/internal/typist"
 )
 
 func TestE2E_ClientWireFlow(t *testing.T) {
@@ -49,8 +49,13 @@ func TestE2E_ClientWireFlow(t *testing.T) {
 		id := nextID()
 		players := []matchmaking.Player{{Id: id, Conn: conn, Name: string(id)}}
 		for i := 0; i < 3; i++ {
-			players = append(players, app.NewBotPlayer(ctx, nextID(),
-				bot.Config{BaseAccuracy: 0.98, BaseElapsedMs: 40, AccuracyJitter: 0, ElapsedJitterMs: 0}))
+			// テストを短時間で決着させるため、実力は既定 tier ではなく直接指定する
+			// （MsPerKey=3 → 1注文 40ms 前後）。plan-h31 で強さは打鍵あたりで持つ形になった。
+			players = append(players, app.NewBotPlayerWith(ctx, nextID(), app.BotSpec{
+				Tier:     game.BotTierNormal,
+				TierName: game.BotTierLabel(game.BotTierNormal),
+				Ability:  typist.Ability{MsPerKey: 3, MissRate: 0.02},
+			}))
 		}
 		go app.RunMatch(ctx, deps, players)
 	})

@@ -104,6 +104,10 @@ linters:
             - "takoda99/internal/proto"
             - "takoda99/internal/odai"
             - "takoda99/internal/sim"
+            # typist は打ち手（Bot／ダミー店）の実力モデルだけを持つ純粋パッケージ。
+            # sim と bot が**同じ判定式を共有する**ための下流（plan-h31 §5）。
+            # bot 本体（Connection 越しの自動入力）は下の deny のまま。
+            - "takoda99/internal/typist"
           deny:
             - pkg: "takoda99/internal/room"
               desc: "sim は room を通さない。room は実時計(ticker)で回るのでヘッドレスにならない。"
@@ -115,6 +119,16 @@ linters:
               desc: "sim は永続化に触らない。パラメータは Config で注入する。"
             - pkg: "takoda99/internal/bot"
               desc: "sim は独自のダミー店モデルを持つ（bot は Connection 越しの自動入力で別物）。"
+
+        # ── ルール2.8: 打ち手モデル typist は標準ライブラリだけに依存する ──
+        # internal/typist は Bot（実ランタイム）と sim（ヘッドレス）の**両方から使われる**ので、
+        # ここが何かを import した瞬間に依存の向きが濁る。判定式だけを置く純粋パッケージに保つ
+        # （game も proto も import しない＝どちらの層からも安全に呼べる）。
+        typist-pure-model:
+          files:
+            - "**/internal/typist/**"
+          allow:
+            - "$gostd"
 
         # ── ルール3: 層3部品は game/proto へ向かうのみ ──
         # targeting/odai/config は game(ports実装のため)・proto・標準ライブラリだけに依存する。
