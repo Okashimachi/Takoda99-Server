@@ -165,6 +165,45 @@ func TestBuildSnapshot_CarriesBreakdownAndIsBot(t *testing.T) {
 	}
 }
 
+// heat の上限と平均打鍵数が snapshot へ届く（plan-h34 §1.2）。
+//
+// 🔴 HeatMaxLevel が無いとダッシュボードは**上限線を引けない**。
+// 「heat が上端に届かない」問題は #75 → h26 → h32 と3度再発しており、
+// 目で見えることが h34 の主目的のひとつ。ここが 0 で配られると4度目を見逃す。
+func TestBuildSnapshot_HeatMaxAndAvgKeystrokes(t *testing.T) {
+	s := newSession(3)
+	s.Start(0)
+
+	snap := BuildSnapshot(s, nil, nil)
+	if want := s.Params().Heat.MaxLevel; snap.HeatMaxLevel != want {
+		t.Fatalf("HeatMaxLevel=%d, want %d", snap.HeatMaxLevel, want)
+	}
+	if snap.HeatMaxLevel <= 0 {
+		t.Fatal("HeatMaxLevel が 0（front が上限線を引けない）")
+	}
+	// 分配前は誰も並んでいないので 0。
+	if snap.AvgKeystrokes != 0 {
+		t.Fatalf("分配前の AvgKeystrokes=%d, want 0", snap.AvgKeystrokes)
+	}
+
+	// 客が配られたら 0 でなくなる（h30 の効果を試合中に見るための値）。
+	s.Tick(2000)
+	snap = BuildSnapshot(s, nil, nil)
+	queued := 0
+	for _, st := range snap.Stores {
+		queued += st.QueueLen
+	}
+	if queued == 0 {
+		t.Fatal("客が1人も配られていない（テストの前提が崩れている）")
+	}
+	// AvgKeystrokes は**1注文（＝1語）あたり**。fakeWords は1語4打鍵なので、
+	// 注文数がいくつでも 4 になる（客1人あたりにすると orderCount 倍になり、
+	// h30 の「1語45打鍵以下」と比べられない数字になる）。
+	if snap.AvgKeystrokes != 4 {
+		t.Fatalf("AvgKeystrokes=%d, want 4（1語4打鍵・行列 %d 人）", snap.AvgKeystrokes, queued)
+	}
+}
+
 // AdminSnapshot の JSON に廃止キーが無く、本戦の観測キーが揃っている。
 //
 // front はキー名で読むので、ここがズレると「表示が空」になって原因が分かりにくい。
@@ -181,6 +220,8 @@ func TestAdminSnapshot_WireKeys(t *testing.T) {
 	for _, want := range []string{
 		`"cull"`, `"stageIndex"`, `"stageTotal"`, `"untilMs"`, `"targetAliveCount"`, `"cutLineRank"`,
 		`"score"`, `"takoyakiCount"`, `"missCount"`, `"isBot"`, `"atRisk"`, `"rank"`,
+		// h34: front はこの2キーで上限線と打鍵数を描く。キー名がズレると「表示が空」になる。
+		`"heatMaxLevel"`, `"avgKeystrokes"`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("観測キー %s が無い: %s", want, body)

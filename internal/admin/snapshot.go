@@ -17,10 +17,26 @@ const TypeAdminSnapshot = "AdminSnapshot"
 // **proto 契約ではない**（Unity クライアントには送らない内部 DTO）。Takoda99-Proto に足さない。
 // room が publish 直後に session の純粋 getter を読んで組み立て、/admin/ws へ配信する。
 type AdminSnapshot struct {
-	MatchId    string       `json:"matchId"`
-	ElapsedMs  int64        `json:"elapsedMs"`
-	Phase      string       `json:"phase"` // Early/Mid/Late
-	HeatLevel  int          `json:"heatLevel"`
+	MatchId   string `json:"matchId"`
+	ElapsedMs int64  `json:"elapsedMs"`
+	Phase     string `json:"phase"` // Early/Mid/Late
+	HeatLevel int    `json:"heatLevel"`
+
+	// HeatMaxLevel は heat.maxLevel（お題難度の上限）。**ダッシュボードが上限線を引くのに要る**。
+	//
+	// 🔴 「heat が上端に届かない」問題は #75 → h26 §1.2 → h32 と3度再発している（plan-h34 §2.2）。
+	// 上限が配られないと front は「届いたか」を判定できず、4度目を目で見つけられない。
+	// 試合中は不変（GameParameters は試合開始時に固定）なので、毎スナップショットに載せても情報は増えないが、
+	// **front に別経路（/api/params）を持たせない**方が壊れにくい（admin/ws だけ見ればよくなる）。
+	HeatMaxLevel int `json:"heatMaxLevel"`
+
+	// AvgKeystrokes は今どこかの行列に並んでいる客の、**1注文（＝1語）あたり**の平均打鍵数
+	// （plan-h30 の効果確認・h34 §1.2）。
+	//
+	// 単位が「1注文あたり」なのは、h30 の上限（1語45打鍵以下）とそのまま突き合わせるため。
+	// 客1人あたりにすると orderCount 倍になり、上限と比べられない数字になる。
+	AvgKeystrokes int `json:"avgKeystrokes"`
+
 	AliveCount int          `json:"aliveCount"`
 	RestPool   int          `json:"restPool"` // 未割当客（たべたべエリア）数
 	Cull       AdminCull    `json:"cull"`
@@ -125,12 +141,14 @@ func BuildSnapshot(s *game.Session, botIds map[game.PlayerId]bool, botTiers map[
 	}
 
 	return AdminSnapshot{
-		MatchId:    string(s.Id()),
-		ElapsedMs:  s.ElapsedMs(),
-		Phase:      string(s.Phase()),
-		HeatLevel:  s.HeatLevel(),
-		AliveCount: s.AliveCount(),
-		RestPool:   s.RestPoolCount(),
+		MatchId:       string(s.Id()),
+		ElapsedMs:     s.ElapsedMs(),
+		Phase:         string(s.Phase()),
+		HeatLevel:     s.HeatLevel(),
+		HeatMaxLevel:  s.Params().Heat.MaxLevel,
+		AvgKeystrokes: s.AvgKeystrokes(),
+		AliveCount:    s.AliveCount(),
+		RestPool:      s.RestPoolCount(),
 		Cull: AdminCull{
 			StageIndex:       cull.StageIndex,
 			StageTotal:       cull.StageTotal,

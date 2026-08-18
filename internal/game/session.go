@@ -1159,6 +1159,37 @@ func (s *Session) Phase() proto.Phase { return s.phase }
 // HeatLevel は現在の火力（お題難度）レベルを返す。
 func (s *Session) HeatLevel() int { return s.heatLevel }
 
+// AvgKeystrokes は**今どこかの行列に並んでいる客**の、**1注文（＝1語）あたり**の平均打鍵数を返す
+// （plan-h34 §1.2 / §0 の「1注文あたりの打鍵数」）。
+//
+// h30 で「1語45打鍵以下」にした効果が実試合で効いているかを、試合中に確認するための観測値。
+// **単位を1注文あたりに揃えてある**のは、h30 の上限（1語あたり）とそのまま突き合わせるため。
+// 客1人あたりにすると orderCount 倍になって、上限と比べられない数字になる。
+//
+// 打鍵数は admitCustomer が**配った瞬間の heatLevel** でお題を引いて確定させるので、
+// 行列に残っている客だけを見れば「直近に配ったぶん」の平均になる。
+// restPool の客は (a) まだ配られていない（打鍵数0）か (b) 提供済みで戻ってきた古い値を
+// 持っているので、**除く**。1人も配られていなければ 0。
+//
+// 履歴は持たない（コアに時系列の状態を増やさない。h23「配信の状態は publisher が持つ」）。
+func (s *Session) AvgKeystrokes() int {
+	keys, orders := 0, 0
+	for _, ids := range s.storeQueues {
+		for _, cid := range ids {
+			c := s.customers[cid]
+			if c == nil || c.orderCount <= 0 {
+				continue
+			}
+			keys += c.keystrokeTotal
+			orders += c.orderCount
+		}
+	}
+	if orders == 0 {
+		return 0
+	}
+	return keys / orders
+}
+
 // RestPoolCount は未割当客（たべたべエリア）の数を返す。
 func (s *Session) RestPoolCount() int { return len(s.restPool) }
 
