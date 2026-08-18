@@ -635,17 +635,29 @@ func (s *Session) cullWarnings(out []Outbound) []Outbound {
 		cutIds = append(cutIds, st.id)
 	}
 
+	// 🔴 **脱落済みの店にも送る**（2026-08-18 クライアントと合意）。
+	//
+	// 99人中98人は「脱落してから試合終了まで」を観戦者として過ごす。生存店だけに送っていた頃は、
+	// 脱落した瞬間から秒読みが**最後に受けた値で凍り**、「順位は動いているのに残り0秒のまま、
+	// 脱落予定の顔ぶれも古い」という矛盾が画面に残っていた。次に誰が切られるかは観戦の見どころそのもの。
+	//
+	// クライアント側では解決できない。順位と cutLineRank から「次に落ちるのは誰か」を
+	// 割り出すのはサーバー権威の原則で禁じており、次の締切は untilMs にしか入っていない
+	// （StoreEliminatedBatch は実行された**後**に届く）。
+	//
+	// 宛先を広げるだけで proto は変えていない。中身も生存店へ送るものと同一にする
+	// （宛先で内容を変えると「どちらが正しいか」の問い合わせが増える）。
 	for _, sid := range s.order {
-		if !s.stores[sid].alive {
-			continue
-		}
 		out = append(out, to(sid, proto.ForcedEliminationWarning{
 			UntilMs:     untilMs,
 			StageIndex:  s.cullStageIdx + 1, // 1始まり
 			StageTotal:  len(stages),
 			CutLineRank: cutLineRank,
 			CutStoreIds: cutIds,
-			SelfAtRisk:  atRisk[sid],
+			// 脱落済みの店は「脱落圏内」になりえないので必ず false。
+			// cullCandidates が生存店しか返さないので atRisk は元から false だが、
+			// **将来 cullCandidates が変わっても嘘にならないよう**明示的に落とす。
+			SelfAtRisk: s.stores[sid].alive && atRisk[sid],
 		}))
 	}
 	return out
