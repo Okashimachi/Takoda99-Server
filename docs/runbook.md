@@ -13,13 +13,38 @@
 
 ## 0. 事前準備（当日の朝までに終わらせる）
 
-- [ ] **本戦バイナリの1つ前を保管する**（§2 の退避弁。これが無いと戻せない）
-- [ ] 保管場所とファイル名をこの表に書く
+- [x] **本戦バイナリの1つ前を保管する**（§2 の退避弁。これが無いと戻せない）
+- [x] 保管場所とファイル名をこの表に書く
 
-| | ファイル名 | コミット | 置き場所 |
+| | ファイル名 | 中身 | 置き場所 |
 |---|---|---|---|
-| 本戦バイナリ | `takoda99-server-<コミット>` | | |
-| **1つ前（退避用）** | `takoda99-server-<コミット>` | | |
+| **稼働中** | `takoda99-server-dee606f` | h30〜h35 ＋ 観戦中の足切り予告（#138）。**本戦はこれで走る** | VM `~/` と `/opt/takoda99/server`／手元 `~/takoda99-backup/` |
+| **1つ前（退避用）** | `takoda99-server-8cb7f8f` | h30・h32・h35 まで。**Bot は tier 制の前**（全99体が同じ強さ・1注文あたり固定6000ms） | VM `~/`／手元 `~/takoda99-backup/` |
+| 2つ前 | `takoda99-server-a0f92ee` | h30・h32 まで。`odai.*` と `cull.warnMaxIds` が無い | VM `~/`／手元 `~/takoda99-backup/` |
+
+> 🔴 **`8cb7f8f` へ戻すと Bot の挙動が大きく変わる。** tier 制の前なので全 Bot が同じ強さになり、
+> かつ「1注文あたり固定6000ms」なので**終盤（heat 17）に人間の約6倍速**になる。
+> **Bot が原因でないトラブルなら戻さない**こと。設定で直せるものは §3 の表を先に見る。
+>
+> ⚠ 戻しても **DB の設定はそのまま**（`odai.*` / `cull.warnMaxIds` / `bot.tiers` は
+> 古いバイナリからは無視されるだけで、消えはしない）。再デプロイすれば元に戻る。
+
+**戻し方**（VM に既に置いてあるので転送は不要）:
+
+```bash
+gcloud compute ssh takoda99-server --zone us-west1-b --command \
+  'sudo install -o takoda99 -g takoda99 -m 755 ~/takoda99-server-8cb7f8f /opt/takoda99/server && sudo systemctl restart takoda99'
+```
+
+**稼働中のバイナリを確かめる**:
+
+```bash
+gcloud compute ssh takoda99-server --zone us-west1-b --command \
+  'ls -l /opt/takoda99/server; ls -lt ~/takoda99-server-* | head -3'
+```
+
+同じサイズのファイルが並ぶので、**タイムスタンプで見分ける**（`/opt/takoda99/server` の
+mtime と一致するものが稼働中）。
 
 - [ ] 手元から `curl https://takoda99.mooo.com/api/params` が通ることを確認
 - [ ] 管理トークン（`CONFIG_ADMIN_TOKEN`）を手元に控える
