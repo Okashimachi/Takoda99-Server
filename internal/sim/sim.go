@@ -42,6 +42,10 @@ type Config struct {
 	// （plan-h35 §2.1 の levelSpread / levelOffset の実測）。
 	Words game.WordSource
 
+	// Humans は ProfileMatch のときだけ意味を持つ「人間として置く店数」。
+	// 0 なら DefaultMatchHumans。残りは Params.Bot の tier 分布で埋める（plan-h33 §2）。
+	Humans int
+
 	// MaxTicks を超えたら膠着(Stalled)とみなして打ち切る。
 	MaxTicks int
 }
@@ -57,10 +61,18 @@ type PhaseChangeAt struct {
 // Ability はダミー店に与えた実力。sim だけが知っている「真の強さ」で、
 // 順位（サーバーが決めた結果）と突き合わせて事故率や相関を測るのに使う。
 type Ability struct {
-	Id       game.PlayerId
+	Id game.PlayerId
+	// Skill は実力スカラー [0,1]（plan-h33 §1.1）。速度とミス率はここから導かれるので
+	// **正の相関を持つ**。skill を持たない個体（duel の2型・match の Bot）は -1。
+	Skill    float64
 	MsPerKey int
 	MissRate float64
-	Class    string // ProfileDuel のときのみ "fast" / "precise"
+	// HeatPenalty は難度追従の強さ。実効時間が (1 + HeatPenalty×heatLevel) 倍になる。
+	// skill に反比例するので、上手い個体ほど終盤に強い（plan-h33 §1.2）。
+	HeatPenalty float64
+	Class       string // ProfileDuel のときのみ "fast" / "precise"
+	Tier        string // ProfileMatch の Bot のみ "strong" / "normal" / "weak"
+	Human       bool   // ProfileMatch で人間として置いた店
 	// EffectiveMsPerKey は打ち直しを含む1打鍵あたりの実効時間。小さいほど強い。
 	// 速さとミス率を1本にまとめた「真の実力」の指標。
 	EffectiveMsPerKey float64
@@ -132,6 +144,11 @@ type Result struct {
 	Winner         game.PlayerId
 	WinnerMsPerKey int
 	WinnerMissRate float64
+	// WinnerSkill は優勝者の実力スカラー（skill を持たない個体は -1）。
+	WinnerSkill float64
+	// WinnerTier / WinnerHuman は ProfileMatch のときの優勝者の素性。
+	WinnerTier  string
+	WinnerHuman bool
 
 	PhaseChanges []PhaseChangeAt
 	AliveCurve   []AlivePoint
@@ -168,7 +185,7 @@ func Simulate(cfg Config) Result {
 	rng := cfg.Rng
 	sessRng := rand.New(rand.NewSource(rng.Int63()))
 
-	dummies := buildStores(cfg.Stores, cfg.Profile, rng)
+	dummies := buildStores(cfg)
 	inits := make([]game.PlayerInit, cfg.Stores)
 	byId := make(map[game.PlayerId]*dummyStore, cfg.Stores)
 	for i, d := range dummies {
@@ -248,8 +265,12 @@ func Simulate(cfg Config) Result {
 
 		// ダミー店の打鍵を進め、打ち終わったら報告する。
 		// ApplyOrderServed も Outbound を返すので、捨てると次の来店を取りこぼす。
+		//
+		// r.HeatLevel は直前の handle(sess.Tick) で更新済み＝**この tick の難度**。
+		// 打ち始める瞬間の難度で所要時間が決まる（打っている最中に難度が上がっても遡らない。
+		// 実プレイでも既に手元にあるお題は変わらないので、そちらに合わせている）。
 		for _, d := range dummies {
-			o, done := d.step(tickMs, rng)
+			o, done := d.step(tickMs, r.HeatLevel, rng)
 			if !done {
 				continue
 			}
@@ -310,8 +331,15 @@ func finalize(r Result, sess *game.Session, byId map[game.PlayerId]*dummyStore,
 
 	for _, d := range dummies {
 		r.Abilities = append(r.Abilities, Ability{
-			Id: d.id, MsPerKey: d.msPerKey, MissRate: d.missRate, Class: d.class,
-			EffectiveMsPerKey: float64(d.msPerKey) * (1 + d.missRate),
+			Id:                d.id,
+			Skill:             d.skill,
+			MsPerKey:          int(d.ability.MsPerKey),
+			MissRate:          d.ability.MissRate,
+			HeatPenalty:       d.ability.HeatPenalty,
+			Class:             d.class,
+			Tier:              d.tier,
+			Human:             d.human,
+			EffectiveMsPerKey: d.ability.EffectiveMsPerKey(),
 		})
 	}
 
@@ -325,8 +353,11 @@ func finalize(r Result, sess *game.Session, byId map[game.PlayerId]*dummyStore,
 		if res.FinalRank == 1 {
 			r.Winner = res.StoreId
 			if d := byId[res.StoreId]; d != nil {
-				r.WinnerMsPerKey = d.msPerKey
-				r.WinnerMissRate = d.missRate
+				r.WinnerMsPerKey = int(d.ability.MsPerKey)
+				r.WinnerMissRate = d.ability.MissRate
+				r.WinnerSkill = d.skill
+				r.WinnerTier = d.tier
+				r.WinnerHuman = d.human
 			}
 		}
 	}

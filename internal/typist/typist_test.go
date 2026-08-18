@@ -209,3 +209,66 @@ func pearson(xs, ys []float64) float64 {
 	}
 	return num / math.Sqrt(dx*dy)
 }
+
+// ── SkillCurve（plan-h33 §1.1 / §1.2）──
+
+// skill 1本から引いた実力は、速度もミス率も難度追従も**同じ向き**に動くこと。
+//
+// 変異で落ちること: At が MissRate だけ別の乱数や定数を返すようにすると相関が消えて落ちる。
+func TestSkillCurve_DerivesCorrelatedAbility(t *testing.T) {
+	c := SkillCurve{
+		SlowMsPerKey: 350, FastMsPerKey: 50,
+		HighMissRate: 0.09, LowMissRate: 0.01,
+		HighHeatPenalty: 0.04, LowHeatPenalty: 0.01,
+	}
+	var ms, miss []float64
+	prev := c.At(0)
+	for s := 0.0; s <= 1.0001; s += 0.05 {
+		ab := c.At(s)
+		if s > 0 {
+			if ab.MsPerKey > prev.MsPerKey {
+				t.Errorf("skill=%.2f で遅くなった（%.1f → %.1f）", s, prev.MsPerKey, ab.MsPerKey)
+			}
+			if ab.MissRate > prev.MissRate {
+				t.Errorf("skill=%.2f でミス率が上がった（%.4f → %.4f）", s, prev.MissRate, ab.MissRate)
+			}
+			if ab.HeatPenalty > prev.HeatPenalty {
+				t.Errorf("skill=%.2f で難度に弱くなった（%.4f → %.4f）", s, prev.HeatPenalty, ab.HeatPenalty)
+			}
+		}
+		prev = ab
+		ms = append(ms, ab.MsPerKey)
+		miss = append(miss, ab.MissRate)
+	}
+	if got := pearson(ms, miss); got < 0.999 {
+		t.Errorf("速度とミス率の相関が %.4f（skill 1本から導いているので +1 のはず）", got)
+	}
+}
+
+// 端点と中点が指定どおりで、範囲外の skill はクランプされること
+// （正規分布の裾がはみ出しても「無限に速い個体」を作らないため）。
+func TestSkillCurve_ClampsAndInterpolates(t *testing.T) {
+	c := SkillCurve{
+		SlowMsPerKey: 350, FastMsPerKey: 50,
+		HighMissRate: 0.09, LowMissRate: 0.01,
+		HighHeatPenalty: 0.04, LowHeatPenalty: 0.01,
+	}
+	cases := []struct {
+		skill    float64
+		msPerKey float64
+		missRate float64
+	}{
+		{-5, 350, 0.09}, {0, 350, 0.09}, {0.5, 200, 0.05}, {1, 50, 0.01}, {5, 50, 0.01},
+	}
+	for _, tc := range cases {
+		ab := c.At(tc.skill)
+		if math.Abs(ab.MsPerKey-tc.msPerKey) > 1e-9 || math.Abs(ab.MissRate-tc.missRate) > 1e-9 {
+			t.Errorf("At(%.1f) = %.1fms/%.4f（期待 %.1fms/%.4f）",
+				tc.skill, ab.MsPerKey, ab.MissRate, tc.msPerKey, tc.missRate)
+		}
+	}
+	// JitterMs は実力ではないので曲線からは付かない。
+	if c.At(0.5).JitterMs != 0 {
+		t.Error("SkillCurve が JitterMs を付けている（毎回の揺らぎは個体の実力ではない）")
+	}
+}

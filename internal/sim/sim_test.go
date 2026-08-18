@@ -126,7 +126,7 @@ func TestSimulate_IsDeterministic(t *testing.T) {
 }
 
 func TestParseProfile(t *testing.T) {
-	for _, s := range []string{"uniform", "normal", "bipolar", "wide"} {
+	for _, s := range []string{"uniform", "normal", "bipolar", "wide", "duel", "match"} {
 		if _, err := ParseProfile(s); err != nil {
 			t.Errorf("ParseProfile(%q) が失敗: %v", s, err)
 		}
@@ -134,8 +134,15 @@ func TestParseProfile(t *testing.T) {
 	if _, err := ParseProfile("fast"); err == nil {
 		t.Error("未知の profile がエラーにならない")
 	}
-	if len(AllProfiles()) != 4 {
-		t.Errorf("AllProfiles が4種でない: %v", AllProfiles())
+	// duel は「決着するか」ではなく「どちらが勝つか」を見る道具なので決着保証には含めない。
+	// match は本番の卓そのものなので含める（plan-h33 §2）。
+	if len(AllProfiles()) != 5 {
+		t.Errorf("AllProfiles が5種でない: %v", AllProfiles())
+	}
+	for _, p := range AllProfiles() {
+		if p == ProfileDuel {
+			t.Error("duel が AllProfiles に混ざっている（h26 専用の道具）")
+		}
 	}
 }
 

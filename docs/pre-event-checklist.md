@@ -226,6 +226,18 @@ cd /Users/ryu/kindai/2026/THEHACK/Takoda99-Server && GOWORK=off go run ./cmd/mat
 GOWORK=off go run ./cmd/matchsim --sweep-miss 18,22,25,28 --runs 5
 ```
 
+**「人間が真ん中に来るか」は `--profile match` が直接答える**（h33）。
+本番と同じ卓（`bot.tiers` から抽選した Bot ＋ 人間数名）を回して、人間の平均順位・
+どの足切りで落ちたか・1位になった回数を出す:
+
+```bash
+GOWORK=off go run ./cmd/matchsim --profile match --runs 20 --humans 3 --quiet
+```
+
+> 既定値での実測（4シード×20試合）は **人間の平均順位 46〜48位/99**・人間が1位 11%。
+> ここが 30位より上に寄るなら Bot が弱すぎ、60位より下なら Bot が強すぎ。
+> `bot.tiers[*].msPerKey` を3つとも同じ向きに動かして再実行する。
+
 > ⚠ sim の数字は**ダミーの実力分布に依存する**。実プレイの代わりにはならない。
 > 「この方向に動かすとこうなる」を確認する道具として使う。
 

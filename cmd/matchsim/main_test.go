@@ -29,7 +29,7 @@ func simulateForTest(t *testing.T, stores int, p sim.Profile, seed int64) runRes
 
 // 膠着した試行はエラーで返すこと（気付かず素通りさせない）。
 func TestRun_StalledIsAnError(t *testing.T) {
-	err := run(io.Discard, 20, "normal", 1, 1, 1 /*maxTicks*/, true, 120, 180)
+	err := run(io.Discard, 20, "normal", 1, 1, 1 /*maxTicks*/, 0, true, 120, 180)
 	if err == nil {
 		t.Fatal("max-ticks=1 なのに膠着が報告されない")
 	}
@@ -39,23 +39,23 @@ func TestRun_StalledIsAnError(t *testing.T) {
 }
 
 func TestRun_RejectsBadFlags(t *testing.T) {
-	if err := run(io.Discard, 1, "normal", 1, 1, 100, true, 120, 180); err == nil {
+	if err := run(io.Discard, 1, "normal", 1, 1, 100, 0, true, 120, 180); err == nil {
 		t.Error("--stores=1 が弾かれない")
 	}
-	if err := run(io.Discard, 20, "fast", 1, 1, 100, true, 120, 180); err == nil {
+	if err := run(io.Discard, 20, "fast", 1, 1, 100, 0, true, 120, 180); err == nil {
 		t.Error("未知の --profile が弾かれない")
 	}
-	if err := run(io.Discard, 20, "normal", 0, 1, 100, true, 120, 180); err == nil {
+	if err := run(io.Discard, 20, "normal", 0, 1, 100, 0, true, 120, 180); err == nil {
 		t.Error("--runs=0 が弾かれない")
 	}
-	if err := run(io.Discard, 20, "normal", 1, 1, 0, true, 120, 180); err == nil {
+	if err := run(io.Discard, 20, "normal", 1, 1, 0, 0, true, 120, 180); err == nil {
 		t.Error("--max-ticks=0 が弾かれない")
 	}
 }
 
 func TestRun_SucceedsOnNormalRun(t *testing.T) {
 	var buf bytes.Buffer
-	if err := run(&buf, 20, "normal", 2, 7, 20000, true, 120, 180); err != nil {
+	if err := run(&buf, 20, "normal", 2, 7, 20000, 0, true, 120, 180); err != nil {
 		t.Fatalf("正常な試行が失敗した: %v", err)
 	}
 	if !strings.Contains(buf.String(), "2 runs") {
