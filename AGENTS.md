@@ -239,6 +239,7 @@ go run ./cmd/server --mode solo        # ローカル1人＋Bot（マッチン�
 go run ./cmd/matchsim                             # ヘッドレス1試合（バランス調整用・99店）
 go run ./cmd/matchsim --runs 20 --quiet           # 20回まわして決着時間の統計
 go run ./cmd/matchsim --profile uniform --seed 42 # 実力分布を変える／結果を再現する
+go run ./cmd/matchsim --profile match --runs 20   # 本番の卓（Bot の tier 分布＋人間）で人間の順位を出す
 
 go test ./internal/sim/                              # 決着保証テスト（CI 常設）
 go test -v ./internal/sim/ -run ReportTiming         # 決着時間の実測表

@@ -50,6 +50,23 @@ type Balance struct {
 	// FastWinnerRatio は MeanBalance でのみ埋まる「速さ型が優勝した試合の割合」。
 	// 0.5 付近が狙い。0 か 1 に張り付いていたら重みが偏っている。
 	FastWinnerRatio float64
+
+	// ── 本番の卓での人間の位置（ProfileMatch・plan-h33 §2）──
+	// **これが h33 の実用的な目的**。「人間が真ん中あたりに来る」を数字で確認する。
+	//
+	// HumanCount は人間として置いた店の数（延べ）。
+	HumanCount int
+	// HumanAvgRank は人間の平均最終順位（99人中 40〜60 が目標）。
+	HumanAvgRank float64
+	// HumanTop1 は1位を取った人間の延べ数。HumanWinRatio は MeanBalance でのみ埋まる
+	// 「その試合で人間の誰かが1位だった割合」。
+	HumanTop1     int
+	HumanWinRatio float64
+	// HumanCullStages[k] は「k+1 段目の足切りで落ちた人間の延べ数」。
+	// どの足切りで落ちるかの分布で、平均順位だけでは見えない偏りが出る。
+	HumanCullStages []int
+	// BotTierCounts は tier ラベル別の Bot 数（延べ）。h31 の重みどおりかの確認用。
+	BotTierCounts map[string]int
 }
 
 // Analyze は1試合の結果からバランス観測を計算する。
@@ -151,7 +168,55 @@ func Analyze(r Result) Balance {
 	}
 
 	b.RankAbilityCorr = spearman(ab, rankOf)
+	analyzeHumans(&b, r, rankOf)
 	return b
+}
+
+// analyzeHumans は ProfileMatch の観測（人間の順位・脱落ステージ・Bot の tier 配分）を埋める。
+// 人間が居ないプロファイルでは何もしない。
+func analyzeHumans(b *Balance, r Result, rankOf map[game.PlayerId]int) {
+	b.HumanCullStages = make([]int, len(r.CullStages))
+	var rankSum float64
+	for _, a := range r.Abilities {
+		if a.Tier != "" {
+			if b.BotTierCounts == nil {
+				b.BotTierCounts = make(map[string]int, 3)
+			}
+			b.BotTierCounts[a.Tier]++
+		}
+		if !a.Human {
+			continue
+		}
+		rk, ok := rankOf[a.Id]
+		if !ok {
+			continue
+		}
+		b.HumanCount++
+		rankSum += float64(rk)
+		if rk == 1 {
+			b.HumanTop1++
+		}
+		if s := cullStageOf(rk, r.CullStages); s > 0 {
+			b.HumanCullStages[s-1]++
+		}
+	}
+	if b.HumanCount > 0 {
+		b.HumanAvgRank = rankSum / float64(b.HumanCount)
+	}
+}
+
+// cullStageOf は最終順位 rank の店が**何段目の足切りで落ちたか**（1始まり）を返す。
+//
+// ステージ k を通過できたのは上位 CullStages[k-1].Alive 店なので、
+// `rank > Alive` になる最初の段がその店の脱落した段。最終ステージ（targetAliveCount=0）は
+// 全店が同時に落ちるので、生き残った店は全員そこに入る。
+func cullStageOf(rank int, stages []CullStageResult) int {
+	for i, s := range stages {
+		if rank > s.Alive {
+			return i + 1
+		}
+	}
+	return len(stages)
 }
 
 // spearman は「実力の順位」と「試合の最終順位」の順位相関。
@@ -186,7 +251,27 @@ func MeanBalance(bs []Balance) Balance {
 	}
 	fn := float64(len(bs))
 	fastWinner := 0
+	humanWinner := 0
+	humanRankSum := 0.0
 	for _, b := range bs {
+		m.HumanCount += b.HumanCount
+		m.HumanTop1 += b.HumanTop1
+		humanRankSum += b.HumanAvgRank
+		if b.HumanTop1 > 0 {
+			humanWinner++
+		}
+		for i, c := range b.HumanCullStages {
+			for len(m.HumanCullStages) <= i {
+				m.HumanCullStages = append(m.HumanCullStages, 0)
+			}
+			m.HumanCullStages[i] += c
+		}
+		for k, v := range b.BotTierCounts {
+			if m.BotTierCounts == nil {
+				m.BotTierCounts = make(map[string]int, 3)
+			}
+			m.BotTierCounts[k] += v
+		}
 		m.FastCount += b.FastCount
 		m.PreciseCount += b.PreciseCount
 		m.FastWins += b.FastWins
@@ -213,6 +298,9 @@ func MeanBalance(bs []Balance) Balance {
 	// 平均では Winner1Class に意味が無いので、速さ型が優勝した回数を割合として持たせる。
 	m.Winner1Class = ""
 	m.FastWinnerRatio = float64(fastWinner) / fn
+	// 人間の平均順位は「試合ごとの平均」の平均（人数が同じなので全体平均と一致する）。
+	m.HumanAvgRank = humanRankSum / fn
+	m.HumanWinRatio = float64(humanWinner) / fn
 	return m
 }
 

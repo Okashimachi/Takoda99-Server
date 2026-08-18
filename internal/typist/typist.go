@@ -83,6 +83,51 @@ func Individual(base Ability, factor float64) Ability {
 	return base
 }
 
+// SkillCurve は**実力スカラー `skill ∈ [0,1]`** から Ability を引く線形補間の両端
+// （plan-h33 §1.1・§1.2）。0 = 苦手／1 = 上手い。
+//
+// 🔴 **乱数を振るのを skill 1本だけにする**ための型。速度とミス率を独立の乱数2本で振ると
+// 「130ms/打鍵なのにミス率9%」「300ms/打鍵なのにミス率1%」という**実在しない個体**が生まれ、
+// それが順位表の上下を作ってしまう（plan-h33 §0.2①）。skill から両方を導けば
+// **自動的に正の相関**を持つ。プロファイルは「skill をどう分布させるか」に格下げされる。
+//
+// Individual との使い分け:
+//
+//   - Individual … 「tier の基準値 × 個体係数」。**離散の tier 制**（実 Bot・plan-h31）向け
+//   - SkillCurve … 「1本のスカラーから引く」。**連続分布**（sim の母集団・plan-h33）向け
+//
+// どちらも「速度とミス率を同じ向きに動かす」という同じ原則の実装で、だから同じ package に置く。
+//
+// HeatPenalty も skill に**反比例**させる（上手い人ほど難度に強い）。これで
+// 「終盤に下位が崩れる」という自然な淘汰が出る（plan-h33 §1.2）。
+type SkillCurve struct {
+	// SlowMsPerKey / FastMsPerKey は skill=0 / skill=1 の1打鍵あたりms。
+	SlowMsPerKey, FastMsPerKey float64
+	// HighMissRate / LowMissRate は skill=0 / skill=1 の打鍵あたりミス率。
+	HighMissRate, LowMissRate float64
+	// HighHeatPenalty / LowHeatPenalty は skill=0 / skill=1 の難度追従の強さ。
+	HighHeatPenalty, LowHeatPenalty float64
+}
+
+// At は skill に対応する Ability を返す。skill は [0,1] にクランプする
+// （正規分布の裾がはみ出しても「無限に速い個体」を作らないため）。
+//
+// JitterMs は 0（毎回の揺らぎは個体の実力ではない）。必要なら呼び出し側で足す。
+func (c SkillCurve) At(skill float64) Ability {
+	if skill < 0 {
+		skill = 0
+	}
+	if skill > 1 {
+		skill = 1
+	}
+	lerp := func(atZero, atOne float64) float64 { return atZero + (atOne-atZero)*skill }
+	return Ability{
+		MsPerKey:    lerp(c.SlowMsPerKey, c.FastMsPerKey),
+		MissRate:    lerp(c.HighMissRate, c.LowMissRate),
+		HeatPenalty: lerp(c.HighHeatPenalty, c.LowHeatPenalty),
+	}
+}
+
 // Serve は1注文（keystrokes 打鍵）を打ち切った結果を返す。
 //
 //	miss    = Σ[打鍵ごと] (rng < MissRate)

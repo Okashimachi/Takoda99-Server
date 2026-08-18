@@ -21,7 +21,8 @@ import (
 
 func main() {
 	stores := flag.Int("stores", 99, "店舗数")
-	prof := flag.String("profile", "normal", "実力分布 uniform|normal|bipolar|wide|duel")
+	prof := flag.String("profile", "normal", "実力分布 uniform|normal|bipolar|wide|duel|match")
+	humans := flag.Int("humans", sim.DefaultMatchHumans, "profile=match の人間の人数（残りは Bot の tier 分布）")
 	runs := flag.Int("runs", 1, "試行回数。複数なら統計サマリを出す")
 	seed := flag.Int64("seed", time.Now().UnixNano(), "乱数シード（再現性）")
 	maxTicks := flag.Int("max-ticks", 20000, "膠着とみなす上限tick")
@@ -44,7 +45,8 @@ func main() {
 		return
 	}
 
-	if err := run(os.Stdout, *stores, *prof, *runs, *seed, *maxTicks, *quiet, *targetMinSec, *targetMaxSec); err != nil {
+	if err := run(os.Stdout, *stores, *prof, *runs, *seed, *maxTicks, *humans, *quiet,
+		*targetMinSec, *targetMaxSec); err != nil {
 		fmt.Fprintln(os.Stderr, "matchsim:", err)
 		os.Exit(1)
 	}
@@ -77,7 +79,7 @@ type runResult struct {
 	seed int64
 }
 
-func run(w io.Writer, stores int, prof string, runs int, seed int64, maxTicks int, quiet bool,
+func run(w io.Writer, stores int, prof string, runs int, seed int64, maxTicks, humans int, quiet bool,
 	targetMinSec, targetMaxSec float64) error {
 
 	p, err := sim.ParseProfile(prof)
@@ -92,6 +94,10 @@ func run(w io.Writer, stores int, prof string, runs int, seed int64, maxTicks in
 	}
 	if maxTicks < 1 {
 		return fmt.Errorf("--max-ticks は1以上である必要 (got %d)", maxTicks)
+	}
+	// 人間だけの卓は「本番の卓を模す」プロファイルとして意味を成さない（Bot が0体になる）。
+	if p == sim.ProfileMatch && humans >= stores {
+		return fmt.Errorf("--humans(%d) は --stores(%d) 未満である必要", humans, stores)
 	}
 
 	// 調整値は GameParameters が正典。CLI 側で数値を作らない。
@@ -109,6 +115,7 @@ func run(w io.Writer, stores int, prof string, runs int, seed int64, maxTicks in
 				Stores:   stores,
 				Profile:  p,
 				Rng:      rand.New(rand.NewSource(s)),
+				Humans:   humans,
 				MaxTicks: maxTicks,
 			}),
 			seed: s,

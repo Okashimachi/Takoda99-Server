@@ -34,7 +34,8 @@ func reportRun(w io.Writer, r runResult, index int) {
 	p.f("難度カーブ   : 到達 heat %d / 上端 %d / 最大段差 +%d\n",
 		r.MaxHeatLevel, r.HeatMaxLevel, r.MaxHeatStep)
 	if r.Winner != "" {
-		p.f("優勝       : %s (msPerKey=%d missRate=%.3f)\n", r.Winner, r.WinnerMsPerKey, r.WinnerMissRate)
+		p.f("優勝       : %s (msPerKey=%d missRate=%.3f%s)\n",
+			r.Winner, r.WinnerMsPerKey, r.WinnerMissRate, winnerKind(r.Result))
 	}
 	p.f("脱落       : 足切り %d 店（本戦の脱落経路はこれ1本）\n", r.Culls)
 	p.f("客の捌き   : 提供 %d\n", r.Served)
@@ -60,6 +61,17 @@ func reportRun(w io.Writer, r runResult, index int) {
 	for _, s := range aliveDeciles(r) {
 		p.f("  tick %5d (%6.1fs)  alive %d\n", s.Tick, seconds(s.ElapsedMs), s.Alive)
 	}
+}
+
+// winnerKind は優勝者の素性（profile=match のときだけ意味を持つ）。
+func winnerKind(r sim.Result) string {
+	switch {
+	case r.WinnerHuman:
+		return " 人間"
+	case r.WinnerTier != "":
+		return " Bot/" + r.WinnerTier
+	}
+	return ""
 }
 
 // aliveDeciles は生存数が店舗数の 100%,90%,…,10% を初めて割った時点を拾う。
@@ -182,6 +194,7 @@ func reportSummary(w io.Writer, results []runResult, targetMinSec, targetMaxSec 
 	p.f("負スコア     : 合計 %d 店（%d試合ぶん。ほぼ0が目標）\n", m.NegativeScores, n)
 	p.f("早期切り事故 : 合計 %d 店（実力上位1/4なのに最初の2段階で脱落）\n", m.EarlyCutStrong)
 	p.f("実力相関     : %.2f（+1に近いほど「強い店ほど上位」。低いと運ゲー）\n", m.RankAbilityCorr)
+	reportHumans(p, m, results[0].Stores, n)
 	if rejectSum > 0 {
 		p.f("⚠ 弾かれた提供報告 合計: %d\n", rejectSum)
 	}
@@ -191,4 +204,33 @@ func reportSummary(w io.Writer, results []runResult, targetMinSec, targetMaxSec 
 		mark = "✅"
 	}
 	p.f("\n目安%.0f〜%.0f秒に収まった: %d/%d %s\n", targetMinSec, targetMaxSec, inTarget, n, mark)
+}
+
+// reportHumans は本番の卓（--profile match）の観測を出す（plan-h33 §2）。
+//
+// **これが h33 の実用的な目的**。「人間が真ん中あたりに来る」を数字で確認する。
+// 人間が居ないプロファイルでは何も出さない。
+func reportHumans(p printer, m sim.Balance, stores, runs int) {
+	if m.HumanCount == 0 {
+		return
+	}
+	p.f("\n── 本番の卓（Bot の tier 分布 ＋ 人間 %d 名）──\n", m.HumanCount/runs)
+	if len(m.BotTierCounts) > 0 {
+		p.f("Bot の tier  : 強 %.1f / 中 %.1f / 弱 %.1f 体（%d体中・%d試合の平均）\n",
+			float64(m.BotTierCounts["strong"])/float64(runs),
+			float64(m.BotTierCounts["normal"])/float64(runs),
+			float64(m.BotTierCounts["weak"])/float64(runs),
+			stores-m.HumanCount/runs, runs)
+	}
+	p.f("人間の平均順位: %.1f / %d（目安 %d〜%d 位）\n",
+		m.HumanAvgRank, stores, stores*4/10, stores*6/10)
+	p.f("人間が1位    : %d 回 / %d 試合（%.0f%%）\n",
+		m.HumanTop1, runs, m.HumanWinRatio*100)
+	if len(m.HumanCullStages) > 0 {
+		p.f("人間の脱落段 :")
+		for i, c := range m.HumanCullStages {
+			p.f(" %d段目 %d人", i+1, c)
+		}
+		p.f("（最終段まで残れば決勝進出）\n")
+	}
 }

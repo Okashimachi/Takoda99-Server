@@ -28,7 +28,7 @@ func TestDiagnostic_CustomerLifecycle(t *testing.T) {
 	params.Matching.ReadyCountdownMs = 0
 
 	const storeCount = 99
-	dummies := buildStores(storeCount, ProfileNormal, rng)
+	dummies := buildStores(Config{Params: params, Stores: storeCount, Profile: ProfileNormal, Rng: rng})
 	inits := make([]game.PlayerInit, storeCount)
 	byId := make(map[game.PlayerId]*dummyStore, storeCount)
 	for i, d := range dummies {
@@ -135,7 +135,7 @@ func TestDiagnostic_CustomerLifecycle(t *testing.T) {
 
 		// ダミー店の打鍵を進める
 		for _, d := range dummies {
-			o, done := d.step(tickMs, rng)
+			o, done := d.step(tickMs, sess.HeatLevel(), rng)
 			if !done {
 				continue
 			}
