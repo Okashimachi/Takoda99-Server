@@ -80,11 +80,16 @@ deploy: build ## ビルドして本番へ転送・再起動（gcloud 必須・�
 verify: ## 本番の実値を確認（コードの既定値は本番に効かない。DB値が優先）
 	@echo "── 設定（DBから読めているか）──"
 	@curl -s --max-time 10 $(BASE)/api/params \
-	  | jq '{score, cull: [.cull.stages[].targetAliveCount], publish, sanity, heat}' \
+	  | jq '{configHash, score, odai, \
+	         cull: {targetAliveCount: [.cull.stages[].targetAliveCount], warnMaxIds: .cull.warnMaxIds}, \
+	         publish, sanity, heat}' \
 	  || echo "🔴 JSON が返らない。config の Validate に落ちている可能性（journalctl を見る）"
 	@echo "── 疎通 ──"
 	@curl -s -o /dev/null -w "  /healthz : %{http_code}\n" --max-time 10 $(BASE)/healthz
 	@curl -s -o /dev/null -w "  /admin/  : %{http_code}\n" --max-time 10 $(BASE)/admin/
+	@echo ""
+	@echo "⚠ ここに出ない項目は「確認できていない」。パラメータを足したらこの jq にも足すこと。"
+	@echo "  configHash が変われば設定が変わった証拠（config-front の表示と突き合わせる）。"
 
 .PHONY: logs
 logs: ## 本番のログを見る（gcloud 必須）
