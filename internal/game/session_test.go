@@ -262,6 +262,23 @@ func TestStepDistribute_EmptyRestPool(t *testing.T) {
 
 // ── stepPhase / stepHeat テスト ──────────────────────────────
 
+// addressedMsg は「誰宛てか」まで見たいテスト用（filterMsg は宛先を捨てる）。
+type addressedMsg[T any] struct {
+	to  PlayerId
+	msg T
+}
+
+// filterOutbound は宛先つきで特定の型のメッセージだけ拾う。
+func filterOutbound[T any](out []Outbound) []addressedMsg[T] {
+	var result []addressedMsg[T]
+	for _, o := range out {
+		if msg, ok := o.Msg.(T); ok {
+			result = append(result, addressedMsg[T]{to: o.To.PlayerId, msg: msg})
+		}
+	}
+	return result
+}
+
 func filterMsg[T any](out []Outbound) []T {
 	var result []T
 	for _, o := range out {
@@ -1697,5 +1714,76 @@ func TestAttempt_RejectedOrderIsNotRecorded(t *testing.T) {
 	s.ApplyOrderServed("s-1", proto.OrderServed{CustomerId: "nope", ElapsedMs: 2000, MissCount: 0})
 	if got := len(s.Attempts()); got != 0 {
 		t.Fatalf("存在しない客の報告が記録された: %d件", got)
+	}
+}
+
+// 脱落済みの店にも足切り予告が届き、SelfAtRisk は必ず false になる。
+//
+// 99人中98人は「脱落してから試合終了まで」を観戦者として過ごす。生存店だけに送っていた頃は
+// 脱落した瞬間から秒読みが凍り、「順位は動いているのに残り0秒のまま」という矛盾が画面に残った
+// （2026-08-18 クライアントと合意して宛先を広げた）。
+//
+// 🔴 送信先を生存店に戻す変異（`if !s.stores[sid].alive { continue }` の復活）で落ちる。
+func TestCullWarning_ReachesEliminatedStoresToo(t *testing.T) {
+	params := DefaultParameters()
+	params.Customer.Total = 0
+	// 20店のうち 7 店だけ残す＝13店が観戦者になる。
+	params.Cull.Stages[0] = CullStage{AtMs: 20000, TargetAliveCount: 7}
+	s := newTestSessionWith(params, 20)
+	s.Start(0)
+	for i, sid := range s.order {
+		s.stores[sid].score = i * 100 // 順位を確定させる
+	}
+
+	// 第1ステージを消化させ、脱落者を作る。
+	out := s.Tick(20000)
+	elim := filterMsg[proto.StoreEliminatedBatch](out)
+	if len(elim) == 0 || len(elim[0].Entries) == 0 {
+		t.Fatalf("第1ステージで脱落が起きていない")
+	}
+	dead := make(map[proto.StoreId]bool, len(elim[0].Entries))
+	for _, e := range elim[0].Entries {
+		dead[e.StoreId] = true
+	}
+	if s.aliveCount == 0 {
+		t.Fatalf("全滅してしまい観戦者の検証にならない")
+	}
+
+	// 次のtickの予告が「全店」に届くこと。
+	warns := filterOutbound[proto.ForcedEliminationWarning](s.Tick(1000))
+	if len(warns) != len(s.order) {
+		t.Fatalf("予告は脱落店を含む全店へ届くはず: %d件 / 全%d店", len(warns), len(s.order))
+	}
+
+	sawDead := false
+	for _, w := range warns {
+		if !dead[proto.StoreId(w.to)] {
+			continue
+		}
+		sawDead = true
+		if w.msg.SelfAtRisk {
+			t.Fatalf("脱落済みの店に SelfAtRisk=true が届いた: %s", w.to)
+		}
+	}
+	if !sawDead {
+		t.Fatalf("脱落済みの店に1通も届いていない")
+	}
+
+	// 中身は宛先で変えない（生存店と脱落店で同一）。
+	var alive, deadMsg *proto.ForcedEliminationWarning
+	for i := range warns {
+		if dead[proto.StoreId(warns[i].to)] {
+			deadMsg = &warns[i].msg
+		} else if alive == nil {
+			alive = &warns[i].msg
+		}
+	}
+	if alive == nil || deadMsg == nil {
+		t.Fatalf("生存店と脱落店の両方の予告が取れていない")
+	}
+	if alive.UntilMs != deadMsg.UntilMs || alive.StageIndex != deadMsg.StageIndex ||
+		alive.StageTotal != deadMsg.StageTotal || alive.CutLineRank != deadMsg.CutLineRank ||
+		len(alive.CutStoreIds) != len(deadMsg.CutStoreIds) {
+		t.Fatalf("宛先によって予告の中身が違う\n生存: %+v\n脱落: %+v", *alive, *deadMsg)
 	}
 }
