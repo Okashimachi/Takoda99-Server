@@ -94,25 +94,120 @@ type MatchingParams struct {
 	ReadyCountdownMs int `json:"readyCountdownMs"`
 }
 
-// CustomerParams: 客システム（総数・属性ごとの出現率/注文数）。
+// CustomerParams: 客システム（総数・属性ごとの出現率・注文数の抽選表）。
+//
+// 🔴 **属性（見た目）と注文数（難度）は独立**（plan-h36）。h35 までは
+// 「クレーマーは必ず2個」「JK は必ず6個」と1対1で紐づいていたため、
+// **見た目を増やさずに個数の段階だけを増やせなかった**。属性は h21 で
+// 「ゲームに一切影響しない見た目専用」と決めたのに、個数だけが例外的に難度へ効いていた。
+// 現在は OrderTiers が独立した抽選表になっており、属性からは何も決まらない。
 type CustomerParams struct {
 	Total   int           `json:"total"`
 	Normal  AttributeSpec `json:"normal"`
 	Bonus   AttributeSpec `json:"bonus"`
 	Claimer AttributeSpec `json:"claimer"`
 	Buzz    AttributeSpec `json:"buzz"`
+
+	// OrderTiers は「たこ焼き何個の客が、どれくらいの割合で出るか」（plan-h36）。
+	// 属性の抽選とは**独立に**引かれるので、同じ見た目の客に 2個も 8個もありうる。
+	//
+	// ⚠ **slice ではなく固定長配列**。Go では配列は要素が comparable なら `==` 可能なので、
+	// AGENTS.md §1.3 の「map / slice をフィールドに入れない」を満たす（cull.stages・bot.tiers と同じ流儀）。
+	//
+	// 🔴 **ゼロ埋めを Validate で弾いてはいけない**。理由は EffectiveOrderTiers を参照。
+	OrderTiers [OrderTierCount]OrderTier `json:"orderTiers"`
 }
 
 // AttributeSpec: 1属性分の生成パラメータ。
 //
-// 本戦（plan-h21）で属性はスコアに一切影響しなくなった。残っているのは
-// 出現率(Weight)と注文数(OrderCount)＝見た目の彩りとお題量の差だけで、
-// **同じ打鍵をすれば属性によらず同じスコアになる**。
-// 「この属性だけ加点/減点」を復活させないこと（予選の「同じように打ったのに評価が違う」の再来）。
+// 本戦（plan-h21）で属性はスコアに一切影響しなくなった。さらに plan-h36 で
+// 注文数も切り離されたので、残っているのは**出現率(Weight)＝見た目の彩りだけ**。
+// **同じ打鍵をすれば属性によらず同じスコアになる**し、属性によって注文の重さも変わらない。
+// 「この属性だけ加点/減点」「この属性は重い注文が出やすい」を復活させないこと
+// （予選の「同じように打ったのに評価が違う」の再来）。
 type AttributeSpec struct {
-	Attribute  proto.CustomerAttribute `json:"attribute"`
-	Weight     int                     `json:"weight"`
-	OrderCount int                     `json:"orderCount"`
+	Attribute proto.CustomerAttribute `json:"attribute"`
+	Weight    int                     `json:"weight"`
+}
+
+// OrderTierCount は注文数の段階数。**3段階で固定する**（plan-h36 §設計意図）。
+//
+// 可変長（`[]OrderTier`）にすると `==` 比較可能を保てず、config からのゼロ埋め事故も増える。
+// 3段階あれば「軽い・普通・重い」は表現できる。
+const OrderTierCount = 3
+
+// OrderTier は注文数の抽選表の1段（plan-h36）。
+type OrderTier struct {
+	// Count はたこ焼きの個数（＝その客に配るお題の語数）。
+	Count int `json:"count"`
+	// Weight は出現の重み。他の段との比だけが意味を持つ（合計100である必要はない）。
+	// 0 ならその段は出ない（＝段階を実質2つにする使い方）。
+	Weight int `json:"weight"`
+}
+
+// DefaultOrderTiers は注文数の内蔵既定値（plan-h36 §1.1・2026-08-18 に企画側が決めた配分）。
+//
+//	軽い 2個 / 重み35 … **必ず達成できる客**。遅い人が「ずっと打っているのに0点」で終わらない担保
+//	標準 4個 / 重み35 … 母数
+//	重い 8個 / 重み30 … アート要望の「8個」。達成すると大きい
+//
+// 平均 4.50個。
+//
+// 🔴 **守るべき制約は「最も軽い段階（2個）を消さないこと」の1つだけ。**
+// 8個の割合は 10%〜40% まで振っても実力相関が 0.94〜0.95 で動かなかった（h36 §1.1 の実測）。
+// 効いているのは 8個の割合ではなく「軽い客が存在すること」で、4/6/8 のように全段階を重くすると
+// **8個固定と同じ問題（実力相関 0.88・打ち切れないまま終わる）が戻る**。
+//
+// ⚠ **DB の値がここに勝つ**。本番で h36 以前の体感へ戻すときはコードではなく
+// config（customer.orderTiers）を 2/3/6 相当へ寄せる（ビルド不要・docs/runbook.md）。
+func DefaultOrderTiers() [OrderTierCount]OrderTier {
+	return [OrderTierCount]OrderTier{
+		{Count: 2, Weight: 35},
+		{Count: 4, Weight: 35},
+		{Count: 8, Weight: 30},
+	}
+}
+
+// EffectiveOrderTiers は実際に使う注文数の抽選表を返す。**ゼロを既定値へ読み替える二重防御の1枚目**。
+//
+// 🔴 **ここが plan-h36 で最も危険な箇所**（#124 の再来防止）。
+//
+//	backfillDefaults の補完は**グループ単位**（グループ全体がゼロのときだけ既定を入れる）。
+//	本番DBには `customer` グループが既にある（total / normal / bonus / claimer / buzz）ので、
+//	新設した orderTiers は補完されず**ゼロのまま読まれる**。
+//	そのまま使うと「注文数0個の客」が5000人生まれて試合が壊れ、
+//	かといってゼロを Validate で弾くと Load が失敗して **score / cull / heat を含む
+//	全設定が内蔵デフォルトへ巻き戻る**（config から何を変えても効かない状態＝#124）。
+//
+// なので **Validate では弾かず、ここで読み替える**。db 側の backfillNewFields でも同じ補正を
+// 掛けているが、**sim・テスト・DB無し起動でも安全**にするために game 側にも置く
+// （cull.EffectiveWarnMaxIds / bot.EffectiveTiers と同じ二重防御）。
+//
+// 補完は**要素単位**。config から2要素だけ保存されて3つ目が {0,0} になる
+// 「配列のゼロ埋め」（h22 §2.2 の罠）も、その1要素だけ既定へ戻して吸収する。
+//
+// ⚠ Weight=0 は**潰さない**（「この段は出さない」という正当な設定）。潰すのは
+// 「Count が 0 以下＝打つ語が無い客」と、抽選が成立しない「重みの合計が 0」だけ。
+func (cp CustomerParams) EffectiveOrderTiers() [OrderTierCount]OrderTier {
+	def := DefaultOrderTiers()
+	out := cp.OrderTiers
+	total := 0
+	for i := range out {
+		if out[i] == (OrderTier{}) {
+			out[i] = def[i] // 丸ごと未設定（＝DBに無い／ゼロ埋め）
+		}
+		if out[i].Count <= 0 {
+			out[i].Count = def[i].Count // 0個の客は「お題ゼロで即完了」になり試合が壊れる
+		}
+		if out[i].Weight < 0 {
+			out[i].Weight = 0
+		}
+		total += out[i].Weight
+	}
+	if total <= 0 {
+		return def // 全段の重みが 0 だと抽選できない
+	}
+	return out
 }
 
 // ScoreParams: スコアの重み（本戦・plan-h21）。順位を決める唯一の値。
@@ -526,9 +621,20 @@ func (gp GameParameters) Validate() error {
 	if gp.Sanity.MinMsPerWord < 0 {
 		return fmt.Errorf("sanity.minMsPerWord は非負である必要 (got %d)", gp.Sanity.MinMsPerWord)
 	}
-	for _, spec := range []AttributeSpec{gp.Customer.Normal, gp.Customer.Bonus, gp.Customer.Claimer, gp.Customer.Buzz} {
-		if spec.OrderCount <= 0 {
-			return fmt.Errorf("customer.%s.orderCount は正である必要 (got %d)", spec.Attribute, spec.OrderCount)
+	// 注文数の抽選表（plan-h36）。
+	//
+	// 🔴 **0 は弾かない。** 本番DBには `customer` グループが既にあり、後から足した
+	// orderTiers は**グループ単位の backfill をすり抜けてゼロのまま読まれる**。
+	// ここで 0 を弾くと Load 全体が失敗し、score / cull / heat を含む全設定が
+	// 内蔵デフォルトへ巻き戻る（#124 と同じ経路）。ゼロの吸収は EffectiveOrderTiers の役目。
+	// 弾くのは「運営が意図して入れないと現れない、明確に誤った値」＝負値だけ。
+	for i, t := range gp.Customer.OrderTiers {
+		if t.Count < 0 {
+			return fmt.Errorf("customer.orderTiers[%d].count は非負である必要 (got %d)。"+
+				"0 は「未設定」として既定へ読み替えられる", i, t.Count)
+		}
+		if t.Weight < 0 {
+			return fmt.Errorf("customer.orderTiers[%d].weight は非負である必要 (got %d)", i, t.Weight)
 		}
 	}
 	return nil
@@ -638,21 +744,18 @@ func DefaultParameters() GameParameters {
 			RosterWaitMs:     3000,
 			ReadyCountdownMs: 5000,
 		},
-		// OrderCount は plan-h30 で 2/2/1/4 → 3/3/2/6 へ引き上げた。
+		// 属性は**出現率だけ**（見た目の彩り）。注文数は OrderTiers が独立に決める（plan-h36）。
 		//
-		// お題の1語を短くした（level 17 で 85打鍵 → 43打鍵前後）ぶん、**難度と報酬は
-		// 「何語打つか」で持たせる**という方針転換による（plan-h30 §1）。1語が長いと
-		// 打ち切るまでスコアが1点も入らないが、短い語を複数打つ形なら1語ごとに加点が入り、
-		// ミスしても「次で取り返す」が成立する。
-		//
-		// ⚠ **DB の値がここに勝つ**。本番で戻すときはコードではなく config-front の
-		// customer.*.orderCount を 2/2/1/4 に戻す（ビルド不要・docs/runbook.md）。
+		// h30 は「1語を短くしたぶん、難度と報酬は何語打つかで持たせる」として
+		// 属性ごとの orderCount を 2/2/1/4 → 3/3/2/6 に上げたが、その持ち方だと
+		// **個数の段階を増やす＝キャラを増やす**ことになっていた。h36 で分離。
 		Customer: CustomerParams{
-			Total:   5000,
-			Normal:  AttributeSpec{Attribute: proto.AttrNormal, Weight: 70, OrderCount: 3},
-			Bonus:   AttributeSpec{Attribute: proto.AttrBonus, Weight: 15, OrderCount: 3},
-			Claimer: AttributeSpec{Attribute: proto.AttrClaimer, Weight: 10, OrderCount: 2},
-			Buzz:    AttributeSpec{Attribute: proto.AttrBuzz, Weight: 5, OrderCount: 6},
+			Total:      5000,
+			Normal:     AttributeSpec{Attribute: proto.AttrNormal, Weight: 70},
+			Bonus:      AttributeSpec{Attribute: proto.AttrBonus, Weight: 15},
+			Claimer:    AttributeSpec{Attribute: proto.AttrClaimer, Weight: 10},
+			Buzz:       AttributeSpec{Attribute: proto.AttrBuzz, Weight: 5},
+			OrderTiers: DefaultOrderTiers(),
 		},
 		// **100 : 22**（ミス1回 = たこ焼き 0.22 個ぶんの損）。
 		//

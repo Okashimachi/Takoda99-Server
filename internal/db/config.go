@@ -190,6 +190,7 @@ func backfillDefaults(gp *game.GameParameters, def game.GameParameters) {
 //	                  0=未設定として既定 24 に戻す（game 側の EffectiveWarnMaxIds と同じ扱い）。
 //	bot.tiers       … 0 だと「1打鍵0ms・重み0」の tier ができて Bot が壊れる（plan-h31 §4.1）。
 //	bot.individualSpread … 0 だと個体差が消え、99体が同じ強さに戻る（h31 の目的そのもの）。
+//	customer.orderTiers … 0 だと「たこ焼き0個の客」が5000人生まれて試合が壊れる（plan-h36 §3）。
 //
 // ⚠ heat.perElapsedSec は**あえて入れていない**。0 は「時間で難度を上げない」という
 // 妥当な（riskWarnings で警告済みの）設定であり、運営の意図を潰す側の害が大きい。
@@ -203,6 +204,11 @@ func backfillNewFields(gp *game.GameParameters, def game.GameParameters) {
 	// DB無し起動でも安全にするため（cull.warnMaxIds と同じ形）。
 	gp.Bot.Tiers = gp.Bot.EffectiveTiers()
 	gp.Bot.IndividualSpread = gp.Bot.EffectiveIndividualSpread()
+	// 🔴 注文数の抽選表（plan-h36）。本番DBには `customer` グループが既にある
+	// （total / normal / …）ので、後から足した orderTiers はグループ単位の backfill を
+	// すり抜けて**ゼロのまま読まれる**＝「たこ焼き0個の客」が5000人。bot.tiers と同じ形。
+	// 補正のロジックは game 側（EffectiveOrderTiers）に1本化してあり、ここはそれを当てるだけ。
+	gp.Customer.OrderTiers = gp.Customer.EffectiveOrderTiers()
 }
 
 // コンパイル時に game.ConfigProvider 充足を保証する。

@@ -204,11 +204,38 @@ func TestGameParameters_Validate(t *testing.T) {
 		}
 	})
 
-	t.Run("customer.*.orderCount<=0 を弾く", func(t *testing.T) {
+	// ── 注文数の抽選表（plan-h36 §3）──
+	//
+	// 🔴 **ゼロは弾かない／負値は弾く**。ゼロを弾くと、本番DB（customer グループは
+	// 既にあるが orderTiers は無い）が Validate に落ちて全設定が内蔵デフォルトへ
+	// 巻き戻る（#124 と同じ経路）。ゼロの吸収は EffectiveOrderTiers の役目。
+
+	t.Run("customer.orderTiers がゼロでも Validate は通る（#124 の再来を防ぐ）", func(t *testing.T) {
 		gp := DefaultParameters()
-		gp.Customer.Buzz.OrderCount = 0
+		gp.Customer.OrderTiers = [OrderTierCount]OrderTier{}
+		if err := gp.Validate(); err != nil {
+			t.Fatalf("ゼロの orderTiers は「未設定」として通るべき（弾くと全設定が既定へ転落する）: %v", err)
+		}
+	})
+
+	t.Run("customer.orderTiers の1要素だけゼロでも Validate は通る（配列のゼロ埋め）", func(t *testing.T) {
+		gp := DefaultParameters()
+		gp.Customer.OrderTiers[2] = OrderTier{}
+		if err := gp.Validate(); err != nil {
+			t.Fatalf("ゼロ埋めされた要素は EffectiveOrderTiers が吸収する: %v", err)
+		}
+	})
+
+	t.Run("customer.orderTiers の負値は弾く", func(t *testing.T) {
+		gp := DefaultParameters()
+		gp.Customer.OrderTiers[0].Count = -1
 		if err := gp.Validate(); err == nil {
-			t.Fatal("customer.buzz.orderCount=0 はエラーになるべき")
+			t.Fatal("count=-1 はエラーになるべき")
+		}
+		gp = DefaultParameters()
+		gp.Customer.OrderTiers[1].Weight = -5
+		if err := gp.Validate(); err == nil {
+			t.Fatal("weight=-5 はエラーになるべき")
 		}
 	})
 
