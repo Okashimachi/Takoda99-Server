@@ -894,16 +894,26 @@ func (s *Session) buildMatchStats(st *storeState) proto.MatchStats {
 
 // ── 客システム ──────────────────────────────────────────────
 
+// initCustomers は試合開始時に customer.total 人ぶんの客を一括で作る。
+//
+// 🔴 **見た目（属性）と難度（注文数）は独立に抽選する**（plan-h36）。
+// 以前は `spec := s.rollAttribute()` の結果から個数まで取っていたため、
+// 「クレーマーは必ず2個」と固定されていた。属性から個数を取る実装に戻さないこと
+// （AGENTS.md §4.4「属性でゲーム挙動を分岐しない」に真正面から反する）。
+//
+// ⚠ 1人あたり rng を2回消費する（属性→個数の順）。h35 以前とはシード固定でも
+// 客の並びが変わるので、matchsim の出力は h36 の前後で一致しない（想定内・h36 §4）。
 func (s *Session) initCustomers() {
 	total := s.params.Customer.Total
+	// 抽選表はループの外で1回だけ解決する（ゼロ補完の判定を5000回やる意味は無い）。
+	tiers := s.params.Customer.EffectiveOrderTiers()
 	s.restPool = make([]proto.CustomerId, 0, total)
 	for i := 0; i < total; i++ {
 		cid := proto.CustomerId(fmt.Sprintf("c-%d", i+1))
-		spec := s.rollAttribute()
-		s.customers[cid] = &customer{
-			attribute:  spec.Attribute,
-			orderCount: spec.OrderCount,
-		}
+		// 抽選の順序は「属性 → 個数」で固定（rng の消費順＝シード再現性の一部）。
+		attr := s.rollAttribute().Attribute
+		orders := s.rollOrderCount(tiers)
+		s.customers[cid] = &customer{attribute: attr, orderCount: orders}
 		s.restPool = append(s.restPool, cid)
 	}
 	s.customerSeq = total
@@ -912,6 +922,31 @@ func (s *Session) initCustomers() {
 func (s *Session) attributeSpecs() []AttributeSpec {
 	c := s.params.Customer
 	return []AttributeSpec{c.Normal, c.Bonus, c.Claimer, c.Buzz}
+}
+
+// rollOrderCount は注文数（＝たこ焼きの個数＝配るお題の語数）を抽選する（plan-h36）。
+//
+// **属性を一切見ない**のがこの関数の要点。引数の tiers は
+// CustomerParams.EffectiveOrderTiers() を通した後のものを渡すこと
+// （生の params.Customer.OrderTiers を渡すと、本番DBのゼロ埋めがそのまま「0個の客」になる）。
+func (s *Session) rollOrderCount(tiers [OrderTierCount]OrderTier) int {
+	total := 0
+	for _, t := range tiers {
+		total += t.Weight
+	}
+	if total <= 0 {
+		// EffectiveOrderTiers が既に既定へ差し替えているので通常は来ない。
+		// 直接呼ばれた場合の保険（0個の客を作らない）。
+		return DefaultOrderTiers()[0].Count
+	}
+	r := s.rng.Intn(total)
+	for _, t := range tiers {
+		if r < t.Weight {
+			return t.Count
+		}
+		r -= t.Weight
+	}
+	return tiers[len(tiers)-1].Count
 }
 
 func (s *Session) rollAttribute() AttributeSpec {

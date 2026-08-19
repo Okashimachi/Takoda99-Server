@@ -94,25 +94,130 @@ type MatchingParams struct {
 	ReadyCountdownMs int `json:"readyCountdownMs"`
 }
 
-// CustomerParams: 客システム（総数・属性ごとの出現率/注文数）。
+// CustomerParams: 客システム（総数・属性ごとの出現率・注文数の抽選表）。
+//
+// 🔴 **属性（見た目）と注文数（難度）は独立**（plan-h36）。h35 までは
+// 「クレーマーは必ず2個」「JK は必ず6個」と1対1で紐づいていたため、
+// **見た目を増やさずに個数の段階だけを増やせなかった**。属性は h21 で
+// 「ゲームに一切影響しない見た目専用」と決めたのに、個数だけが例外的に難度へ効いていた。
+// 現在は OrderTiers が独立した抽選表になっており、属性からは何も決まらない。
 type CustomerParams struct {
 	Total   int           `json:"total"`
 	Normal  AttributeSpec `json:"normal"`
 	Bonus   AttributeSpec `json:"bonus"`
 	Claimer AttributeSpec `json:"claimer"`
 	Buzz    AttributeSpec `json:"buzz"`
+
+	// OrderTiers は「たこ焼き何個の客が、どれくらいの割合で出るか」（plan-h36）。
+	// 属性の抽選とは**独立に**引かれるので、同じ見た目の客に 2個も 8個もありうる。
+	//
+	// ⚠ **slice ではなく固定長配列**。Go では配列は要素が comparable なら `==` 可能なので、
+	// AGENTS.md §1.3 の「map / slice をフィールドに入れない」を満たす（cull.stages・bot.tiers と同じ流儀）。
+	//
+	// 🔴 **ゼロ埋めを Validate で弾いてはいけない**。理由は EffectiveOrderTiers を参照。
+	OrderTiers [OrderTierCount]OrderTier `json:"orderTiers"`
 }
 
 // AttributeSpec: 1属性分の生成パラメータ。
 //
-// 本戦（plan-h21）で属性はスコアに一切影響しなくなった。残っているのは
-// 出現率(Weight)と注文数(OrderCount)＝見た目の彩りとお題量の差だけで、
-// **同じ打鍵をすれば属性によらず同じスコアになる**。
-// 「この属性だけ加点/減点」を復活させないこと（予選の「同じように打ったのに評価が違う」の再来）。
+// 本戦（plan-h21）で属性はスコアに一切影響しなくなった。さらに plan-h36 で
+// 注文数も切り離されたので、残っているのは**出現率(Weight)＝見た目の彩りだけ**。
+// **同じ打鍵をすれば属性によらず同じスコアになる**し、属性によって注文の重さも変わらない。
+// 「この属性だけ加点/減点」「この属性は重い注文が出やすい」を復活させないこと
+// （予選の「同じように打ったのに評価が違う」の再来）。
 type AttributeSpec struct {
-	Attribute  proto.CustomerAttribute `json:"attribute"`
-	Weight     int                     `json:"weight"`
-	OrderCount int                     `json:"orderCount"`
+	Attribute proto.CustomerAttribute `json:"attribute"`
+	Weight    int                     `json:"weight"`
+}
+
+// OrderTierCount は注文数の段階数。**3段階で固定する**（plan-h36 §設計意図）。
+//
+// 可変長（`[]OrderTier`）にすると `==` 比較可能を保てず、config からのゼロ埋め事故も増える。
+// 3段階あれば「軽い・普通・重い」は表現できる。
+const OrderTierCount = 3
+
+// OrderTier は注文数の抽選表の1段（plan-h36）。
+type OrderTier struct {
+	// Count はたこ焼きの個数（＝その客に配るお題の語数）。
+	Count int `json:"count"`
+	// Weight は出現の重み。他の段との比だけが意味を持つ（合計100である必要はない）。
+	// 0 ならその段は出ない（＝段階を実質2つにする使い方）。
+	Weight int `json:"weight"`
+}
+
+// DefaultOrderTiers は注文数の内蔵既定値（plan-h36 §1.1・2026-08-18 に企画側が決めた配分）。
+//
+//	軽い 2個 / 重み35 … **必ず達成できる客**。遅い人が「ずっと打っているのに0点」で終わらない担保
+//	標準 4個 / 重み35 … 母数
+//	重い 8個 / 重み30 … アート要望の「8個」。達成すると大きい
+//
+// 平均 4.50個。
+//
+// 🔴 **守るべき制約は「最も軽い段階（2個）を消さないこと」。**
+// 4/6/8 のように全段階を重くすると **8個固定と同じ問題（実力相関 0.89・打ち切れないまま終わる）が戻る**。
+//
+// バランスは**平均個数に素直に追随する**（20試合・seed42 の実測）:
+//
+//	配分(2/4/8)      平均   提供   実力相関
+//	現行 2/3/6       3.05   1274     0.96
+//	45 / 45 / 10     3.50   1156     0.92
+//	35 / 35 / 30     4.50    953     0.91   ← 既定
+//	8個固定          8.00    606     0.89
+//
+// ⚠ **plan-h36 の初版は「配分を変えても動かない」と書いていたが誤り**（測定時に
+// 8個を Claimer に載せており、Claimer は序盤に配られないため数字が良く出ていた）。
+// plan §1.1 に訂正済み。**既定 35/35/30 は実プレイで見てから決め直す前提の暫定値。**
+//
+// ⚠ **DB の値がここに勝つ**。本番で h36 以前の体感へ戻すときはコードではなく
+// config（customer.orderTiers）を 2/3/6 相当へ寄せる（ビルド不要・docs/runbook.md）。
+func DefaultOrderTiers() [OrderTierCount]OrderTier {
+	return [OrderTierCount]OrderTier{
+		{Count: 2, Weight: 35},
+		{Count: 4, Weight: 35},
+		{Count: 8, Weight: 30},
+	}
+}
+
+// EffectiveOrderTiers は実際に使う注文数の抽選表を返す。**ゼロを既定値へ読み替える二重防御の1枚目**。
+//
+// 🔴 **ここが plan-h36 で最も危険な箇所**（#124 の再来防止）。
+//
+//	backfillDefaults の補完は**グループ単位**（グループ全体がゼロのときだけ既定を入れる）。
+//	本番DBには `customer` グループが既にある（total / normal / bonus / claimer / buzz）ので、
+//	新設した orderTiers は補完されず**ゼロのまま読まれる**。
+//	そのまま使うと「注文数0個の客」が5000人生まれて試合が壊れ、
+//	かといってゼロを Validate で弾くと Load が失敗して **score / cull / heat を含む
+//	全設定が内蔵デフォルトへ巻き戻る**（config から何を変えても効かない状態＝#124）。
+//
+// なので **Validate では弾かず、ここで読み替える**。db 側の backfillNewFields でも同じ補正を
+// 掛けているが、**sim・テスト・DB無し起動でも安全**にするために game 側にも置く
+// （cull.EffectiveWarnMaxIds / bot.EffectiveTiers と同じ二重防御）。
+//
+// 補完は**要素単位**。config から2要素だけ保存されて3つ目が {0,0} になる
+// 「配列のゼロ埋め」（h22 §2.2 の罠）も、その1要素だけ既定へ戻して吸収する。
+//
+// ⚠ Weight=0 は**潰さない**（「この段は出さない」という正当な設定）。潰すのは
+// 「Count が 0 以下＝打つ語が無い客」と、抽選が成立しない「重みの合計が 0」だけ。
+func (cp CustomerParams) EffectiveOrderTiers() [OrderTierCount]OrderTier {
+	def := DefaultOrderTiers()
+	out := cp.OrderTiers
+	total := 0
+	for i := range out {
+		if out[i] == (OrderTier{}) {
+			out[i] = def[i] // 丸ごと未設定（＝DBに無い／ゼロ埋め）
+		}
+		if out[i].Count <= 0 {
+			out[i].Count = def[i].Count // 0個の客は「お題ゼロで即完了」になり試合が壊れる
+		}
+		if out[i].Weight < 0 {
+			out[i].Weight = 0
+		}
+		total += out[i].Weight
+	}
+	if total <= 0 {
+		return def // 全段の重みが 0 だと抽選できない
+	}
+	return out
 }
 
 // ScoreParams: スコアの重み（本戦・plan-h21）。順位を決める唯一の値。
@@ -526,9 +631,20 @@ func (gp GameParameters) Validate() error {
 	if gp.Sanity.MinMsPerWord < 0 {
 		return fmt.Errorf("sanity.minMsPerWord は非負である必要 (got %d)", gp.Sanity.MinMsPerWord)
 	}
-	for _, spec := range []AttributeSpec{gp.Customer.Normal, gp.Customer.Bonus, gp.Customer.Claimer, gp.Customer.Buzz} {
-		if spec.OrderCount <= 0 {
-			return fmt.Errorf("customer.%s.orderCount は正である必要 (got %d)", spec.Attribute, spec.OrderCount)
+	// 注文数の抽選表（plan-h36）。
+	//
+	// 🔴 **0 は弾かない。** 本番DBには `customer` グループが既にあり、後から足した
+	// orderTiers は**グループ単位の backfill をすり抜けてゼロのまま読まれる**。
+	// ここで 0 を弾くと Load 全体が失敗し、score / cull / heat を含む全設定が
+	// 内蔵デフォルトへ巻き戻る（#124 と同じ経路）。ゼロの吸収は EffectiveOrderTiers の役目。
+	// 弾くのは「運営が意図して入れないと現れない、明確に誤った値」＝負値だけ。
+	for i, t := range gp.Customer.OrderTiers {
+		if t.Count < 0 {
+			return fmt.Errorf("customer.orderTiers[%d].count は非負である必要 (got %d)。"+
+				"0 は「未設定」として既定へ読み替えられる", i, t.Count)
+		}
+		if t.Weight < 0 {
+			return fmt.Errorf("customer.orderTiers[%d].weight は非負である必要 (got %d)", i, t.Weight)
 		}
 	}
 	return nil
@@ -638,45 +754,47 @@ func DefaultParameters() GameParameters {
 			RosterWaitMs:     3000,
 			ReadyCountdownMs: 5000,
 		},
-		// OrderCount は plan-h30 で 2/2/1/4 → 3/3/2/6 へ引き上げた。
+		// 属性は**出現率だけ**（見た目の彩り）。注文数は OrderTiers が独立に決める（plan-h36）。
 		//
-		// お題の1語を短くした（level 17 で 85打鍵 → 43打鍵前後）ぶん、**難度と報酬は
-		// 「何語打つか」で持たせる**という方針転換による（plan-h30 §1）。1語が長いと
-		// 打ち切るまでスコアが1点も入らないが、短い語を複数打つ形なら1語ごとに加点が入り、
-		// ミスしても「次で取り返す」が成立する。
-		//
-		// ⚠ **DB の値がここに勝つ**。本番で戻すときはコードではなく config-front の
-		// customer.*.orderCount を 2/2/1/4 に戻す（ビルド不要・docs/runbook.md）。
+		// h30 は「1語を短くしたぶん、難度と報酬は何語打つかで持たせる」として
+		// 属性ごとの orderCount を 2/2/1/4 → 3/3/2/6 に上げたが、その持ち方だと
+		// **個数の段階を増やす＝キャラを増やす**ことになっていた。h36 で分離。
 		Customer: CustomerParams{
-			Total:   5000,
-			Normal:  AttributeSpec{Attribute: proto.AttrNormal, Weight: 70, OrderCount: 3},
-			Bonus:   AttributeSpec{Attribute: proto.AttrBonus, Weight: 15, OrderCount: 3},
-			Claimer: AttributeSpec{Attribute: proto.AttrClaimer, Weight: 10, OrderCount: 2},
-			Buzz:    AttributeSpec{Attribute: proto.AttrBuzz, Weight: 5, OrderCount: 6},
+			Total:      5000,
+			Normal:     AttributeSpec{Attribute: proto.AttrNormal, Weight: 70},
+			Bonus:      AttributeSpec{Attribute: proto.AttrBonus, Weight: 15},
+			Claimer:    AttributeSpec{Attribute: proto.AttrClaimer, Weight: 10},
+			Buzz:       AttributeSpec{Attribute: proto.AttrBuzz, Weight: 5},
+			OrderTiers: DefaultOrderTiers(),
 		},
-		// **100 : 22**（ミス1回 = たこ焼き 0.22 個ぶんの損）。
+		// **100 : 28**（ミス1回 = たこ焼き 0.28 個ぶんの損）。
 		//
 		// 判断基準は h26 から一貫して「**速さ型と正確型の平均順位が拮抗する点**」。
 		// 拮抗点はゲーム側を変えるたびに動くので、**お題カーブや heat カーブを触ったら
 		// 必ず `--sweep-miss` を回し直すこと**（下の経緯がその教訓そのもの）。
 		//
-		//	時期                     拮抗点   備考
-		//	h26（1語が長い辞書）        25
-		//	h30（1語を短く+orderCount）  30    ミスの罰が相対的に軽くなった
-		//	h32（heat を時間主軸へ）     22    ★ここで動いたのに測り直していなかった
-		//	h33（sim の人間モデル是正）   22    duel は凍結なので h33 では動かない
+		//	時期                       拮抗点   備考
+		//	h26（1語が長い辞書）          25
+		//	h30（1語を短く+orderCount）    30    ミスの罰が相対的に軽くなった
+		//	h32（heat を時間主軸へ）       22    ★ここで動いたのに測り直していなかった
+		//	h33（sim の人間モデル是正）     22    duel は凍結なので h33 では動かない
+		//	h36（注文数 2/4/8・平均4.5個）  28    1客あたりの加点が増え、罰がまた軽くなった
 		//
-		// 現 main での実測（`--sweep-miss --runs 10 --seed 42`・平均順位の差）:
+		// h36 後の実測（`--sweep-miss --runs 10 --seed 42`・平均順位の差）:
 		//
 		//	W_MISS   速さ型   正確型     差     上位10の速%
-		//	    22     49.4     50.6    -1.3        10%   ← 拮抗点
-		//	    25     56.4     43.5   +13.0         3%
-		//	    28     59.5     40.3   +19.3         0%
-		//	    30     62.5     37.2   +25.3         0%   ← 旧既定。正確型に +25 位傾く
+		//	    18     38.7     61.5   -22.8        62%
+		//	    22     43.5     56.7   -13.2        37%   ← h36 前の拮抗点。今は速さ型寄り
+		//	    25     47.3     52.8    -5.4        24%
+		//	    28     49.6     50.4    -0.8        16%   ← 拮抗点
+		//	    30     51.3     48.7    +2.6        12%
 		//
-		// h32 が難度を時間主軸にして**序盤から語を伸ばした**結果、ミスの絶対数が増えて
-		// 罰が再び重くなった、という向き。30 のままだと「ミスを恐れて慎重に打つだけ」の
-		// ゲームに寄り、企画が狙う「速さと正確さの切り替え」が起きない。
+		// h36 で注文数を 2/4/8（平均4.5個）にしたぶん**1客あたりの加点が増え**、
+		// ミスの罰が相対的にまた軽くなった、という向き（h30 のときと同じ形）。
+		// 22 のままだと速さ型に -13.2 位ぶん傾く。
+		//
+		// ⚠ **これは暫定値**。注文数の配分（customer.orderTiers）を実プレイで見てから
+		// 決める方針なので、配分が変われば拮抗点もまた動く。**必ず測り直すこと。**
 		//
 		// 🔴 **平均順位と「上位10の構成」は一致しない**（2つの型で分散が違う。
 		// ミス減点が速さ型の分散を抑えるため、正確型のほうが上振れしやすい）。
@@ -687,7 +805,7 @@ func DefaultParameters() GameParameters {
 		//（plan-h26 §3）。当日は config から調整でき、ビルドは要らない。
 		Score: ScoreParams{
 			WeightTakoyaki: 100,
-			WeightMiss:     22,
+			WeightMiss:     28,
 		},
 		Sanity: SanityParams{
 			MinMsPerWord: 200,

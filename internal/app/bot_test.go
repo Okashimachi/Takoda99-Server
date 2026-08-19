@@ -138,7 +138,8 @@ func TestReportBotTiers(t *testing.T) {
 	bp := game.DefaultParameters().Bot
 	tiers := bp.EffectiveTiers()
 	pool := odai.NewStaticPool()
-	orderCount := game.DefaultParameters().Customer.Normal.OrderCount
+	// 注文数は属性から切り離されている（plan-h36）。観測は「標準の段（4個）」で採る。
+	orderCount := game.DefaultParameters().Customer.EffectiveOrderTiers()[1].Count
 
 	t.Logf("=== 既定 tier（個体差 ±%.0f%%）===", bp.EffectiveIndividualSpread()*100)
 	for i, tr := range tiers {
@@ -146,7 +147,7 @@ func TestReportBotTiers(t *testing.T) {
 			game.BotTierLabel(i), tr.Weight, tr.MsPerKey, tr.MissRate, tr.HeatPenalty)
 	}
 
-	t.Logf("=== 通常客1人（%d語）を打ち切るまで ===", orderCount)
+	t.Logf("=== 標準の注文1件（%d語）を打ち切るまで ===", orderCount)
 	t.Logf("  %-5s %-6s %8s %8s %8s", "heat", "tier", "打鍵", "所要s", "ミス")
 	for _, heat := range []int{0, 4, 8, 12, 17} {
 		for i := range tiers {

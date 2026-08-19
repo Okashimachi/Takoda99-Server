@@ -287,6 +287,110 @@ func TestBackfillNewFields_BotTiersFromLegacySchema(t *testing.T) {
 	}
 }
 
+// TestBackfillNewFields_CustomerOrderTiersFromLegacySchema は「本番DB相当（customer グループが
+// **旧スキーマ**で入っており orderTiers が無い）JSON を読んでも壊れない」ことを固定する
+// （plan-h36 §3）。
+//
+// 🔴 **これが h36 で最も危険な箇所。** 経路は #124・h31 とまったく同じ:
+//
+//	本番DBの customer = {total, normal:{attribute,weight,orderCount}, bonus, claimer, buzz}
+//	  → グループは非ゼロなので backfillDefaults は触らない
+//	  → 新設の orderTiers は [{0,0} ×3] のまま
+//	  → 補正しないと**注文数0個の客が5000人**生まれて試合が壊れる
+//	  → かといって Validate で弾くと Load 失敗 → **score/cull/heat を含む全設定が内蔵デフォルトへ転落**
+//
+// 対処は「Validate で弾かず、ゼロを既定へ読み替える」。読み替えは
+// game.CustomerParams.EffectiveOrderTiers に一本化し、db 側でも同じものを当てて二重化している。
+func TestBackfillNewFields_CustomerOrderTiersFromLegacySchema(t *testing.T) {
+	def := game.DefaultParameters()
+
+	// 本番DB（2026-08-19 時点）を模した JSON。customer は h35 以前のスキーマのまま
+	// （属性ごとに orderCount を持ち、orderTiers は存在しない）。
+	raw, err := json.Marshal(def)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	m["customer"] = map[string]any{
+		"total": 5000,
+		// orderCount は h36 で廃止したキー。JSON の未知キーとして無視される。
+		"normal":  map[string]any{"attribute": "Normal", "weight": 70, "orderCount": 3},
+		"bonus":   map[string]any{"attribute": "Bonus", "weight": 15, "orderCount": 3},
+		"claimer": map[string]any{"attribute": "Claimer", "weight": 10, "orderCount": 2},
+		"buzz":    map[string]any{"attribute": "Buzz", "weight": 5, "orderCount": 6},
+	}
+	legacy, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var gp game.GameParameters
+	if err := json.Unmarshal(legacy, &gp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// 前提1: 旧キー(orderCount)は無視され、新フィールドはゼロのまま読まれる。
+	if gp.Customer.OrderTiers != ([game.OrderTierCount]game.OrderTier{}) {
+		t.Fatalf("前提が変わった: orderTiers がゼロでない %+v", gp.Customer.OrderTiers)
+	}
+	// 前提2: グループ単位の補完では埋まらない（total 等があるのでグループは非ゼロ）。
+	backfillDefaults(&gp, def)
+	if gp.Customer.OrderTiers != ([game.OrderTierCount]game.OrderTier{}) {
+		t.Fatalf("前提が変わった: グループ単位の補完で orderTiers が埋まっている %+v。"+
+			"backfillDefaults がフィールド単位になったならこの補完は不要になる", gp.Customer.OrderTiers)
+	}
+
+	// 🔴 ここが本題。**Validate は落ちてはいけない**（落ちると全設定が既定へ巻き戻る）。
+	if err := gp.Validate(); err != nil {
+		t.Fatalf("旧スキーマの customer で Validate が落ちた（#124 と同じ事故になる）: %v", err)
+	}
+
+	backfillNewFields(&gp, def)
+
+	if gp.Customer.OrderTiers != game.DefaultOrderTiers() {
+		t.Fatalf("orderTiers が既定へ補完されていない: %+v", gp.Customer.OrderTiers)
+	}
+	// DB にある値は保持する。
+	if gp.Customer.Total != 5000 || gp.Customer.Normal.Weight != 70 || gp.Customer.Buzz.Weight != 5 {
+		t.Fatalf("DB の customer の値が失われた: %+v", gp.Customer)
+	}
+	// 🔴 他のグループが巻き戻っていないこと（#124 で実際に起きた被害はこちら）。
+	if gp.Score != def.Score || gp.Cull != def.Cull || gp.Heat != def.Heat {
+		t.Fatal("customer 以外のグループが変化した")
+	}
+	if err := gp.Validate(); err != nil {
+		t.Fatalf("補完後に Validate を通らない: %v", err)
+	}
+	// 補完後の値で試合を作っても「0個の客」は生まれない（＝ゼロが素通りしていない）。
+	for i, tr := range gp.Customer.OrderTiers {
+		if tr.Count <= 0 {
+			t.Fatalf("orderTiers[%d].count が %d のまま（注文数0個の客が5000人生まれる）", i, tr.Count)
+		}
+	}
+}
+
+// orderTiers を運営が config から保存した後は、その値を既定へ巻き戻さないこと。
+func TestBackfillNewFields_KeepsOperatorOrderTiers(t *testing.T) {
+	def := game.DefaultParameters()
+	gp := game.DefaultParameters()
+	// 当日「重い客を減らした」つもりの値。
+	gp.Customer.OrderTiers = [game.OrderTierCount]game.OrderTier{
+		{Count: 2, Weight: 45},
+		{Count: 4, Weight: 45},
+		{Count: 8, Weight: 10},
+	}
+	want := gp.Customer.OrderTiers
+
+	backfillNewFields(&gp, def)
+
+	if gp.Customer.OrderTiers != want {
+		t.Fatalf("運営の orderTiers が既定で上書きされた: %+v", gp.Customer.OrderTiers)
+	}
+}
+
 // tiers を運営が config-front から保存した後は、その値を既定へ巻き戻さないこと。
 func TestBackfillNewFields_KeepsOperatorBotTiers(t *testing.T) {
 	def := game.DefaultParameters()

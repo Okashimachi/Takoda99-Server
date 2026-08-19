@@ -82,6 +82,7 @@ verify: ## 本番の実値を確認（コードの既定値は本番に効かな
 	@curl -s --max-time 10 $(BASE)/api/params \
 	  | jq '{configHash, score, odai, \
 	         cull: {targetAliveCount: [.cull.stages[].targetAliveCount], warnMaxIds: .cull.warnMaxIds}, \
+	         customer: {total: .customer.total, orderTiers: .customer.orderTiers}, \
 	         publish, sanity, heat}' \
 	  || echo "🔴 JSON が返らない。config の Validate に落ちている可能性（journalctl を見る）"
 	@echo "── 疎通 ──"
